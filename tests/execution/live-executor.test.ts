@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
-import { LiveExecutionError, LiveExecutor, liveConfigFromEnv } from "../../src/execution/live-executor.js";
+import { LiveExecutionError, LiveExecutor, liveConfigFromEnv, normalizeLiveOrderResult } from "../../src/execution/live-executor.js";
+import type { LiveOrderRequest } from "../../src/execution/live-executor.js";
 import type { BuyTradeDecision, TradeResult } from "../../src/domain/types.js";
 
 const buyDecision: BuyTradeDecision = {
@@ -19,6 +20,16 @@ const buyDecision: BuyTradeDecision = {
   estimatedNetReturn: 0.03003,
   tickSize: "0.001",
   negRisk: false
+};
+
+const liveOrder: LiveOrderRequest = {
+  tokenId: buyDecision.tokenId,
+  price: buyDecision.bestAsk,
+  size: buyDecision.shares,
+  orderType: "FOK",
+  tickSize: "0.001",
+  negRisk: false,
+  estimatedFee: buyDecision.estimatedFee
 };
 
 describe("LiveExecutor", () => {
@@ -66,7 +77,8 @@ describe("LiveExecutor", () => {
       size: 100,
       orderType: "FAK",
       tickSize: "0.001",
-      negRisk: false
+      negRisk: false,
+      estimatedFee: 0.0873
     });
   });
 
@@ -75,5 +87,25 @@ describe("LiveExecutor", () => {
 
     expect(error.code).toBe("LIVE_ORDER_REJECTED");
     expect(error.message).toBe("rejected");
+  });
+
+  test("rejects CLOB error objects without success false", () => {
+    expect(() => normalizeLiveOrderResult(liveOrder, { error: "not enough balance", status: 400 })).toThrow(LiveExecutionError);
+  });
+
+  test("does not treat unmatched live status as filled", () => {
+    const result = normalizeLiveOrderResult(liveOrder, {
+      success: true,
+      orderID: "order-1",
+      status: "unmatched"
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      fee: buyDecision.estimatedFee,
+      estimatedProfit: buyDecision.shares - buyDecision.notional - buyDecision.estimatedFee
+    });
   });
 });

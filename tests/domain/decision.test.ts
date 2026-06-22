@@ -82,9 +82,27 @@ describe("buildTradeDecision", () => {
   });
 
   test("does not count worse ask levels as size available at the best edge", () => {
-    const decision = buildTradeDecision(match, selected, book([[0.97, 1], [0.98, 200]]), thresholds);
+    const decision = buildTradeDecision(match, selected, book([[0.97, 1], [0.98, 200]]), {
+      ...thresholds,
+      minimumNetReturn: 0.02
+    });
 
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+  });
+
+  test("uses the next profitable ask level when best ask depth is too small", () => {
+    const decision = buildTradeDecision(match, selected, book([[0.97, 1], [0.98, 200]]), {
+      ...thresholds,
+      minimumNetReturn: 0
+    });
+
+    expect(decision).toMatchObject({
+      action: "BUY",
+      bestAsk: 0.98,
+      availableSize: 200,
+      shares: expect.closeTo(97 / 0.98, 8),
+      notional: 97
+    });
   });
 
   test("net return below minimum returns RETURN_TOO_LOW", () => {

@@ -145,6 +145,26 @@ describe("selectLossRequiresCandidates", () => {
     }));
   });
 
+  test("spread tight maps Yes/No outcomes to spread question direction", () => {
+    const draw = { ...match, homeGoals: 0, awayGoals: 0 };
+    const candidates = selectLossRequiresCandidates(draw, [
+      market({
+        question: "Spread: Strong (-1.5)",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["strong-minus-yes", "strong-minus-no"],
+        line: -1.5
+      })
+    ]);
+
+    expect(candidates).toContainEqual(expect.objectContaining({
+      strategy: "spread_tight_loss_ge2",
+      outcome: "No",
+      tokenId: "strong-minus-no",
+      lossRequiresGoals: 2,
+      spreadSide: "other_side"
+    }));
+  });
+
   test("locked overs are included when the market condition is already true", () => {
     const candidates = selectLossRequiresCandidates({ ...match, homeGoals: 1, awayGoals: 1 }, [
       market({

@@ -25,6 +25,7 @@ export interface LiveOrderRequest {
   orderType: LiveOrderType;
   tickSize: "0.1" | "0.01" | "0.001" | "0.0001";
   negRisk: boolean;
+  estimatedFee: number;
 }
 
 export interface LiveClobClient {
@@ -69,7 +70,8 @@ export class LiveExecutor {
       size: decision.shares,
       orderType: options.orderType ?? "FOK",
       tickSize: decision.tickSize ?? "0.001",
-      negRisk: decision.negRisk ?? false
+      negRisk: decision.negRisk ?? false,
+      estimatedFee: decision.estimatedFee
     });
   }
 }
@@ -120,7 +122,7 @@ function requireLiveConfig(config: LiveExecutorConfig): RequiredLiveExecutorConf
 
 async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Promise<LiveClobClient> {
   try {
-    const clob = await import("@polymarket/clob-client");
+    const clob = await import("@polymarket/clob-client-v2");
     const walletModule = await import("@ethersproject/wallet");
     const signer = new walletModule.Wallet(config.privateKey);
     const creds = {
@@ -128,7 +130,15 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
       secret: config.apiSecret,
       passphrase: config.passphrase
     };
-    const client = new clob.ClobClient(config.host, config.chainId, signer, creds, config.signatureType, config.funderAddress);
+    const clientOptions = {
+      host: config.host,
+      chain: config.chainId as typeof clob.Chain.POLYGON,
+      signer,
+      creds,
+      signatureType: config.signatureType as typeof clob.SignatureTypeV2.POLY_PROXY,
+      retryOnError: true
+    };
+    const client = new clob.ClobClient(config.funderAddress ? { ...clientOptions, funderAddress: config.funderAddress } : clientOptions);
 
     return {
       async placeLimitBuy(order: LiveOrderRequest): Promise<TradeResult> {
@@ -144,31 +154,40 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
           clob.OrderType[order.orderType]
         );
 
-        if (raw && typeof raw === "object" && "success" in raw && raw.success === false) {
-          throw new LiveExecutionError("LIVE_ORDER_REJECTED", String(raw.errorMsg ?? raw.error ?? "Polymarket rejected live order"), { raw });
-        }
-
-        const orderId = stringField(raw, "orderID") ?? stringField(raw, "orderId") ?? "live-order-unknown";
-        const status = stringField(raw, "status")?.toLowerCase().includes("match") ? "filled" : "posted";
-        return {
-          mode: "live",
-          status,
-          orderId,
-          tokenId: order.tokenId,
-          price: order.price,
-          shares: order.size,
-          notional: order.price * order.size,
-          fee: 0,
-          estimatedPayout: order.size,
-          estimatedProfit: order.size - order.price * order.size,
-          raw
-        };
+        return normalizeLiveOrderResult(order, raw);
       }
     };
   } catch (error) {
     if (error instanceof LiveExecutionError) throw error;
     throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", `Unable to initialize Polymarket CLOB client: ${String(error)}`, { raw: error });
   }
+}
+
+export function normalizeLiveOrderResult(order: LiveOrderRequest, raw: unknown): TradeResult {
+  if (raw && typeof raw === "object") {
+    const record = raw as Record<string, unknown>;
+    if (record.success === false || typeof record.error === "string" || typeof record.errorMsg === "string") {
+      throw new LiveExecutionError("LIVE_ORDER_REJECTED", String(record.errorMsg ?? record.error ?? "Polymarket rejected live order"), { raw });
+    }
+  }
+
+  const orderId = stringField(raw, "orderID") ?? stringField(raw, "orderId") ?? stringField(raw, "id") ?? "live-order-unknown";
+  const rawStatus = stringField(raw, "status")?.toLowerCase() ?? "";
+  const status = rawStatus === "matched" || rawStatus === "filled" ? "filled" : "posted";
+  const notional = order.price * order.size;
+  return {
+    mode: "live",
+    status,
+    orderId,
+    tokenId: order.tokenId,
+    price: order.price,
+    shares: order.size,
+    notional,
+    fee: order.estimatedFee,
+    estimatedPayout: order.size,
+    estimatedProfit: order.size - notional - order.estimatedFee,
+    raw
+  };
 }
 
 function stringField(value: unknown, field: string): string | undefined {

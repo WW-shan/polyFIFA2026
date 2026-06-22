@@ -1,6 +1,13 @@
 import { deflateSync } from "node:zlib";
 import { describe, expect, test } from "vitest";
-import { decodeInitialStatePayload, extractNextInitialState, findSpreadMarkets, findStrategyMarkets, parseSpreadLine } from "../../src/polymarket/event-page.js";
+import {
+  decodeInitialStatePayload,
+  extractNextInitialState,
+  findMatchState,
+  findSpreadMarkets,
+  findStrategyMarkets,
+  parseSpreadLine
+} from "../../src/polymarket/event-page.js";
 
 describe("event page initial state parsing", () => {
   test("extracts base64 zlib initialState and normalizes spread markets", () => {
@@ -16,7 +23,8 @@ describe("event page initial state parsing", () => {
               question: "Spread: Spain (-3.5)",
               conditionId: "cond-spain-3p5",
               clobTokenIds: "[\"token-spain-3p5\",\"token-saudi-plus-3p5\"]",
-              outcomes: "[\"Spain\",\"Saudi Arabia\"]",
+          outcomes: "[\"Spain\",\"Saudi Arabia\"]",
+              orderPriceMinTickSize: 0.01,
               tickSize: "0.001",
               negRisk: false
             }
@@ -44,6 +52,25 @@ describe("event page initial state parsing", () => {
       tickSize: "0.001",
       negRisk: false
     });
+  });
+
+  test("normalizes numeric Polymarket order price tick size when tickSize is absent", () => {
+    const markets = findStrategyMarkets({
+      markets: [
+        {
+          eventSlug: "fifwc-fra-irq-2026-06-22",
+          slug: "fifwc-fra-irq-2026-06-22-fra",
+          question: "Will France win on 2026-06-22?",
+          conditionId: "cond-france",
+          clobTokenIds: "[\"yes\",\"no\"]",
+          outcomes: "[\"Yes\",\"No\"]",
+          sportsMarketType: "moneyline",
+          orderPriceMinTickSize: 0.01
+        }
+      ]
+    }, "fifwc-fra-irq-2026-06-22");
+
+    expect(markets[0]?.tickSize).toBe("0.01");
   });
 
   test("parses spread line from question text", () => {
@@ -95,5 +122,58 @@ describe("event page initial state parsing", () => {
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "total-2pt5", marketType: "total", line: 2.5 }));
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "weak-team-total-1pt5", marketType: "team_total", team: "Weak", line: 1.5 }));
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "btts", marketType: "btts" }));
+  });
+
+  test("extracts live match state from sports page games payload", () => {
+    const state = {
+      games: {
+        "fifwc-fra-irq-2026-06-22": {
+          event: "fifwc-fra-irq-2026-06-22",
+          live: true,
+          ended: false,
+          score: "3-1",
+          period: "2H",
+          elapsed: "88'"
+        }
+      },
+      events: {
+        "fifwc-fra-irq-2026-06-22": {
+          slug: "fifwc-fra-irq-2026-06-22",
+          title: "France vs. Iraq"
+        }
+      }
+    };
+
+    expect(findMatchState(state, "fifwc-fra-irq-2026-06-22")).toEqual({
+      eventSlug: "fifwc-fra-irq-2026-06-22",
+      homeTeam: "France",
+      awayTeam: "Iraq",
+      homeGoals: 3,
+      awayGoals: 1,
+      minute: 88,
+      period: "2H",
+      isLive: true
+    });
+  });
+
+  test("parses stoppage-time elapsed values into absolute minutes", () => {
+    const state = {
+      games: {
+        "fifwc-fra-irq-2026-06-22": {
+          event: "fifwc-fra-irq-2026-06-22",
+          live: true,
+          score: "1-0",
+          period: "2H",
+          elapsed: "90+4'"
+        }
+      },
+      events: {
+        "fifwc-fra-irq-2026-06-22": {
+          title: "France vs. Iraq"
+        }
+      }
+    };
+
+    expect(findMatchState(state, "fifwc-fra-irq-2026-06-22")?.minute).toBe(94);
   });
 });

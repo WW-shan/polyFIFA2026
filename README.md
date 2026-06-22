@@ -70,7 +70,17 @@ npm run cli -- \
   --stake 97
 ```
 
-If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then picks the highest estimated net-return BUY.
+For live page state, `--event-slug` can replace `--match-file`:
+
+```bash
+npm run cli -- \
+  --mode live \
+  --event-slug fifwc-fra-irq-2026-06-22 \
+  --stake 5 \
+  --order-type FOK
+```
+
+If `--event-slug` is used, the CLI fetches the Polymarket sports page, extracts the current `score`, `period`, and `elapsed` minute, then extracts strategy markets from the same event. If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then picks the highest estimated net-return BUY.
 
 ## Live Smoke Guard
 
@@ -80,7 +90,7 @@ Live trading requires explicit environment credentials and is not faked by tests
 npm run live:smoke
 ```
 
-Without credentials this must fail clearly with `LIVE_CREDENTIALS_MISSING`. With real credentials, it attempts the configured FOK/FAK order through `@polymarket/clob-client`.
+Without credentials this must fail clearly with `LIVE_CREDENTIALS_MISSING`. With real credentials, it attempts the configured FOK/FAK order through `@polymarket/clob-client-v2`.
 
 Required live env vars:
 
@@ -95,6 +105,8 @@ Optional live env vars:
 - `POLY_SIGNATURE_TYPE` defaults to `1`
 - `POLY_CHAIN_ID` defaults to `137`
 - `POLY_CLOB_HOST` defaults to `https://clob.polymarket.com`
+
+Polymarket CLOB v2 may reject older proxy/profile makers with `maker address not allowed, please use the deposit wallet flow`. In that case, configure the deposit-wallet/relayer flow in Polymarket settings, fund that wallet, then use its allowed maker address as `POLY_FUNDER_ADDRESS` with the matching signature type/API credentials.
 
 ## Network Proxy
 

@@ -111,7 +111,8 @@ function spreadCandidates(match: MatchState, market: StrategyMarket): SelectedSt
   if (currentMargin >= requiredMargin) {
     const lossRequiresGoals = currentMargin - requiredMargin + 1;
     if (lossRequiresGoals >= 2) {
-      const candidate = toCandidate({ ...market, line }, "spread_tight_loss_ge2", spreadTeamName, lossRequiresGoals);
+      const outcome = spreadCoverOutcome(market, spreadTeamName);
+      const candidate = outcome ? toCandidate({ ...market, line }, "spread_tight_loss_ge2", outcome, lossRequiresGoals) : null;
       if (candidate) {
         candidate.spreadSide = "favorite_cover";
         candidates.push(candidate);
@@ -120,7 +121,7 @@ function spreadCandidates(match: MatchState, market: StrategyMarket): SelectedSt
   } else {
     const lossRequiresGoals = requiredMargin - currentMargin;
     if (lossRequiresGoals >= 2) {
-      const otherOutcome = market.outcomes.find((outcome) => normalize(outcome) !== normalize(spreadTeamName));
+      const otherOutcome = spreadOtherSideOutcome(market, spreadTeamName);
       if (otherOutcome) {
         const candidate = toCandidate({ ...market, line }, "spread_tight_loss_ge2", otherOutcome, lossRequiresGoals);
         if (candidate) {
@@ -132,6 +133,18 @@ function spreadCandidates(match: MatchState, market: StrategyMarket): SelectedSt
   }
 
   return candidates;
+}
+
+function spreadCoverOutcome(market: StrategyMarket, spreadTeamName: string): string | null {
+  const yesOutcome = market.outcomes.find((outcome) => normalize(outcome) === "yes");
+  if (yesOutcome) return yesOutcome;
+  return market.outcomes.find((outcome) => normalize(outcome) === normalize(spreadTeamName)) ?? null;
+}
+
+function spreadOtherSideOutcome(market: StrategyMarket, spreadTeamName: string): string | null {
+  const noOutcome = market.outcomes.find((outcome) => normalize(outcome) === "no");
+  if (noOutcome) return noOutcome;
+  return market.outcomes.find((outcome) => normalize(outcome) !== normalize(spreadTeamName)) ?? null;
 }
 
 function teamTotalCandidates(match: MatchState, market: StrategyMarket, includeLocked: boolean): SelectedStrategyMarket[] {

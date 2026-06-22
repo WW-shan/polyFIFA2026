@@ -33,23 +33,26 @@ export function buildTradeDecision(
     return noTrade("DEPTH_TOO_SMALL", match.eventSlug, "Orderbook asks have no positive size");
   }
 
-  const bestAsk = asks[0]?.price;
-  if (bestAsk === undefined) {
+  const firstAsk = asks[0]?.price;
+  if (firstAsk === undefined) {
     return noTrade("ORDERBOOK_UNAVAILABLE", match.eventSlug, "Orderbook has no best ask");
   }
 
-  if (bestAsk > thresholds.maxEntryPrice) {
-    return noTrade("PRICE_TOO_HIGH", match.eventSlug, `Best ask ${bestAsk} exceeds max ${thresholds.maxEntryPrice}`);
+  if (firstAsk > thresholds.maxEntryPrice) {
+    return noTrade("PRICE_TOO_HIGH", match.eventSlug, `Best ask ${firstAsk} exceeds max ${thresholds.maxEntryPrice}`);
   }
 
-  const estimatedNetReturn = netReturnRate(bestAsk);
-  if (estimatedNetReturn < thresholds.minimumNetReturn) {
-    return noTrade("RETURN_TOO_LOW", match.eventSlug, `Net return ${estimatedNetReturn} below minimum ${thresholds.minimumNetReturn}`);
+  const executableLevel = findExecutableAskLevel(asks, thresholds);
+  if (!executableLevel) {
+    const eligibleReturns = asks.filter((ask) => ask.price <= thresholds.maxEntryPrice).map((ask) => netReturnRate(ask.price));
+    const bestReturn = eligibleReturns[0];
+    if (bestReturn !== undefined && bestReturn < thresholds.minimumNetReturn) {
+      return noTrade("RETURN_TOO_LOW", match.eventSlug, `Net return ${bestReturn} below minimum ${thresholds.minimumNetReturn}`);
+    }
+    return noTrade("DEPTH_TOO_SMALL", match.eventSlug, "No eligible ask level has enough same-price notional");
   }
 
-  const availableSize = asks
-    .filter((ask) => ask.price === bestAsk)
-    .reduce((total, ask) => total + ask.size, 0);
+  const { price: bestAsk, availableSize, estimatedNetReturn } = executableLevel;
   const shares = Math.min(thresholds.maxNotional / bestAsk, availableSize);
   const notional = shares * bestAsk;
 
@@ -88,6 +91,26 @@ function sortedPositiveAsks(asks: readonly PriceLevel[]): PriceLevel[] {
   return asks
     .filter((ask) => Number.isFinite(ask.price) && Number.isFinite(ask.size) && ask.price > 0 && ask.price < 1 && ask.size > 0)
     .sort((a, b) => a.price - b.price);
+}
+
+function findExecutableAskLevel(
+  asks: readonly PriceLevel[],
+  thresholds: DecisionThresholds
+): { price: number; availableSize: number; estimatedNetReturn: number } | null {
+  const prices = [...new Set(asks.map((ask) => ask.price))].sort((a, b) => a - b);
+  for (const price of prices) {
+    if (price > thresholds.maxEntryPrice) continue;
+    const estimatedNetReturn = netReturnRate(price);
+    if (estimatedNetReturn < thresholds.minimumNetReturn) continue;
+    const availableSize = asks
+      .filter((ask) => ask.price === price)
+      .reduce((total, ask) => total + ask.size, 0);
+    const notional = Math.min(thresholds.maxNotional / price, availableSize) * price;
+    if (notional >= thresholds.minimumNotional) {
+      return { price, availableSize, estimatedNetReturn };
+    }
+  }
+  return null;
 }
 
 function noTrade(reason: NoTradeDecision["reason"], eventSlug: string, details?: string): NoTradeDecision {

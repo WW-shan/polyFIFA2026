@@ -1,5 +1,5 @@
 import { inflateSync, unzipSync } from "node:zlib";
-import type { SpreadMarket, StrategyMarket, StrategyMarketType } from "../domain/types.js";
+import type { MatchPeriod, MatchState, SpreadMarket, StrategyMarket, StrategyMarketType } from "../domain/types.js";
 import { fetchText } from "./http.js";
 
 export async function fetchEventSpreadMarkets(eventSlug: string): Promise<SpreadMarket[]> {
@@ -14,6 +14,15 @@ export async function fetchEventStrategyMarkets(eventSlug: string): Promise<Stra
   const payload = extractNextInitialState(html);
   const state = decodeInitialStatePayload(payload);
   return findStrategyMarkets(state, eventSlug);
+}
+
+export async function fetchEventMatchState(eventSlug: string): Promise<MatchState> {
+  const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
+  const payload = extractNextInitialState(html);
+  const state = decodeInitialStatePayload(payload);
+  const match = findMatchState(state, eventSlug);
+  if (!match) throw new Error(`MATCH_STATE_NOT_FOUND: ${eventSlug}`);
+  return match;
 }
 
 export function extractNextInitialState(html: string): string {
@@ -58,6 +67,34 @@ export function findStrategyMarkets(state: unknown, eventSlug?: string): Strateg
   return dedupeMarkets(markets);
 }
 
+export function findMatchState(state: unknown, eventSlug: string): MatchState | null {
+  const game = findGameRecord(state, eventSlug);
+  if (!game) return null;
+
+  const score = parseScore(stringValue(game.score));
+  if (!score) return null;
+
+  const title = findEventTitle(state, eventSlug);
+  const teams = parseTitleTeams(title) ?? findTeamsFromMarkets(state, eventSlug);
+  if (!teams) return null;
+
+  const period = parsePeriod(stringValue(game.period));
+  const minute = parseElapsedMinute(game.elapsed ?? game.minute);
+  const live = typeof game.live === "boolean" ? game.live : game.gameState === "live" || game.gameState === "in-progress";
+  const ended = game.ended === true || period === "FT";
+
+  return {
+    eventSlug,
+    homeTeam: teams.homeTeam,
+    awayTeam: teams.awayTeam,
+    homeGoals: score.homeGoals,
+    awayGoals: score.awayGoals,
+    minute,
+    period,
+    isLive: live && !ended
+  };
+}
+
 export function normalizeStrategyMarket(value: unknown, eventSlug?: string): StrategyMarket | null {
   if (!isRecord(value)) return null;
 
@@ -89,7 +126,7 @@ export function normalizeStrategyMarket(value: unknown, eventSlug?: string): Str
   if (line !== null) market.line = line;
   const team = marketType === "team_total" ? parseTeamTotalTeam(question) : undefined;
   if (team) market.team = team;
-  const tickSize = tickSizeValue(value.tickSize ?? value.tick_size);
+  const tickSize = tickSizeValue(value.tickSize ?? value.tick_size ?? value.orderPriceMinTickSize ?? value.order_price_min_tick_size);
   if (tickSize) market.tickSize = tickSize;
   if (typeof value.negRisk === "boolean") market.negRisk = value.negRisk;
   if (typeof value.neg_risk === "boolean") market.negRisk = value.neg_risk;
@@ -126,7 +163,7 @@ export function normalizeSpreadMarket(value: unknown, eventSlug?: string): Sprea
     line: parsedLine
   };
 
-  const tickSize = tickSizeValue(value.tickSize ?? value.tick_size);
+  const tickSize = tickSizeValue(value.tickSize ?? value.tick_size ?? value.orderPriceMinTickSize ?? value.order_price_min_tick_size);
   if (tickSize) market.tickSize = tickSize;
   if (typeof value.negRisk === "boolean") market.negRisk = value.negRisk;
   if (typeof value.neg_risk === "boolean") market.negRisk = value.neg_risk;
@@ -167,6 +204,94 @@ function parseTeamTotalTeam(question: string): string | undefined {
   if (!afterColon) return undefined;
   const match = afterColon.match(/^(.+?)\s+O\/U\b/i);
   return match?.[1]?.trim();
+}
+
+function findGameRecord(state: unknown, eventSlug: string): Record<string, unknown> | null {
+  const direct = findGamesMapRecord(state, eventSlug);
+  if (direct) return direct;
+
+  let match: Record<string, unknown> | null = null;
+  walk(state, (value) => {
+    if (match || !isRecord(value)) return;
+    if (value.event === eventSlug && (typeof value.score === "string" || value.score !== undefined)) {
+      match = value;
+    }
+  });
+  return match;
+}
+
+function findGamesMapRecord(state: unknown, eventSlug: string): Record<string, unknown> | null {
+  let match: Record<string, unknown> | null = null;
+  walk(state, (value) => {
+    if (match || !isRecord(value)) return;
+    const games = value.games;
+    if (!isRecord(games)) return;
+    const game = games[eventSlug];
+    if (isRecord(game)) match = game;
+  });
+  return match;
+}
+
+function findEventTitle(state: unknown, eventSlug: string): string | null {
+  let title: string | null = null;
+  walk(state, (value) => {
+    if (title || !isRecord(value)) return;
+    const events = value.events;
+    if (isRecord(events) && isRecord(events[eventSlug])) {
+      title = stringValue(events[eventSlug].title ?? events[eventSlug].name) ?? null;
+      return;
+    }
+    if (value.slug === eventSlug || value.ticker === eventSlug) {
+      title = stringValue(value.title ?? value.name) ?? null;
+    }
+  });
+  return title;
+}
+
+function findTeamsFromMarkets(state: unknown, eventSlug: string): { homeTeam: string; awayTeam: string } | null {
+  let teams: { homeTeam: string; awayTeam: string } | null = null;
+  walk(state, (value) => {
+    if (teams || !isRecord(value)) return;
+    const marketEventSlug = stringValue(value.eventSlug ?? value.event_slug ?? value.gameSlug);
+    const events = Array.isArray(value.events) ? value.events : [];
+    const belongsToEvent = marketEventSlug === eventSlug || events.some((event) => isRecord(event) && event.slug === eventSlug);
+    if (!belongsToEvent || !Array.isArray(value.teams)) return;
+
+    const home = value.teams.find((team) => isRecord(team) && team.hostStatus === "home");
+    const away = value.teams.find((team) => isRecord(team) && team.hostStatus === "away");
+    const homeTeam = isRecord(home) ? stringValue(home.name) : undefined;
+    const awayTeam = isRecord(away) ? stringValue(away.name) : undefined;
+    if (homeTeam && awayTeam) teams = { homeTeam, awayTeam };
+  });
+  return teams;
+}
+
+function parseTitleTeams(title: string | null): { homeTeam: string; awayTeam: string } | null {
+  if (!title) return null;
+  const match = title.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s+-\s+.+)?$/i);
+  if (!match?.[1] || !match[2]) return null;
+  return { homeTeam: match[1].trim(), awayTeam: match[2].trim() };
+}
+
+function parseScore(score: string | undefined): { homeGoals: number; awayGoals: number } | null {
+  if (!score) return null;
+  const match = score.match(/^\s*(\d+)\s*[-:]\s*(\d+)\s*$/);
+  if (!match?.[1] || !match[2]) return null;
+  return { homeGoals: Number(match[1]), awayGoals: Number(match[2]) };
+}
+
+function parsePeriod(period: string | undefined): MatchPeriod {
+  const normalized = period?.trim().toUpperCase();
+  if (normalized === "1H" || normalized === "2H" || normalized === "ET" || normalized === "FT") return normalized;
+  return "UNKNOWN";
+}
+
+function parseElapsedMinute(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  if (typeof value !== "string") return 0;
+  const match = value.trim().match(/^(\d+)(?:\s*\+\s*(\d+))?/);
+  if (!match?.[1]) return 0;
+  return Number(match[1]) + (match[2] ? Number(match[2]) : 0);
 }
 
 function inflateOrUnzip(buffer: Buffer): Buffer {
@@ -223,7 +348,8 @@ function numberValue(value: unknown): number | null {
 }
 
 function tickSizeValue(value: unknown): SpreadMarket["tickSize"] | undefined {
-  return value === "0.1" || value === "0.01" || value === "0.001" || value === "0.0001" ? value : undefined;
+  const parsed = typeof value === "number" ? value.toString() : value;
+  return parsed === "0.1" || parsed === "0.01" || parsed === "0.001" || parsed === "0.0001" ? parsed : undefined;
 }
 
 function parseJsonMaybe(value: string): unknown {

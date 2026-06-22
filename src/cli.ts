@@ -5,7 +5,7 @@ import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket,
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
-import { fetchEventStrategyMarkets } from "./polymarket/event-page.js";
+import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
 import { buildThresholds, runDecisionFlow } from "./runner.js";
 import { LiveExecutor } from "./execution/live-executor.js";
 
@@ -19,7 +19,8 @@ type Mode = "paper" | "live";
 
 interface ParsedArgs {
   mode: Mode;
-  matchFile: string;
+  matchFile?: string;
+  eventSlug?: string;
   marketsFile?: string;
   orderbookFile?: string;
   stake: number;
@@ -30,10 +31,20 @@ interface ParsedArgs {
   orderType: LiveOrderType;
 }
 
-export async function runCli(argv = process.argv.slice(2), env: Record<string, string | undefined> = process.env): Promise<CliResult> {
+export interface CliDependencies {
+  fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
+}
+
+export async function runCli(
+  argv = process.argv.slice(2),
+  env: Record<string, string | undefined> = process.env,
+  deps: CliDependencies = {}
+): Promise<CliResult> {
   try {
     const args = parseArgs(argv);
-    const match = await readJsonFile<MatchState>(args.matchFile);
+    const match = args.matchFile
+      ? await readJsonFile<MatchState>(args.matchFile)
+      : await (deps.fetchMatchState ?? fetchEventMatchState)(required(args.eventSlug, "--event-slug"));
     const markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : await fetchEventStrategyMarkets(match.eventSlug);
     const thresholds = buildThresholds(args.stake, thresholdOverridesFromArgs(args));
     const orderbooks = args.orderbookFile
@@ -68,14 +79,16 @@ function ok(value: unknown): CliResult {
   return { exitCode: 0, stdout: `${JSON.stringify(value, null, 2)}\n`, stderr: "" };
 }
 
-async function fetchCandidateOrderbooks(
+export async function fetchCandidateOrderbooks(
   match: MatchState,
   markets: readonly StrategyMarket[],
-  watchStartMinute: number
+  watchStartMinute: number,
+  fetcher: (tokenId: string) => Promise<OrderbookSnapshot> = fetchOrderbook
 ): Promise<OrderbookSnapshot[]> {
   const candidates = selectLossRequiresCandidates(match, markets, { watchStartMinute });
   const tokenIds = [...new Set(candidates.map((candidate) => candidate.tokenId))];
-  return Promise.all(tokenIds.map((tokenId) => fetchOrderbook(tokenId)));
+  const results = await Promise.allSettled(tokenIds.map((tokenId) => fetcher(tokenId)));
+  return results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 }
 
 function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Record<string, unknown> {
@@ -142,15 +155,21 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   const mode = parseMode(raw.mode ?? "paper");
-  const matchFile = required(raw.matchFile, "--match-file");
+  if (!raw.matchFile && !raw.eventSlug) {
+    throw new Error("--match-file or --event-slug is required");
+  }
+  if (raw.matchFile && raw.eventSlug) {
+    throw new Error("Use only one of --match-file or --event-slug");
+  }
   const orderType = parseOrderType(raw.orderType ?? "FOK");
 
   const parsed: ParsedArgs = {
     mode,
-    matchFile,
     stake: numberArg(raw.stake ?? "97", "--stake"),
     orderType
   };
+  if (raw.matchFile) parsed.matchFile = raw.matchFile;
+  if (raw.eventSlug) parsed.eventSlug = raw.eventSlug;
   if (raw.marketsFile) parsed.marketsFile = raw.marketsFile;
   if (raw.orderbookFile) parsed.orderbookFile = raw.orderbookFile;
   if (raw.maxEntryPrice) parsed.maxEntryPrice = numberArg(raw.maxEntryPrice, "--max-entry-price");
