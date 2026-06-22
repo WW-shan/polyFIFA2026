@@ -1,6 +1,6 @@
 import { inflateSync, unzipSync } from "node:zlib";
 import type { MatchPeriod, MatchState, SpreadMarket, StrategyMarket, StrategyMarketType } from "../domain/types.js";
-import { fetchText } from "./http.js";
+import { fetchJson, fetchText } from "./http.js";
 
 export async function fetchEventSpreadMarkets(eventSlug: string): Promise<SpreadMarket[]> {
   const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
@@ -10,10 +10,20 @@ export async function fetchEventSpreadMarkets(eventSlug: string): Promise<Spread
 }
 
 export async function fetchEventStrategyMarkets(eventSlug: string): Promise<StrategyMarket[]> {
-  const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
-  const payload = extractNextInitialState(html);
-  const state = decodeInitialStatePayload(payload);
-  return findStrategyMarkets(state, eventSlug);
+  let primaryError: unknown;
+  try {
+    const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
+    const payload = extractNextInitialState(html);
+    const state = decodeInitialStatePayload(payload);
+    const markets = findStrategyMarkets(state, eventSlug);
+    if (markets.length > 0) return markets;
+  } catch (error) {
+    primaryError = error;
+  }
+
+  const fallbackMarkets = await fetchGammaEventStrategyMarkets(eventSlug);
+  if (fallbackMarkets.length > 0 || !primaryError) return fallbackMarkets;
+  throw primaryError;
 }
 
 export async function fetchEventMatchState(eventSlug: string): Promise<MatchState> {
@@ -23,6 +33,11 @@ export async function fetchEventMatchState(eventSlug: string): Promise<MatchStat
   const match = findMatchState(state, eventSlug);
   if (!match) throw new Error(`MATCH_STATE_NOT_FOUND: ${eventSlug}`);
   return match;
+}
+
+async function fetchGammaEventStrategyMarkets(eventSlug: string): Promise<StrategyMarket[]> {
+  const event = await fetchJson<unknown>(`https://gamma-api.polymarket.com/events/slug/${encodeURIComponent(eventSlug)}`);
+  return findStrategyMarkets(event, eventSlug);
 }
 
 export function extractNextInitialState(html: string): string {

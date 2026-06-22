@@ -1,13 +1,18 @@
 import { deflateSync } from "node:zlib";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   decodeInitialStatePayload,
   extractNextInitialState,
+  fetchEventStrategyMarkets,
   findMatchState,
   findSpreadMarkets,
   findStrategyMarkets,
   parseSpreadLine
 } from "../../src/polymarket/event-page.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("event page initial state parsing", () => {
   test("extracts base64 zlib initialState and normalizes spread markets", () => {
@@ -71,6 +76,40 @@ describe("event page initial state parsing", () => {
     }, "fifwc-fra-irq-2026-06-22");
 
     expect(markets[0]?.tickSize).toBe("0.01");
+  });
+
+  test("falls back to Gamma event markets when the sports page has no strategy markets", async () => {
+    const emptyState = deflateSync(JSON.stringify({ markets: [] })).toString("base64");
+    const html = `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialState: emptyState } } })}</script></html>`;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(html, { status: 200 })).mockResolvedValueOnce(new Response(JSON.stringify({
+      slug: "fifwc-fra-irq-2026-06-22",
+      markets: [
+        {
+          slug: "fifwc-fra-irq-2026-06-22-fra",
+          question: "Will France win on 2026-06-22?",
+          conditionId: "cond-france",
+          clobTokenIds: "[\"yes\",\"no\"]",
+          outcomes: "[\"Yes\",\"No\"]",
+          sportsMarketType: "moneyline",
+          orderPriceMinTickSize: 0.01,
+          negRisk: true
+        }
+      ]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    const markets = await fetchEventStrategyMarkets("fifwc-fra-irq-2026-06-22");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(markets).toEqual([
+      expect.objectContaining({
+        eventSlug: "fifwc-fra-irq-2026-06-22",
+        marketSlug: "fifwc-fra-irq-2026-06-22-fra",
+        marketType: "moneyline",
+        clobTokenIds: ["yes", "no"],
+        tickSize: "0.01",
+        negRisk: true
+      })
+    ]);
   });
 
   test("parses spread line from question text", () => {
