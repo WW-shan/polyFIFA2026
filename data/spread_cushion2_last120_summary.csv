@@ -1,0 +1,7 @@
+date,title,score,margin,winner,market_type,question,line,required_margin,spread_cushion,price_history_last120,price_history_min120,buy_trades_120,buy_size_120,buy_min_price_120,buy_last_price_120,net_roi_min_pct_120,net_roi_last_pct_120,trades_le_0.99_120,size_le_0.99_120,trades_le_0.98_120,size_le_0.98_120,trades_le_0.97_120,size_le_0.97_120,trades_le_0.995_120,size_le_0.995_120,trades_le_0.999_120,size_le_0.999_120,page_errors,error
+2026-06-14,Germany vs. Curaçao,7-1,6,Germany,spread_cushion2,Spread: Germany (-3.5),-3.5,4,2,0.9995,0.9995,13,16330.57,0.999,0.999,0.0971,0.0971,0,0,0,0,0,0,0,0,13,16330.57,[],
+2026-06-15,Sweden vs. Tunisia,5-1,4,Sweden,spread_cushion2,Spread: Sweden (-1.5),-1.5,2,2,0.9995,0.9995,8,680.28,0.999,0.999,0.0971,0.0971,0,0,0,0,0,0,0,0,8,680.28,[],
+2026-06-18,Canada vs. Qatar,6-0,6,Canada,spread_cushion2,Spread: Canada (-3.5),-3.5,4,2,0.9995,0.9995,1,45.97,0.999,0.999,0.0971,0.0971,0,0,0,0,0,0,0,0,1,45.97,[],
+2026-06-20,Netherlands vs. Sweden,5-1,4,Netherlands,spread_cushion2,Spread: Netherlands (-1.5),-1.5,2,2,0.9995,0.9995,3,1783.53,0.999,0.999,0.0971,0.0971,0,0,0,0,0,0,0,0,3,1783.53,[],
+2026-06-21,Tunisia vs. Japan,0-4,4,Japan,spread_cushion2,Spread: Japan (-1.5),-1.5,2,2,0.9995,0.9995,17,711.7,0.999,0.999,0.0971,0.0971,0,0,0,0,0,0,0,0,17,711.7,[],
+2026-06-21,Spain vs. Saudi Arabia,4-0,4,Spain,spread_cushion2,Spread: Spain (-1.5),-1.5,2,2,0.9995,0.9995,1,527.57,0.999,0.999,0.0971,0.0971,0,0,0,0,0,0,0,0,1,527.57,[],

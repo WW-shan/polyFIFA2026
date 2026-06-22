@@ -215,3 +215,83 @@ mode = spread-max-covered
   "netProfitRate": 0.000971
 }
 ```
+
+## 9. 1/2/3/5/8 分钟窗口复算
+
+新增全量分页复算文件：
+
+- `data/two_goal_cushion_multiwindow_aggregate.csv`
+- `data/two_goal_cushion_multiwindow_summary.csv`
+- `data/two_goal_cushion_multiwindow_markets.json`
+- `data/moneyline_last120_summary.csv`
+- `data/moneyline_last120_trades.json`
+- `data/spread_cushion2_last120_summary.csv`
+- `data/spread_cushion2_last120_trades.json`
+
+窗口：60、120、180、300、480 秒。
+
+注意：Polymarket 历史数据没有逐分钟比分事件流。本节用终场 margin 和最终可覆盖盘口做市场成交复算；真正实盘触发仍必须用 live score 确认“当时确实还有 2 球冗余”。
+
+### 9.1 聚合结果
+
+| 市场组 | 窗口 | 样本数 | 有成交样本 | <=0.99 样本 | <=0.98 样本 | <=0.97 样本 | 最低价 | 最低价净 ROI |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Moneyline | 60s | 19 | 16 | 0 | 0 | 0 | 0.999 | 0.097% |
+| Moneyline | 120s | 19 | 16 | 0 | 0 | 0 | 0.999 | 0.097% |
+| Moneyline | 180s | 19 | 16 | 2 | 0 | 0 | 0.989 | 1.079% |
+| Moneyline | 300s | 19 | 16 | 4 | 3 | 3 | 0.920 | 8.456% |
+| Moneyline | 480s | 19 | 16 | 5 | 4 | 3 | 0.916 | 8.918% |
+| Spread 2球冗余 | 60s | 6 | 4 | 0 | 0 | 0 | 0.999 | 0.097% |
+| Spread 2球冗余 | 120s | 6 | 6 | 0 | 0 | 0 | 0.999 | 0.097% |
+| Spread 2球冗余 | 180s | 6 | 6 | 0 | 0 | 0 | 0.999 | 0.097% |
+| Spread 2球冗余 | 300s | 6 | 6 | 1 | 0 | 0 | 0.990 | 0.980% |
+| Spread 2球冗余 | 480s | 6 | 6 | 2 | 0 | 0 | 0.990 | 0.980% |
+
+### 9.2 3 分钟窗口
+
+Moneyline 在 3 分钟窗口开始出现接近 1% 的机会，但不是 2%-3%：
+
+| 比赛 | 比分 | 市场 | 最低价 | 净 ROI | <=0.99 size |
+| --- | ---: | --- | ---: | ---: | ---: |
+| Austria vs Jordan | 3-1 | Austria ML Yes | 0.989 | 1.079% | 5,275.91 |
+| Uzbekistan vs Colombia | 1-3 | Colombia ML Yes | 0.990 | 0.980% | 2,331.40 |
+
+Spread 2球冗余在 3 分钟窗口仍没有 `<=0.99` 的成交，最低还是 `0.999`。
+
+### 9.3 5 分钟窗口
+
+Moneyline 在 5 分钟窗口出现 2%-8% 的成交，但这需要 live score 二次确认当时是否已经有 2 球领先。
+
+| 比赛 | 比分 | 市场 | 最低价 | 净 ROI | <=0.98 size | <=0.97 size |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| France vs Senegal | 3-1 | France ML Yes | 0.951 | 5.006% | 122,380.81 | 9,744.91 |
+| Austria vs Jordan | 3-1 | Austria ML Yes | 0.960 | 4.047% | 21,628.40 | 6,869.84 |
+| Uzbekistan vs Colombia | 1-3 | Colombia ML Yes | 0.920 | 8.456% | 56,711.91 | 54,435.67 |
+| Australia vs Türkiye | 2-0 | Australia ML Yes | 0.990 | 0.980% | 0 | 0 |
+
+Spread 2球冗余在 5 分钟窗口仍基本没有高收益；只有 Sweden -1.5 出现 `0.990`，净 ROI 约 `0.98%`。
+
+### 9.4 8 分钟窗口
+
+Moneyline 在 8 分钟窗口机会更多：
+
+| 比赛 | 比分 | 市场 | 最低价 | 净 ROI | <=0.98 size | <=0.97 size |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| France vs Senegal | 3-1 | France ML Yes | 0.916 | 8.918% | 147,457.20 | 28,374.60 |
+| Austria vs Jordan | 3-1 | Austria ML Yes | 0.930 | 7.317% | 72,162.45 | 57,403.89 |
+| Uzbekistan vs Colombia | 1-3 | Colombia ML Yes | 0.920 | 8.456% | 87,989.53 | 85,713.30 |
+| New Zealand vs Egypt | 1-3 | Egypt ML Yes | 0.980 | 1.981% | 51,390.52 | 0 |
+
+Spread 2球冗余在 8 分钟窗口仍只到约 `0.99`：
+
+| 比赛 | 比分 | 市场 | 最低价 | 净 ROI | <=0.99 size |
+| --- | ---: | --- | ---: | ---: | ---: |
+| Germany vs Curaçao | 7-1 | Germany -3.5 | 0.990 | 0.980% | 376.07 |
+| Sweden vs Tunisia | 5-1 | Sweden -1.5 | 0.990 | 0.980% | 5,089.03 |
+
+### 9.5 实操结论
+
+- 最后 1-2 分钟：2球冗余市场基本都已经到 `0.999`，只能赚约 `0.1%`。
+- 最后 3 分钟：moneyline 偶尔有约 `1%`，spread 2球冗余仍没有明显机会。
+- 最后 5-8 分钟：moneyline 可能出现 `2%-8%`，但必须用 live score 验证当时是否已经领先 2 球；仅靠终场比分不能证明。
+- 如果目标是稳定 2%-3% 且坚持 2球冗余，重点应该从最后 60 秒改成最后 5-8 分钟，并优先看 moneyline，而不是 spread。
