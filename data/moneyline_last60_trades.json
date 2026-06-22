@@ -1,0 +1,3792 @@
+[
+  {
+    "date": "2026-06-11",
+    "slug": "fifwc-mex-rsa-2026-06-11",
+    "title": "Mexico vs. South Africa",
+    "score": "2-0",
+    "margin": 2,
+    "winner": "Mexico",
+    "market_slug": "fifwc-mex-rsa-2026-06-11-mex",
+    "question": "Will Mexico win on 2026-06-11?",
+    "conditionId": "0x4cd77d456c83e7d8c569a8fb8f6396c3f40154f657e6d970733e2b1b6a7110ff",
+    "token": "20779063998268474490699884714808310289659170477959115489741275295270359962039",
+    "fetched_trades": 2987,
+    "page_errors": [],
+    "buy_trades_60": 0,
+    "buy_size_60": 0,
+    "buy_min_price_60": null,
+    "buy_last_price_60": null,
+    "net_roi_min_pct_60": null,
+    "net_roi_last_pct_60": null,
+    "window_trades": [],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 0,
+    "size_le_0.999_60": 0
+  },
+  {
+    "date": "2026-06-13",
+    "slug": "fifwc-usa-par-2026-06-12",
+    "title": "United States vs. Paraguay",
+    "score": "4-1",
+    "margin": 3,
+    "winner": "United States",
+    "market_slug": "fifwc-usa-par-2026-06-12-usa",
+    "question": "Will United States win on 2026-06-12?",
+    "conditionId": "0x26c10c27cde58e2d6214d65ab562d8142d34723b3b6ec3f40836d24f6d22dfc9",
+    "token": "1053697017401072331517873943000159665286188444438499834342450614809920055961",
+    "fetched_trades": 4000,
+    "page_errors": [],
+    "buy_trades_60": 0,
+    "buy_size_60": 0,
+    "buy_min_price_60": null,
+    "buy_last_price_60": null,
+    "net_roi_min_pct_60": null,
+    "net_roi_last_pct_60": null,
+    "window_trades": [],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 0,
+    "size_le_0.999_60": 0
+  },
+  {
+    "date": "2026-06-14",
+    "slug": "fifwc-aus-tur-2026-06-14",
+    "title": "Australia vs. Türkiye",
+    "score": "2-0",
+    "margin": 2,
+    "winner": "Australia",
+    "market_slug": "fifwc-aus-tur-2026-06-14-aus",
+    "question": "Will Australia win on 2026-06-14?",
+    "conditionId": "0xaaee502e7f2378521ba15c183e2762cecab013dd42f7600f7b35e99e0882f08c",
+    "token": "45307929350007847491024268648960623527752242214197163455465935647967776740420",
+    "fetched_trades": 3947,
+    "page_errors": [],
+    "buy_trades_60": 31,
+    "buy_size_60": 6882.87,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781416557,
+        "sec_to_finish": 60,
+        "price": 0.999,
+        "size": 1127.9,
+        "tx": "0x359f717b772d04ed857de24040d731ac030ab6b3c2767a9898e7b5be389d1be6"
+      },
+      {
+        "timestamp": 1781416560,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 8.19,
+        "tx": "0x8c057200e5f6ed508ab0da413fb26d8141aa62b0aa40eaaccad20d0fa7628cc1"
+      },
+      {
+        "timestamp": 1781416561,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 422.1,
+        "tx": "0x7b2844e3e8996267eef799d916cce279c1ad0d9fe731c7399731474aed5d1ada"
+      },
+      {
+        "timestamp": 1781416561,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 4.23,
+        "tx": "0x383925f7f65f13ea4333fb060eff6b0e727ca04e5d2f83dd998088007ba8b7d9"
+      },
+      {
+        "timestamp": 1781416563,
+        "sec_to_finish": 54,
+        "price": 0.999,
+        "size": 500.0,
+        "tx": "0x9781020ebe8291b6d576965cbcda42840a26a483f6bde0f5b64e91b9f1a54de1"
+      },
+      {
+        "timestamp": 1781416563,
+        "sec_to_finish": 54,
+        "price": 0.999,
+        "size": 5.55,
+        "tx": "0xbc662d7694be3ae584d828cab322baef214e6a06337e7189993ca41b472b783e"
+      },
+      {
+        "timestamp": 1781416564,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 8.73,
+        "tx": "0x7b4ca894bb72163facbba44f6f4cf653ffa719e0deb9b116246288b6f3c668d8"
+      },
+      {
+        "timestamp": 1781416566,
+        "sec_to_finish": 51,
+        "price": 0.999,
+        "size": 16.66,
+        "tx": "0x5e05e011612d427fb6f0a47aa1daf5b2a7a153dc2ae1d1a8b596139387c1d9dc"
+      },
+      {
+        "timestamp": 1781416567,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 21.87,
+        "tx": "0x290bcd59245642794bcc580649a972684d8936e4804c92e5784f3d252e637008"
+      },
+      {
+        "timestamp": 1781416572,
+        "sec_to_finish": 45,
+        "price": 0.999,
+        "size": 2408.79,
+        "tx": "0x90e9ceb4f5309928fdeee87733cdcbd1e213ce20883eabf8b8448f8e99bbee0f"
+      },
+      {
+        "timestamp": 1781416576,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 10.09,
+        "tx": "0x176624a30978b7dc2aa7ea96ceb06451adfb69097044a7c3413cc86fdbd60e16"
+      },
+      {
+        "timestamp": 1781416581,
+        "sec_to_finish": 36,
+        "price": 0.999,
+        "size": 59.13,
+        "tx": "0xf9a3c35f494de51db1405a4539da50437857d3d5bbc8e2a3e6822615b1648d98"
+      },
+      {
+        "timestamp": 1781416582,
+        "sec_to_finish": 35,
+        "price": 0.999,
+        "size": 32.58,
+        "tx": "0xe92d3ed09bf56f2d89e3a9a76850e61ede206af44c856be873d19e9d0e1519f7"
+      },
+      {
+        "timestamp": 1781416585,
+        "sec_to_finish": 32,
+        "price": 0.999,
+        "size": 36.36,
+        "tx": "0xa6b677448e501c938e1a8a0c04e49551d3267e1280b2060b995443a7ab0b9a50"
+      },
+      {
+        "timestamp": 1781416587,
+        "sec_to_finish": 30,
+        "price": 0.999,
+        "size": 10.21,
+        "tx": "0x77253cb8b98bb1264ab49683584065ff9bce0be52e3d7e1e964535a845044f57"
+      },
+      {
+        "timestamp": 1781416591,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 10.77,
+        "tx": "0x8c74ba118353304bb57c648eefb1ba289a3ef9051623060ec73d413405a4ad0d"
+      },
+      {
+        "timestamp": 1781416593,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 22.22,
+        "tx": "0xb9863d0f0439c85eed2b03b6f281e14c8ae2975f2ebcf4c79814ca14cfe46a4d"
+      },
+      {
+        "timestamp": 1781416593,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 52.63,
+        "tx": "0x41ea57a24be5541ccd982414cf7b7f784c47cf1112f65a201cdfaf41b7a41b45"
+      },
+      {
+        "timestamp": 1781416596,
+        "sec_to_finish": 21,
+        "price": 0.999,
+        "size": 41.27,
+        "tx": "0x9c3ff326575e9cb0c5e962ed72949223d9b5eeb9c1985fe3fcf4a392b17469e7"
+      },
+      {
+        "timestamp": 1781416599,
+        "sec_to_finish": 18,
+        "price": 0.999,
+        "size": 5.08,
+        "tx": "0xb03ff8aeeced18eec7ac028cfc954e6e5d2f5162f571d6baa87fa9d2c368a96b"
+      },
+      {
+        "timestamp": 1781416600,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 6.19,
+        "tx": "0xc5fff48ff52bf7f844782a16e6049b2a8e6696f8ae552b98d95ae9b821774cb2"
+      },
+      {
+        "timestamp": 1781416602,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 42.4,
+        "tx": "0xd719919871d8dea0574cbfa4ddd9e7899cc3972d40d6e39cb01c4c5f1019d3df"
+      },
+      {
+        "timestamp": 1781416602,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 6.88,
+        "tx": "0x9590257d0e6835144118adce93fbb84b80834e16acc2d0c74af05d1738c613cf"
+      },
+      {
+        "timestamp": 1781416603,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 64.14,
+        "tx": "0x24db85eaa9e36fc43e2d5105571c1e458f8ac419f47c81b14bcc0b701789465b"
+      },
+      {
+        "timestamp": 1781416606,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 600.0,
+        "tx": "0xf09ffc0632e84a160947d1ebbc50a8f0ebee025df21f6229b443497a49709b3c"
+      },
+      {
+        "timestamp": 1781416608,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 1041.66,
+        "tx": "0xecfbe98f79c20531b1baa016086ac372b0ecf1b6b5ff75b068b288b4c3f6774e"
+      },
+      {
+        "timestamp": 1781416609,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 74.46,
+        "tx": "0x67a6815d018d223eef1ae430a1c11c841d6103afeef254f0fc6ca269ccd64396"
+      },
+      {
+        "timestamp": 1781416609,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 168.82,
+        "tx": "0x03207fb998a35258617464543ddef6e0e46654e90747d82ffaacd7aa16ba2513"
+      },
+      {
+        "timestamp": 1781416612,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 14.03,
+        "tx": "0xa115c55d2263b151e7cf57a6e508e8df63e74e78a5d331112542241b4c239f73"
+      },
+      {
+        "timestamp": 1781416617,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 41.66,
+        "tx": "0x39bf910941a2b8ac5f2320615ef87548d98a492b374f0b99b2d3d8f8837c1def"
+      },
+      {
+        "timestamp": 1781416617,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 18.27,
+        "tx": "0x990991f58372b8bf6b46c15e8ac103a49669af4fdb31c6ce5a351b7a2b650c66"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 31,
+    "size_le_0.999_60": 6882.87
+  },
+  {
+    "date": "2026-06-14",
+    "slug": "fifwc-ger-kor-2026-06-14",
+    "title": "Germany vs. Curaçao",
+    "score": "7-1",
+    "margin": 6,
+    "winner": "Germany",
+    "market_slug": "fifwc-ger-kor-2026-06-14-ger",
+    "question": "Will Germany win on 2026-06-14?",
+    "conditionId": "0x00cf3efc18a950cf442049aa0770903f0ab8606212499e0e4196bf74c102c456",
+    "token": "80258038883060787104700033663206548991173635281684057844048254140005841868705",
+    "fetched_trades": 3937,
+    "page_errors": [],
+    "buy_trades_60": 10,
+    "buy_size_60": 11441.52,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781463505,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 1.06,
+        "tx": "0xe4579f4f14e3ad1366465843e1965f0f3830d62c148f0ab66e63b5757a3a98b6"
+      },
+      {
+        "timestamp": 1781463505,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 249.88,
+        "tx": "0xea7480043ac0ab38bc1ba5173d4ceeb3d16fa75421cb14cf83cb8a833112e34e"
+      },
+      {
+        "timestamp": 1781463514,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 10000.0,
+        "tx": "0x89b799d735fe06818d2515d7e7839345efe1c96e7375b305cbe6847751014d8d"
+      },
+      {
+        "timestamp": 1781463519,
+        "sec_to_finish": 44,
+        "price": 0.999,
+        "size": 10.62,
+        "tx": "0x27d72df0d076093d91dd99b2b09ff9c3bcfeff430a1175234067b6098b4f36f9"
+      },
+      {
+        "timestamp": 1781463534,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 262.96,
+        "tx": "0x0bd53e794efec723b428567f5cc1c137e437b7940e9984790fdefe028c080fc0"
+      },
+      {
+        "timestamp": 1781463537,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 2.0,
+        "tx": "0x85d49abd50fe06c13f1605aeb247a4fc9d5a327c9db6c24282db96acc824936b"
+      },
+      {
+        "timestamp": 1781463538,
+        "sec_to_finish": 25,
+        "price": 0.999,
+        "size": 264.83,
+        "tx": "0x969ba5d7a0faaf4489ae546202d0c013e90c8ff3e216333f757af5f782d027be"
+      },
+      {
+        "timestamp": 1781463544,
+        "sec_to_finish": 19,
+        "price": 0.999,
+        "size": 624.0,
+        "tx": "0x24eab0af18b009bdde37da3d85a50bd2e00e34202d337c7fe7670a182afc3b10"
+      },
+      {
+        "timestamp": 1781463552,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 20.96,
+        "tx": "0x722bcf07a78cc9ffd619483a46313318e85a26daa94748bd610ae5500644bf65"
+      },
+      {
+        "timestamp": 1781463553,
+        "sec_to_finish": 10,
+        "price": 0.999,
+        "size": 5.21,
+        "tx": "0x8f8feb9923332de5977908df2bf662c9fd51ca9e054b57446c0a0ac91f542e8d"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 10,
+    "size_le_0.999_60": 11441.52
+  },
+  {
+    "date": "2026-06-15",
+    "slug": "fifwc-swe-tun-2026-06-14",
+    "title": "Sweden vs. Tunisia",
+    "score": "5-1",
+    "margin": 4,
+    "winner": "Sweden",
+    "market_slug": "fifwc-swe-tun-2026-06-14-swe",
+    "question": "Will Sweden win on 2026-06-14?",
+    "conditionId": "0xc6f7e4a015ec643eb49c749da19553a2257add76278a252805a12dfa85103269",
+    "token": "77891685052397355147816140430897431230743681776824155461036740561521945442239",
+    "fetched_trades": 3955,
+    "page_errors": [],
+    "buy_trades_60": 32,
+    "buy_size_60": 36406.43,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781495811,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 19.23,
+        "tx": "0x9163373631fc2a2284a0f0c646c93be0f6cb9e05a1021cdbe3814e196ea73ba3"
+      },
+      {
+        "timestamp": 1781495811,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 558.83,
+        "tx": "0xcff242a9d9681b856a4e7d9a6064b7f56b335115ba7e043b018c6dbf15878555"
+      },
+      {
+        "timestamp": 1781495811,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 6.46,
+        "tx": "0x7795458e5f8b2337bf4866027fb94283f440e3140078e57e84745e0cdaba3a3a"
+      },
+      {
+        "timestamp": 1781495812,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 27.05,
+        "tx": "0xc053b98b27689b036aac0169b8d99c7a2efa2ec59eeaa035f81e7e7262e7948c"
+      },
+      {
+        "timestamp": 1781495812,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 31122.01,
+        "tx": "0x42000db86956e24a9a2383014bf948a91d130237b4b2e29a2b3b6a4d78c8963a"
+      },
+      {
+        "timestamp": 1781495812,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 1.96,
+        "tx": "0x7973b015f7d343a27d256b39152adaa07fd7a6e101fa7958b122d20fc7f7ef1e"
+      },
+      {
+        "timestamp": 1781495815,
+        "sec_to_finish": 52,
+        "price": 0.999,
+        "size": 65.0,
+        "tx": "0x95c55e229a35b631a1325f8ad6d4308d3f881434ef1907f09a6b9851de1e5676"
+      },
+      {
+        "timestamp": 1781495815,
+        "sec_to_finish": 52,
+        "price": 0.999,
+        "size": 5.88,
+        "tx": "0x5b8c4afbef22175c73943497b301183f05a6ff219cf901333b6c47baa517f2f4"
+      },
+      {
+        "timestamp": 1781495818,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 866.15,
+        "tx": "0xc36541bc39fd20cf936b45249e08cb59e8ec16399562b8e13830dfa5ea24de93"
+      },
+      {
+        "timestamp": 1781495820,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 1557.31,
+        "tx": "0x41c06d8caf7165596cda2db6d56c5e2170173e667a02af79b3f552e51b560e09"
+      },
+      {
+        "timestamp": 1781495820,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 5.26,
+        "tx": "0xfa0cbb2a1c02292e80db6170c8ee419a619cab265642cfc05622b6766e15a2fe"
+      },
+      {
+        "timestamp": 1781495820,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 196.07,
+        "tx": "0xb0b1661ea0e4a52da70603f29c5231e032c5ddd0d2dc6e7f5f4d9d45c24cfce9"
+      },
+      {
+        "timestamp": 1781495821,
+        "sec_to_finish": 46,
+        "price": 0.999,
+        "size": 332.46,
+        "tx": "0xbb7896f6ada25b2434731a217bda286759992d23cb0eec9cc2c7c2b9f0e9cd2e"
+      },
+      {
+        "timestamp": 1781495823,
+        "sec_to_finish": 44,
+        "price": 0.999,
+        "size": 20.0,
+        "tx": "0x46b7b31195dbb245c58ac9e6d157a98c1c4f8e59a139480f0d1a89b3258dd809"
+      },
+      {
+        "timestamp": 1781495826,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 26.0,
+        "tx": "0x530139f382c6ffa50d7415843a657dabd6d9f01771fe4f80624e5db1b9b160e5"
+      },
+      {
+        "timestamp": 1781495826,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 36.27,
+        "tx": "0x0eed9937c40209d9e38eaeba28fc42dee8301e862d38860c6d1e080ee00a3bb1"
+      },
+      {
+        "timestamp": 1781495829,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 19.23,
+        "tx": "0xae7a6bfa85f78752dcb2fd9830b813ca59e3d6577aff3c6c169fc70165d02b03"
+      },
+      {
+        "timestamp": 1781495832,
+        "sec_to_finish": 35,
+        "price": 0.999,
+        "size": 96.45,
+        "tx": "0xd6d9684f0a0148303e4ead3b4bf8faed8385c653701422fa1ff371194c84be35"
+      },
+      {
+        "timestamp": 1781495833,
+        "sec_to_finish": 34,
+        "price": 0.999,
+        "size": 171.92,
+        "tx": "0xfab0b5d53df4f86a0d9e3ca38a960c7be4628e90b79c08b6e06316407b0f61e3"
+      },
+      {
+        "timestamp": 1781495839,
+        "sec_to_finish": 28,
+        "price": 0.999,
+        "size": 185.27,
+        "tx": "0x7a1bded4b5fed1cd6c2d91d63007fcbaa181a155e180170399a8cf65551bb355"
+      },
+      {
+        "timestamp": 1781495845,
+        "sec_to_finish": 22,
+        "price": 0.999,
+        "size": 18.91,
+        "tx": "0x47857794d8194250fd8859bfc7d9613b7360861913bca864738d452a6aea7598"
+      },
+      {
+        "timestamp": 1781495847,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 19.23,
+        "tx": "0x58e8d501b21482490fc35472a9d12d1667cf75dede1ccf5449538b121a08699d"
+      },
+      {
+        "timestamp": 1781495851,
+        "sec_to_finish": 16,
+        "price": 0.999,
+        "size": 50.75,
+        "tx": "0xdeac68da2899bd1ff0eaa175a04e3b138967329d783f2d0b683ccd797f65494e"
+      },
+      {
+        "timestamp": 1781495851,
+        "sec_to_finish": 16,
+        "price": 0.999,
+        "size": 24.43,
+        "tx": "0xbdae6bbddbfa7a638e4cb9e982ca068692240854be7f7b6643a5a9431a81167e"
+      },
+      {
+        "timestamp": 1781495853,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 9.54,
+        "tx": "0xef7cd3c7247339caeebc6aefbfcce211aaec23741406ef8297a607e4b686346e"
+      },
+      {
+        "timestamp": 1781495857,
+        "sec_to_finish": 10,
+        "price": 0.999,
+        "size": 7.6,
+        "tx": "0x876a63ac1f1c8987e0a89789bf7e419771cd8e8246b6fa1280e83462b50d9d4d"
+      },
+      {
+        "timestamp": 1781495857,
+        "sec_to_finish": 10,
+        "price": 0.999,
+        "size": 65.38,
+        "tx": "0x6a52f645271d1c3665275c64c32dc6b8de5eb24d965ccb6005c912d68f508bd1"
+      },
+      {
+        "timestamp": 1781495859,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 19.23,
+        "tx": "0xbe358d2a348d717f933575e0be2a97a2a9c21686d2fee9d7e707d93042fd6182"
+      },
+      {
+        "timestamp": 1781495859,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 790.8,
+        "tx": "0xb48c05c8a1faade3bf075d4f58384edfbbd0a0b4d883f23372a8f1d3cac504df"
+      },
+      {
+        "timestamp": 1781495860,
+        "sec_to_finish": 7,
+        "price": 0.999,
+        "size": 29.12,
+        "tx": "0xb395d4dbc0cdb5da5bcd34131f7b9af334257b8e579c7f65637bf3cd625bde78"
+      },
+      {
+        "timestamp": 1781495862,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 43.13,
+        "tx": "0x7d2681ef7de4d06a531ddf03afa3206f83aeab15c2c461cdd327f284ba04761f"
+      },
+      {
+        "timestamp": 1781495862,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 9.5,
+        "tx": "0xfd8a171927b01d864d43a24d654ff2d6e92f2a70000a36803ebf32ffd2b3a539"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 32,
+    "size_le_0.999_60": 36406.43
+  },
+  {
+    "date": "2026-06-16",
+    "slug": "fifwc-fra-sen-2026-06-16",
+    "title": "France vs. Senegal",
+    "score": "3-1",
+    "margin": 2,
+    "winner": "France",
+    "market_slug": "fifwc-fra-sen-2026-06-16-fra",
+    "question": "Will France win on 2026-06-16?",
+    "conditionId": "0x04b6d6630d49e6513355ff045c96439c929335cb0d18da7792dea6c2fc717ead",
+    "token": "10541943766977992250149902475024620982770128161688998706490955791758263657916",
+    "fetched_trades": 3995,
+    "page_errors": [],
+    "buy_trades_60": 24,
+    "buy_size_60": 1949.47,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781643814,
+        "sec_to_finish": 59,
+        "price": 0.999,
+        "size": 37.87,
+        "tx": "0xa3bed466f07f6a9d61de60167da263f77dc586b8fc8018e1d1da2d7955d7be73"
+      },
+      {
+        "timestamp": 1781643814,
+        "sec_to_finish": 59,
+        "price": 0.999,
+        "size": 4.54,
+        "tx": "0xdc599c41b74b0b84ab4787d20b79477d6281c712adb3ad1cbd04db431dab3937"
+      },
+      {
+        "timestamp": 1781643815,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 243.9,
+        "tx": "0x71993b1d97adc8983bc5b64d855ac0c1b5dcceb2b3304d1dc30e90d835447d15"
+      },
+      {
+        "timestamp": 1781643815,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 7.0,
+        "tx": "0x04d51680dc12aed2f6f34466a108cc799042444098ac6c27a74d21fc4f97b0ec"
+      },
+      {
+        "timestamp": 1781643815,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 200.0,
+        "tx": "0x36fa239ec7f597fd5240029e1f70cf6d7722c3cb76989c1a41a939ed84aac621"
+      },
+      {
+        "timestamp": 1781643815,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 4.47,
+        "tx": "0xc0aeacd5f9810a673a537b489e8e39ddf49bf2cd8c87e95fca6fa81893abf8a1"
+      },
+      {
+        "timestamp": 1781643817,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 3.03,
+        "tx": "0xcdfaab14ad2376e60c99df6466bde104e58f94d760e9f7f50ebef875ffbdec7c"
+      },
+      {
+        "timestamp": 1781643818,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 11.75,
+        "tx": "0xc39ce6371c3e32c8cec0eaf77af5f155aeaa0351a44a795f7aef8b171d3de8d0"
+      },
+      {
+        "timestamp": 1781643818,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 91.65,
+        "tx": "0xd28a051c1e512fedeeccbefd8816ceef82e8d7daaad0cf6b81645175f0498a54"
+      },
+      {
+        "timestamp": 1781643820,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 145.01,
+        "tx": "0x0010fb71210ea2464073edfe4adac72f32b30e14b7d4340665c2d146bcdfd78c"
+      },
+      {
+        "timestamp": 1781643820,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 83.33,
+        "tx": "0x05a1ec23f48dd88c8dfbf04330b18b0cf6a6aa9edabd9b01c814b238c83c37a5"
+      },
+      {
+        "timestamp": 1781643820,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 35.02,
+        "tx": "0xd6a4a6835e576d4b66f527a513e2ea593954589b1cf64a523cab9228aa8c2c53"
+      },
+      {
+        "timestamp": 1781643823,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 90.17,
+        "tx": "0x80cba1bd42b005d90c0f3f3129f972cdc240adbb60ee36b45bf559219861e5b8"
+      },
+      {
+        "timestamp": 1781643824,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 36.92,
+        "tx": "0xc43fd5c2d323e739a2f76bbee2c4d0afad5861d93f6b4946776c161f30d1aa84"
+      },
+      {
+        "timestamp": 1781643824,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 163.46,
+        "tx": "0xc43fd5c2d323e739a2f76bbee2c4d0afad5861d93f6b4946776c161f30d1aa84"
+      },
+      {
+        "timestamp": 1781643824,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 5.97,
+        "tx": "0xb647f2eef5e9695ab7d6804d91b7cfe87356dac13595eeb34b2616fe4453c541"
+      },
+      {
+        "timestamp": 1781643824,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 105.41,
+        "tx": "0x9ed5d8bf2dcea7e3387d3d10eba677fe017fa48cac25d94ac242cf52d8c1f930"
+      },
+      {
+        "timestamp": 1781643824,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 7.46,
+        "tx": "0x927b326ef9be839588e0fd7f2c6fcd8fa743a303d6c6240540cbd53660c7d057"
+      },
+      {
+        "timestamp": 1781643824,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 144.89,
+        "tx": "0x6e5f9b416ba0dfcc6642159996edfbdb2ab6e27afad064fdf0999e5a99666fbf"
+      },
+      {
+        "timestamp": 1781643826,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 14.92,
+        "tx": "0x6a5718ce504ad030e72491cf264d0cedec93b4441891d541b33c82fa8fa3e243"
+      },
+      {
+        "timestamp": 1781643826,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 7.4,
+        "tx": "0xaf429f43245ef0485caac2d0d5616e2c23e78f3edf51112a4eac5095df091063"
+      },
+      {
+        "timestamp": 1781643829,
+        "sec_to_finish": 44,
+        "price": 0.999,
+        "size": 51.8,
+        "tx": "0xf38377240c64aeed485aadc1603672a48edc460dbaa1534e63f43f19be734733"
+      },
+      {
+        "timestamp": 1781643830,
+        "sec_to_finish": 43,
+        "price": 0.999,
+        "size": 432.03,
+        "tx": "0x379a380354753c4768cece6cf285d6a1adcb49362dda0b3e13dd349ea4389c23"
+      },
+      {
+        "timestamp": 1781643830,
+        "sec_to_finish": 43,
+        "price": 0.999,
+        "size": 21.47,
+        "tx": "0xade7cf2f5dc440e11e143bf29ee5ae07b6412c661dd568c83c081292c7ded056"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 24,
+    "size_le_0.999_60": 1949.47
+  },
+  {
+    "date": "2026-06-16",
+    "slug": "fifwc-irq-nor-2026-06-16",
+    "title": "Iraq vs. Norway",
+    "score": "1-4",
+    "margin": 3,
+    "winner": "Norway",
+    "market_slug": "fifwc-irq-nor-2026-06-16-nor",
+    "question": "Will Norway win on 2026-06-16?",
+    "conditionId": "0xcee0d9074a1f8766b4f66d806608a4097d027c94f85de367410fbbb166a29424",
+    "token": "60561627760165737508115128719081450929284195423420376549887420810076954490283",
+    "fetched_trades": 3896,
+    "page_errors": [],
+    "buy_trades_60": 16,
+    "buy_size_60": 3515.71,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781654404,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 5.0,
+        "tx": "0x62c596ab469bd91f29584d256c1001630c328dcfc6471b625d9e688337e4cfe0"
+      },
+      {
+        "timestamp": 1781654411,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 44.21,
+        "tx": "0x6937c618ac8f90f81713e59804ef59f4526d70ee8de61858ad10a5621bf014c0"
+      },
+      {
+        "timestamp": 1781654425,
+        "sec_to_finish": 36,
+        "price": 0.999,
+        "size": 5.15,
+        "tx": "0x8ee46dceb5a0d16e9b57a39dfdf535a1e05545f459d1decd50efb77b007710f7"
+      },
+      {
+        "timestamp": 1781654426,
+        "sec_to_finish": 35,
+        "price": 0.999,
+        "size": 151.09,
+        "tx": "0xb04c9416ea138aa60f2669908d460307411c03f5fcf2afcb51c75e39a3e00788"
+      },
+      {
+        "timestamp": 1781654431,
+        "sec_to_finish": 30,
+        "price": 0.999,
+        "size": 12.19,
+        "tx": "0x0a64f572a5bff48181f2311eee591b261ad0b7ac5156083e2e082f616975d061"
+      },
+      {
+        "timestamp": 1781654434,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 2.25,
+        "tx": "0x4108b706b40da643be29f53c23eb17ff26cbe4b9cb608a3346b444489d76917b"
+      },
+      {
+        "timestamp": 1781654440,
+        "sec_to_finish": 21,
+        "price": 0.999,
+        "size": 296.58,
+        "tx": "0x133b7d3a38bc86e979f99c21f072312bdf541fcfcc39127d12e8e5bdbcc81fca"
+      },
+      {
+        "timestamp": 1781654440,
+        "sec_to_finish": 21,
+        "price": 0.999,
+        "size": 50.0,
+        "tx": "0x5142e47ce411385fa6e265f0b51bc6957f33749f68b0476824b4f7aa496d473b"
+      },
+      {
+        "timestamp": 1781654441,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 5.0,
+        "tx": "0x8cb3609b7f89959855ee144585993d7fd3b1b733123dc64f9bbff56d448be607"
+      },
+      {
+        "timestamp": 1781654450,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 423.34,
+        "tx": "0x820bb86fe34ae8372dbd0d7934c3a4ffcb6b50edab6a0eb6c65dc62b5227ce2f"
+      },
+      {
+        "timestamp": 1781654450,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 365.38,
+        "tx": "0xa542d29ff326d1a37f8db64949ed75066733da2d7ad0eb79364ad5726abab401"
+      },
+      {
+        "timestamp": 1781654452,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 139.12,
+        "tx": "0x9c17dc935359c31e2bcc1985dee8d07e3e4893101bff70a7c3ed8216572eb19b"
+      },
+      {
+        "timestamp": 1781654455,
+        "sec_to_finish": 6,
+        "price": 0.999,
+        "size": 879.12,
+        "tx": "0x077ea6a416ad2b421dc098b08b04a10a4991ea6adbcbbe248288a21cbb8e97de"
+      },
+      {
+        "timestamp": 1781654456,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 2.44,
+        "tx": "0xdb8b4f308ffeca96b0d5fcf5bd8410dae90983152fd99f1615f2ed59d657ba42"
+      },
+      {
+        "timestamp": 1781654458,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 9.8,
+        "tx": "0x71ca67e107ff248bacd9b6713998c14ca74838fdb8cdeef0b2a9b0b2b01d5113"
+      },
+      {
+        "timestamp": 1781654459,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 1125.04,
+        "tx": "0x4c4d55f016a89b153c73687f26a585cb6902ed45429b275b0b5d6784aa67b983"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 16,
+    "size_le_0.999_60": 3515.71
+  },
+  {
+    "date": "2026-06-17",
+    "slug": "fifwc-arg-alg-2026-06-16",
+    "title": "Argentina vs. Algeria",
+    "score": "3-0",
+    "margin": 3,
+    "winner": "Argentina",
+    "market_slug": "fifwc-arg-alg-2026-06-16-arg",
+    "question": "Will Argentina win on 2026-06-16?",
+    "conditionId": "0x2a7a6ab8f4984f1ae82eacd7fb408832a50e63162ac6b98fff1fe094b8e9d3b5",
+    "token": "7496871387824498705150337097986995704782987980926026827618928384721521953608",
+    "fetched_trades": 3954,
+    "page_errors": [],
+    "buy_trades_60": 58,
+    "buy_size_60": 1114390.09,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781665134,
+        "sec_to_finish": 60,
+        "price": 0.999,
+        "size": 22.17,
+        "tx": "0x2314986cc3e1b6f5074dc08075c6c00533e60e313251d593f1101d4cd5a7aa11"
+      },
+      {
+        "timestamp": 1781665140,
+        "sec_to_finish": 54,
+        "price": 0.999,
+        "size": 30.8,
+        "tx": "0xa6ab2dad311991cfd0fecf5aad80c60ebf921d6b025d2713b678833e296f7f4b"
+      },
+      {
+        "timestamp": 1781665140,
+        "sec_to_finish": 54,
+        "price": 0.999,
+        "size": 51.47,
+        "tx": "0xd917d3bc0a0d29c745e2e1d6fd0fbebca9c28c9bc1a2b18f0460375d1f60f4da"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 30062.1,
+        "tx": "0x9c9ac60e0b29a9817704de55152c622ee3948697eac9ab12a774d1797b3d922a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 12.4,
+        "tx": "0x9c9ac60e0b29a9817704de55152c622ee3948697eac9ab12a774d1797b3d922a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 120.0,
+        "tx": "0x9c9ac60e0b29a9817704de55152c622ee3948697eac9ab12a774d1797b3d922a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 30.0,
+        "tx": "0x9c9ac60e0b29a9817704de55152c622ee3948697eac9ab12a774d1797b3d922a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 130.0,
+        "tx": "0x9c9ac60e0b29a9817704de55152c622ee3948697eac9ab12a774d1797b3d922a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 380.0,
+        "tx": "0x9c9ac60e0b29a9817704de55152c622ee3948697eac9ab12a774d1797b3d922a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 6553.28,
+        "tx": "0x9c9ac60e0b29a9817704de55152c622ee3948697eac9ab12a774d1797b3d922a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 7.24,
+        "tx": "0x3afc0c099648ff4984ed7e8c1b900adb02bbe7bcb833d854dbd7c98b9238083a"
+      },
+      {
+        "timestamp": 1781665141,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 50.76,
+        "tx": "0x30f42cd0abd6c3ad95177718e9fbe9f21c1a981361d9aab8751b78f7237dc8e9"
+      },
+      {
+        "timestamp": 1781665143,
+        "sec_to_finish": 51,
+        "price": 0.999,
+        "size": 142.85,
+        "tx": "0xe605dc30e2715e185c9f270ed4fc355854d1a1832d20852d344a12f2b266c37e"
+      },
+      {
+        "timestamp": 1781665147,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 7.69,
+        "tx": "0xd60153e537e91bbdf82bb1cee113342e2f34d638cfc2113772207e826a88d3f1"
+      },
+      {
+        "timestamp": 1781665149,
+        "sec_to_finish": 45,
+        "price": 0.999,
+        "size": 1.21,
+        "tx": "0x9d4ab05b965f13c873dc8fe603bf7a287d323cfda19f9ada4d7c856aabeee159"
+      },
+      {
+        "timestamp": 1781665152,
+        "sec_to_finish": 42,
+        "price": 0.999,
+        "size": 115.38,
+        "tx": "0x998e3004189c72be1b3632233f905e67d2bf83c85de9cd0c808d127da26c4b7f"
+      },
+      {
+        "timestamp": 1781665153,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 5.89,
+        "tx": "0x1114b138a41fe40470da5b3cffcdf193f625deba520a33032fcadec0718a0fb3"
+      },
+      {
+        "timestamp": 1781665155,
+        "sec_to_finish": 39,
+        "price": 0.999,
+        "size": 38.46,
+        "tx": "0x66b4a7bfdec4d2b805e1eba01a4026537920a571498518fe56ff6d305ae3693c"
+      },
+      {
+        "timestamp": 1781665156,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 6.06,
+        "tx": "0xa04a500263e05ad209425e1b3b568980f322086a1aa265b2a9e22d677586d068"
+      },
+      {
+        "timestamp": 1781665156,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 18.22,
+        "tx": "0xe1232dda29621a36a09bad56cb41ad0e604162333dfca0991f2924c9aa223882"
+      },
+      {
+        "timestamp": 1781665158,
+        "sec_to_finish": 36,
+        "price": 0.999,
+        "size": 6.83,
+        "tx": "0x2c81ccc6fa621a86bd451e24eb9d26485047e13f049574a718bd1371dc3fba9b"
+      },
+      {
+        "timestamp": 1781665164,
+        "sec_to_finish": 30,
+        "price": 0.999,
+        "size": 23005.04,
+        "tx": "0x6cc9ecfbcb37e338a687118eb82735769199787fffc0e960ba6ba6336681902c"
+      },
+      {
+        "timestamp": 1781665164,
+        "sec_to_finish": 30,
+        "price": 0.999,
+        "size": 121.95,
+        "tx": "0x7caee5b81cec11d03da7e574bff1bd9ab32109ff7dc4717e4f6999777b0c1a61"
+      },
+      {
+        "timestamp": 1781665167,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 7.0,
+        "tx": "0xaad6713228e0592030034c246d8bafc3dc2fa7087e5ac4784de62898d7f84a35"
+      },
+      {
+        "timestamp": 1781665171,
+        "sec_to_finish": 23,
+        "price": 0.999,
+        "size": 77.55,
+        "tx": "0xec871bc20664d1450d44546384f5c5f79c9f4609ac80c4bdfd80554a66151045"
+      },
+      {
+        "timestamp": 1781665176,
+        "sec_to_finish": 18,
+        "price": 0.999,
+        "size": 15.38,
+        "tx": "0x56bfec306abed3a0d29c3ccf15feb4baed231c3925edcda2103c1b83845d8ea1"
+      },
+      {
+        "timestamp": 1781665182,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 2.94,
+        "tx": "0xb6f536623cc01079b85ebd48c94f2feebe2a8e8c8855af5ad2239d52e74bac62"
+      },
+      {
+        "timestamp": 1781665182,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 108.01,
+        "tx": "0x1f32d6b7fd73d7ba5bc090ebf1c8480a5eed291f7cdb53894f64bc32e90fcf56"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 194.2,
+        "tx": "0xeb1551e7e4afc79693de5cd94568c507e7c9262d7b0dde80e91304a418cc7d5e"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 28.16,
+        "tx": "0xdf54866a87f04ab4b3592aa648e52c0e2e9e81181958f8e075f4df064dd5288d"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 83529.75,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 3000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 169000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 59000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 18632.89,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 9200.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 30000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 5000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 135000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 62222.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 80000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 34567.34,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 50000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 35000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 220.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 800.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 100000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 70000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 1000.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 300.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 200.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 8843.0,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665191,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 97441.16,
+        "tx": "0x41627f25bd330472e375728971444c0759cb02b62f576a543aaf298421be3e70"
+      },
+      {
+        "timestamp": 1781665192,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 57.05,
+        "tx": "0xa5eae07d44306b40ab9f0a8770369acd883aa8101a56a77e53dd2653809e43fe"
+      },
+      {
+        "timestamp": 1781665192,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 6.06,
+        "tx": "0x4fc11e420df5d6cdba52b8a6dde42807c29c295c752a172703bad312190c7f54"
+      },
+      {
+        "timestamp": 1781665192,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 3.12,
+        "tx": "0x535a08ec2336fab6a03a0131038b1085773c8cc97b4324f8d0279f0727681c25"
+      },
+      {
+        "timestamp": 1781665194,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 0.01,
+        "tx": "0xd3ee3c72015bbd24d06e73d8401f8558c17d7c090b1c5b325f89f12babf90ec2"
+      },
+      {
+        "timestamp": 1781665194,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 14.67,
+        "tx": "0xd6ac55370a2d9887e49cbf0c11b4d56375a9f607ac878599a5adc083e3ad4665"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 58,
+    "size_le_0.999_60": 1114390.09
+  },
+  {
+    "date": "2026-06-17",
+    "slug": "fifwc-aut-jor-2026-06-17",
+    "title": "Austria vs. Jordan",
+    "score": "3-1",
+    "margin": 2,
+    "winner": "Austria",
+    "market_slug": "fifwc-aut-jor-2026-06-17-aut",
+    "question": "Will Austria win on 2026-06-17?",
+    "conditionId": "0x15869f0d05e99ad5789f647685b2eedbbe4201f8910a2bdb70e5716bd3674e8f",
+    "token": "20499437472769847560241881624039508074540415562884114297532631910880371793587",
+    "fetched_trades": 3964,
+    "page_errors": [],
+    "buy_trades_60": 54,
+    "buy_size_60": 10654.34,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781676451,
+        "sec_to_finish": 59,
+        "price": 0.999,
+        "size": 7.07,
+        "tx": "0xff028501524526ad71adb602e1f2be6c461102f77dfe9f7b04a12dc3e39b91ff"
+      },
+      {
+        "timestamp": 1781676452,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 11.62,
+        "tx": "0xb9fc4375f8b5733bf54adcc13bacf5b7b12d152bd4254d4d3a0fb52bc1e0f1eb"
+      },
+      {
+        "timestamp": 1781676452,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 65.05,
+        "tx": "0x6631a109fc10ff320343683874ad1dd216fe517de9aad0aaddbd554bd0a08883"
+      },
+      {
+        "timestamp": 1781676454,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 146.37,
+        "tx": "0x7d8844b7b9fac0cd3479cbe65eac0f4ddb6c61236b3e7a5a4aa176e8b48025fa"
+      },
+      {
+        "timestamp": 1781676455,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 362.63,
+        "tx": "0x8026fe52d49bf82ed6600f15e296a3aaf1ed2fe313233b6f6205f5390ffe468f"
+      },
+      {
+        "timestamp": 1781676460,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 1170.0,
+        "tx": "0x179a821d69052e4d07d77a8b40788e954ae17d1d03ba007f9587eba63beafbc2"
+      },
+      {
+        "timestamp": 1781676460,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 285.71,
+        "tx": "0x5af8eef0bbcc31d3f0a082ba2eb00d54e560377d04b5cad6a7333ed8189eb0e5"
+      },
+      {
+        "timestamp": 1781676461,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 2.38,
+        "tx": "0x2b933815506de5adc28c8fcd8859d19d64486169ae7b58a55bd9aa1b5047de84"
+      },
+      {
+        "timestamp": 1781676461,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 110.44,
+        "tx": "0x0b488f9a5a4042d9089bd0fb883d5cab9191a3f2ce94816cb37aa88a55dcf703"
+      },
+      {
+        "timestamp": 1781676461,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 14.28,
+        "tx": "0x1fc822e8a0eab6e786fae10d91b7c273b2ab6c35a52aaef33ac302d27a47aabd"
+      },
+      {
+        "timestamp": 1781676463,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 2.85,
+        "tx": "0x1c32f55ab58bd57a0a996f85140e4c297ed42541f1591bc51e85bd878be06edd"
+      },
+      {
+        "timestamp": 1781676463,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 57.96,
+        "tx": "0x649047d16baa2f83c86e1679d461f1dd9f8138568d8a26f0525cfe1b40141ee3"
+      },
+      {
+        "timestamp": 1781676464,
+        "sec_to_finish": 46,
+        "price": 0.999,
+        "size": 678.17,
+        "tx": "0x48745ea7ece2644d325b6b67239aa728ddf8490a319e91b0163137f2b2180145"
+      },
+      {
+        "timestamp": 1781676466,
+        "sec_to_finish": 44,
+        "price": 0.999,
+        "size": 326.08,
+        "tx": "0x828f0310789b1dcfdc9e333a979a56b92cec90bcbc9ae51972b3f295979145cc"
+      },
+      {
+        "timestamp": 1781676467,
+        "sec_to_finish": 43,
+        "price": 0.999,
+        "size": 10.0,
+        "tx": "0xb5602c920c98314606c0150efd4f7205d94344e97467504e21c02ac8acba91c5"
+      },
+      {
+        "timestamp": 1781676470,
+        "sec_to_finish": 40,
+        "price": 0.999,
+        "size": 1063.37,
+        "tx": "0xc86c2114d5a9975036caada47bd8df6aa592fc770c0b3092f2f40410805a5cf0"
+      },
+      {
+        "timestamp": 1781676470,
+        "sec_to_finish": 40,
+        "price": 0.999,
+        "size": 57.97,
+        "tx": "0xba699bf56bae38e2a9cd04eae8d67707b9366ec215a0c57b94b260b95079493d"
+      },
+      {
+        "timestamp": 1781676472,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 5.55,
+        "tx": "0xc053765ef47239f97f28fafa37f248bca0a2ce59f4d35e4cfa18fecb71439e1d"
+      },
+      {
+        "timestamp": 1781676476,
+        "sec_to_finish": 34,
+        "price": 0.999,
+        "size": 295.91,
+        "tx": "0x1af5aae762d1caa79c9446d021f73fda2e7bf1ba05a28ca2327b454d30cadd31"
+      },
+      {
+        "timestamp": 1781676481,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 1000.0,
+        "tx": "0x9dc9b980acd83cc9dc1d0e5155d303cdc637b752aea77ff4287ade2b3258989b"
+      },
+      {
+        "timestamp": 1781676481,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 41.66,
+        "tx": "0x6e76ce33ad041dfef93d602e2bb8eec050ae14d36a92eb6b80b52edf6d863a2a"
+      },
+      {
+        "timestamp": 1781676481,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 142.85,
+        "tx": "0x3ae5f4a51c03c352b6da71489f42afd2e1eca2abdcd4ca43d5c7c738aacdd6df"
+      },
+      {
+        "timestamp": 1781676482,
+        "sec_to_finish": 28,
+        "price": 0.999,
+        "size": 36.91,
+        "tx": "0x49e548c1583523e1788443c8f47a7d1d402a49eeebf727e5c77203250e337b8b"
+      },
+      {
+        "timestamp": 1781676484,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 50.0,
+        "tx": "0x148ad1bc83351f99de588bce60d22b2914d5700b6cc1f3ccae2f4470825fbd77"
+      },
+      {
+        "timestamp": 1781676485,
+        "sec_to_finish": 25,
+        "price": 0.999,
+        "size": 34.72,
+        "tx": "0xe9d854707d0671a60aee8a296833e9edb215e867cd82a8a3469e2403472c05d7"
+      },
+      {
+        "timestamp": 1781676485,
+        "sec_to_finish": 25,
+        "price": 0.999,
+        "size": 42.47,
+        "tx": "0xbbed687361ab22751abf5f9a7ca13fdeb180bf656cd929c68e8db330dc1e05a2"
+      },
+      {
+        "timestamp": 1781676487,
+        "sec_to_finish": 23,
+        "price": 0.999,
+        "size": 221.94,
+        "tx": "0x1a19c3b6a2db8413788908fa7eed24155ca128dd8ea2a41b5d14695a1a824b42"
+      },
+      {
+        "timestamp": 1781676488,
+        "sec_to_finish": 22,
+        "price": 0.999,
+        "size": 17.85,
+        "tx": "0xfa3b82221c6f3cd2ada3941512ceb4f6bb366a2d104c874c8c8fd960f6dce4c6"
+      },
+      {
+        "timestamp": 1781676488,
+        "sec_to_finish": 22,
+        "price": 0.999,
+        "size": 8.28,
+        "tx": "0x3c9df7aa9575da1e09381c419f7700c230cfe1866fc6d99769836d0ca7d04ce4"
+      },
+      {
+        "timestamp": 1781676490,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 3.41,
+        "tx": "0x414e22c09e4bc029f915a30333cd56204ef335feb4cb2876ddf24f74532471ff"
+      },
+      {
+        "timestamp": 1781676490,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 138.68,
+        "tx": "0x31d442a00a47d523b1c5fcec461723c3c1b10811c53a1486debbe18feecf71f9"
+      },
+      {
+        "timestamp": 1781676490,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 227.14,
+        "tx": "0x263780e8b679ce7270373190ad691df2c439ffff5287b1aa00f9dbf61a74a60a"
+      },
+      {
+        "timestamp": 1781676490,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 273.47,
+        "tx": "0x976fedd3ab530784f59a333451a1d3d8c81acde442161b83040dcd5fc88203c2"
+      },
+      {
+        "timestamp": 1781676491,
+        "sec_to_finish": 19,
+        "price": 0.999,
+        "size": 28.57,
+        "tx": "0x2ebf6cad857752955d8656b8d65397acee968ee878d4bd00047798b4ad84bb70"
+      },
+      {
+        "timestamp": 1781676491,
+        "sec_to_finish": 19,
+        "price": 0.999,
+        "size": 6.94,
+        "tx": "0xe138654687fdb6e488c61e6370fa2bbcf6718fa9ee81c9f5f1e71880760ec0a4"
+      },
+      {
+        "timestamp": 1781676493,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 11.76,
+        "tx": "0x165dee7dcd95775c4810a495077f19780e55f52e1a60df682dd820fd99869610"
+      },
+      {
+        "timestamp": 1781676497,
+        "sec_to_finish": 13,
+        "price": 0.999,
+        "size": 3.52,
+        "tx": "0xc99ebebdcd25398e94e3191d4b1a0b4fa22ca9ac64ab0e87a90732cc5964907c"
+      },
+      {
+        "timestamp": 1781676497,
+        "sec_to_finish": 13,
+        "price": 0.999,
+        "size": 23.83,
+        "tx": "0xfbe3734543cd637a458cbedf8e4dedc5c9906930de0b613305fc51ecf4dc08cf"
+      },
+      {
+        "timestamp": 1781676499,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 1.42,
+        "tx": "0x0268a3c0f46c37a1f4c2c2243f0c731a2472b89cdd35639ce2755535f435d145"
+      },
+      {
+        "timestamp": 1781676499,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 850.8,
+        "tx": "0x426eba3c50cd2e5376e89a7af13d5a003652948d67bb5877109473bb56494fb0"
+      },
+      {
+        "timestamp": 1781676500,
+        "sec_to_finish": 10,
+        "price": 0.999,
+        "size": 379.95,
+        "tx": "0x35a485e35320184f7411a633f430fa5feec3fefe37ba432604dc2c7466d49594"
+      },
+      {
+        "timestamp": 1781676500,
+        "sec_to_finish": 10,
+        "price": 0.999,
+        "size": 5.15,
+        "tx": "0x934d0e0f24e900d702f5fefd72bfbbb0b04f895d8e33640b75e93153ca9f0e86"
+      },
+      {
+        "timestamp": 1781676502,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 69.34,
+        "tx": "0x95fd8b8554790e60d186cd9dde9fe3347ec24105e8f10e70ecb4020635ec22c8"
+      },
+      {
+        "timestamp": 1781676505,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 568.18,
+        "tx": "0x7790bb6a064b03678477992223c5b758cd9fd5fecf69a135603992cac51f7f0a"
+      },
+      {
+        "timestamp": 1781676505,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 830.0,
+        "tx": "0xc9bf2d51fa2843f241c76b744e8dabeba47f8f8ca50f1f6982b827efda5a5e0b"
+      },
+      {
+        "timestamp": 1781676505,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 11.36,
+        "tx": "0xed7dffdf4f387d2de17dcd7aa55dbdd6efb8f69d31c6733569437702ce3e982d"
+      },
+      {
+        "timestamp": 1781676505,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 1.36,
+        "tx": "0x54cdcab519767f4110916759bc1067346c91b9a67583e06edd93d7dae6d2d5d4"
+      },
+      {
+        "timestamp": 1781676506,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 14.28,
+        "tx": "0xe226c3279b57fa1b4080e4ddf170c60fbe0e3068a4d5b102a564ea4b24aadcf3"
+      },
+      {
+        "timestamp": 1781676506,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 15.47,
+        "tx": "0xa1eb26055fb76ebd4989814a046721310deb748c38b0da82d1aeb02ff3815c56"
+      },
+      {
+        "timestamp": 1781676506,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 2.22,
+        "tx": "0xec6b3634bb4d66a8920da8a5f0aeda2f8539064fdabe5509fce3ce5022299e83"
+      },
+      {
+        "timestamp": 1781676506,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 2.73,
+        "tx": "0xe3db6313b4951eedbbfaaf8386102f4dc61a19d74d9569b80d527e8897f84a16"
+      },
+      {
+        "timestamp": 1781676508,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 909.09,
+        "tx": "0x3e8d5d6551a8881445c123316f6bea5430581d4dadaf416e67d3a6d32ec9efb6"
+      },
+      {
+        "timestamp": 1781676509,
+        "sec_to_finish": 1,
+        "price": 0.999,
+        "size": 4.16,
+        "tx": "0x2f12e2097967a84d7facadffa47347374855a5d044ef3a38d0e9d67ddda509cd"
+      },
+      {
+        "timestamp": 1781676509,
+        "sec_to_finish": 1,
+        "price": 0.999,
+        "size": 1.42,
+        "tx": "0x3859dff0552b1221e3b43ccb66afe0e95be8e19e7cf348db8160cbdf1807f20a"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 54,
+    "size_le_0.999_60": 10654.34
+  },
+  {
+    "date": "2026-06-17",
+    "slug": "fifwc-eng-hrv-2026-06-17",
+    "title": "England vs. Croatia",
+    "score": "4-2",
+    "margin": 2,
+    "winner": "England",
+    "market_slug": "fifwc-eng-hrv-2026-06-17-eng",
+    "question": "Will England win on 2026-06-17?",
+    "conditionId": "0xb361c29b5481164886627cb175ed76792df30902e66ec329c0a3853f807fe8e9",
+    "token": "45513813860398961340723481590130352932611791552209098368268600222240572304551",
+    "fetched_trades": 3985,
+    "page_errors": [],
+    "buy_trades_60": 77,
+    "buy_size_60": 12253.16,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781733626,
+        "sec_to_finish": 59,
+        "price": 0.999,
+        "size": 11.61,
+        "tx": "0xba09a5c488c0bc4f20cb7fbb2f14ccf0dd559a399c874fceeda2d829299036a2"
+      },
+      {
+        "timestamp": 1781733628,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 0.59,
+        "tx": "0x2f78c9be02d2b7b76c2931ec7eb3f9c1102836453687fb2da48ed1a0b97627c0"
+      },
+      {
+        "timestamp": 1781733628,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 5.0,
+        "tx": "0x2fb76193c9b3e29f1dec3a6bfe9f068bfb12a27076b4e544d4d4ed7be066a324"
+      },
+      {
+        "timestamp": 1781733628,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 0.3,
+        "tx": "0x341d35a7338049d77ceec55a7be9e4a2c7afa7b6b2effd53a42e5981a0460dd8"
+      },
+      {
+        "timestamp": 1781733631,
+        "sec_to_finish": 54,
+        "price": 0.999,
+        "size": 33.89,
+        "tx": "0x5b127b347252b156efdedb2c63f0794027a0ff917cc7ac0f21fb0d97f39d4a70"
+      },
+      {
+        "timestamp": 1781733634,
+        "sec_to_finish": 51,
+        "price": 0.999,
+        "size": 5.42,
+        "tx": "0x3a304febcab5d6b64f7aacff266286c700e1044172183b8f47fe5c2b3cf70146"
+      },
+      {
+        "timestamp": 1781733640,
+        "sec_to_finish": 45,
+        "price": 0.999,
+        "size": 129.87,
+        "tx": "0x3b9049325e09681aed00e4ffca413a12b6b8de69257b3bcc719b6c7751375ae0"
+      },
+      {
+        "timestamp": 1781733640,
+        "sec_to_finish": 45,
+        "price": 0.999,
+        "size": 3.38,
+        "tx": "0x0cdd5b42ad0d8007c030fa467ef7b6ccdd88af0e2cb3d56b1f60c99277c54e94"
+      },
+      {
+        "timestamp": 1781733643,
+        "sec_to_finish": 42,
+        "price": 0.999,
+        "size": 169.49,
+        "tx": "0x70e565817fc06e5f98625fee6556a942191fc1538b0437466fb26d06cad746bd"
+      },
+      {
+        "timestamp": 1781733643,
+        "sec_to_finish": 42,
+        "price": 0.999,
+        "size": 12.28,
+        "tx": "0xf5140e492470434aaf555e46116c589f6792e96f230e5c5a6d08fab09136d6a7"
+      },
+      {
+        "timestamp": 1781733644,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 202.04,
+        "tx": "0xad03d6d030fb8732f25a5b697cf55678d545acf7ca06c4489e2d83ddd0462e5d"
+      },
+      {
+        "timestamp": 1781733646,
+        "sec_to_finish": 39,
+        "price": 0.999,
+        "size": 21.68,
+        "tx": "0xafc82374cfe15423192ec188adac2e48bf82ac8220045c3b9d3c5b8137a3887f"
+      },
+      {
+        "timestamp": 1781733646,
+        "sec_to_finish": 39,
+        "price": 0.999,
+        "size": 86.2,
+        "tx": "0xe8770bee8c5b1eed59bae9e4b08793c0bdeb94c076b68203f9352d535611ce0a"
+      },
+      {
+        "timestamp": 1781733653,
+        "sec_to_finish": 32,
+        "price": 0.999,
+        "size": 3.48,
+        "tx": "0x8ed1db384f05b06ee32b4d9ccf60d7a54dc367aa8a89a91df294f565f89c285b"
+      },
+      {
+        "timestamp": 1781733656,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 98.03,
+        "tx": "0x81ba2f1926cd58027e9a6a6dee7fc1fbcedaa6995b95c6970569a6ed57200bab"
+      },
+      {
+        "timestamp": 1781733656,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 1754.38,
+        "tx": "0x6af4193e74f1234186bbb45922c55c8556efe817f303226e543d36e0329b54b3"
+      },
+      {
+        "timestamp": 1781733656,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 8.77,
+        "tx": "0x30818376e04c53263121261b5f02f72ac743aa26339849bbc944997a5f44c8de"
+      },
+      {
+        "timestamp": 1781733656,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 30.0,
+        "tx": "0xba4f61c91b1a51046df937e9296ada225121c02771f7cd494bea49196e295dce"
+      },
+      {
+        "timestamp": 1781733656,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 1685.72,
+        "tx": "0x645238431a3022de88de4aadad423580d8fdd27f998f4fc3c329a67d92b90b75"
+      },
+      {
+        "timestamp": 1781733658,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 1.72,
+        "tx": "0x4d2189170cb71faddbe43cd62816e2fe01e875fa46fb3aed3143a0cff5f45ff9"
+      },
+      {
+        "timestamp": 1781733658,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 134.57,
+        "tx": "0xebbe13a1429f39ee5f9e818ac48f5a1b0da6f16dc1a65969f27176c81f9d391c"
+      },
+      {
+        "timestamp": 1781733659,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 5.88,
+        "tx": "0x5841825cb15824b0c4d1a2580f80bda48da9179ebfadbfa0ad70b59f4b606b23"
+      },
+      {
+        "timestamp": 1781733659,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 169.49,
+        "tx": "0x0129d34ecf7c8c5acadd96f7f82427c94c39857136147a048d2466d004a87dad"
+      },
+      {
+        "timestamp": 1781733659,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 16.94,
+        "tx": "0xdb6aca17326cc4242cb6ee1c608afe9ad280661a90e9ef75339587b2dad64ba7"
+      },
+      {
+        "timestamp": 1781733659,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 7.12,
+        "tx": "0xfb23de21d0b9bdc478fe9d832e2c5053ce86a3287571b6150e7d3e3607fcfe8e"
+      },
+      {
+        "timestamp": 1781733661,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 93.94,
+        "tx": "0x8b8724a65d601e4d5a817b3a2ae0118073d9e07fc30b9743e73a7190d7089494"
+      },
+      {
+        "timestamp": 1781733661,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 2.35,
+        "tx": "0x8a178d6252473cf3e93e569d9e15aa4e7a7f7755eb2d0ca90ee4f8c6e651162d"
+      },
+      {
+        "timestamp": 1781733661,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 4.66,
+        "tx": "0x29a586299a859f18d267adf55e1eed09f7ec5bb7708640a1f26dbf92b35bfff7"
+      },
+      {
+        "timestamp": 1781733661,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 517.24,
+        "tx": "0x41ddf7fa9864114a10ee592f8db8ebe18cae148d0603b2e8eb182fd2762876bd"
+      },
+      {
+        "timestamp": 1781733661,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 5.23,
+        "tx": "0xdeb358758e9543636d2d9602d58c66602c9d1da8b97bd341e27068d0f2b1b605"
+      },
+      {
+        "timestamp": 1781733662,
+        "sec_to_finish": 23,
+        "price": 0.999,
+        "size": 26.31,
+        "tx": "0x2baf2072e1bce7834f98633ec0d0e5fca76126627dd63cced6546849ab529a7d"
+      },
+      {
+        "timestamp": 1781733664,
+        "sec_to_finish": 21,
+        "price": 0.999,
+        "size": 43.85,
+        "tx": "0x1878c841231c7cbec54cfe4bb4f4cd0aded6af8ee270aef4dcfd54d04fac62a6"
+      },
+      {
+        "timestamp": 1781733665,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 15.45,
+        "tx": "0xe0487ffccc6fa4bdb1843dc7afb384e85ca9be385b0b68eb94c2e3a8b8603893"
+      },
+      {
+        "timestamp": 1781733667,
+        "sec_to_finish": 18,
+        "price": 0.999,
+        "size": 35.08,
+        "tx": "0xe3848170663d6703d38d5af5c4ce035349cc7cff5649ada5d679b90febceaeba"
+      },
+      {
+        "timestamp": 1781733667,
+        "sec_to_finish": 18,
+        "price": 0.999,
+        "size": 169.49,
+        "tx": "0x0f00a07230e73304beb2dc4b33c27296b26faf220eaa7bce71751a854f0450ff"
+      },
+      {
+        "timestamp": 1781733667,
+        "sec_to_finish": 18,
+        "price": 0.999,
+        "size": 129.31,
+        "tx": "0x3c2ee971fd1873dc9e627abcc3d441c4486c8e2bb721da7e17ee2a2322ffd861"
+      },
+      {
+        "timestamp": 1781733667,
+        "sec_to_finish": 18,
+        "price": 0.999,
+        "size": 334.77,
+        "tx": "0xc74f88965f0ad32e5f4dbea673dcd1f684a088f3c73794df6459127e28c2ff5b"
+      },
+      {
+        "timestamp": 1781733667,
+        "sec_to_finish": 18,
+        "price": 0.999,
+        "size": 3.38,
+        "tx": "0xffb0f8ba804c40a0d6d3cade6f927a435e694baae29288af9abdfd03b08079a3"
+      },
+      {
+        "timestamp": 1781733668,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 1.75,
+        "tx": "0x67c2229ea393ba55397770ef67db50e7d6fa3ccab8c2a8a4fc8980bf6a8ecd2b"
+      },
+      {
+        "timestamp": 1781733668,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 7.24,
+        "tx": "0x1dbd093d04a6730ae4622daad481fcf26bffb65f36213568156c59e78e92a475"
+      },
+      {
+        "timestamp": 1781733668,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 482.52,
+        "tx": "0xad1bc7c72081d914c353b619757075e86b2bce564d22f1ec503506f50be7037d"
+      },
+      {
+        "timestamp": 1781733668,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 1.69,
+        "tx": "0x0163da169080a4eabcab5ad1ab883fdfeee2de21e860bdf9c847ac0badc241e7"
+      },
+      {
+        "timestamp": 1781733671,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 52.63,
+        "tx": "0xa8fc2b3a50fa19bec407d421d9cb07abe7a8fb9944fea2fba200e00adaab83e5"
+      },
+      {
+        "timestamp": 1781733673,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 128.2,
+        "tx": "0x3411e9629f6a7746995d58a9c70c239ff774bee5c301610aa547bc3a0faf5f94"
+      },
+      {
+        "timestamp": 1781733673,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 13.24,
+        "tx": "0xca7fbeee6b3ab5cdd1bd75905a4fbe5906875cc0d558dded1d2bfc93a1ea47b8"
+      },
+      {
+        "timestamp": 1781733673,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 707.5,
+        "tx": "0x27ab19ea21c1b61940edd7e4b06e53ad939dfdd6d03221b2c35c12a2f31412b7"
+      },
+      {
+        "timestamp": 1781733673,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 16.94,
+        "tx": "0xeb73318c727572f16b1e65988c2b6f04f6b584416badb77dafaf6397df53978c"
+      },
+      {
+        "timestamp": 1781733673,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 219.98,
+        "tx": "0x6fbca893d85bc924db858e01421aac65de3a360c71df18a99e0d7c4331b3056d"
+      },
+      {
+        "timestamp": 1781733674,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 1.72,
+        "tx": "0x104d2ed9da12dce10deaf8f29733e2ac3bb5ed672146dd72c150854814069cd8"
+      },
+      {
+        "timestamp": 1781733676,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 6.49,
+        "tx": "0x1b54de8e134da485a96b854e7632c7b78e8e74a845a2e8f309a7f4b6585ffc55"
+      },
+      {
+        "timestamp": 1781733676,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 164.54,
+        "tx": "0x431b1dc12530953486794e9c0532a5488245910f56cdf013cd74bb635f42c843"
+      },
+      {
+        "timestamp": 1781733676,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 11.33,
+        "tx": "0xd48e2971c1c8148e37d75788cc77817a53941cc3199e6e9063a52acefba2a8a0"
+      },
+      {
+        "timestamp": 1781733676,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 8.62,
+        "tx": "0x145ddab6e0ef13013b403cb816f6ba151adb4de8e94134283fa5677262c80520"
+      },
+      {
+        "timestamp": 1781733676,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 140.35,
+        "tx": "0x9a10c81a54cbcb8b2ea5e5fe915d27f1157a4876555697bb6631dd1286b50098"
+      },
+      {
+        "timestamp": 1781733677,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 80.88,
+        "tx": "0x4adef49417071261d2b25ea0acb802c3382c5195b9023f6dd86082b2bbda16b8"
+      },
+      {
+        "timestamp": 1781733679,
+        "sec_to_finish": 6,
+        "price": 0.999,
+        "size": 10.39,
+        "tx": "0x349b961472190943f95b2e51e7eb11a85bf2ea7f6811a7e4dfc7224a00a2a99b"
+      },
+      {
+        "timestamp": 1781733679,
+        "sec_to_finish": 6,
+        "price": 0.999,
+        "size": 376.13,
+        "tx": "0x489dc0e500d72799ff96a511d517961b477aaabc9fbb2b707f607dd624740e81"
+      },
+      {
+        "timestamp": 1781733679,
+        "sec_to_finish": 6,
+        "price": 0.999,
+        "size": 33.46,
+        "tx": "0xbda0ed04624c4e7643bf0d5d6e590d17345d6442d2d3233ee1edf7f0ccb3d101"
+      },
+      {
+        "timestamp": 1781733679,
+        "sec_to_finish": 6,
+        "price": 0.999,
+        "size": 8.33,
+        "tx": "0x4153441d2948de4ec68e9790ab29717d778c5e9310b9ea69d98964c96561bdd5"
+      },
+      {
+        "timestamp": 1781733680,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 3.51,
+        "tx": "0xc9fa83969754d932c4228c61e44cc64b27068990b946fb767758d4de0081893a"
+      },
+      {
+        "timestamp": 1781733680,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 8.77,
+        "tx": "0xd17a5cb36a0543312dbabe5fd8e7ff4c3e296f5ea5daeee8b9d511b9b9ea093e"
+      },
+      {
+        "timestamp": 1781733680,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 26.88,
+        "tx": "0xa7c12f5ef86c209ace5af18cca70d18df3e4727dd74fb8c572bf43e59eae3abe"
+      },
+      {
+        "timestamp": 1781733680,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 249.84,
+        "tx": "0xfaa3f499c6bdc6479f86e438430d9f15b92f99ab80a90667048ddd515eaaefee"
+      },
+      {
+        "timestamp": 1781733680,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 384.61,
+        "tx": "0x8f6cac325272e4c4bfbde336a3df4d8d44cc63d108ce102c83c69fb570cdfdc2"
+      },
+      {
+        "timestamp": 1781733680,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 746.82,
+        "tx": "0x2ba9b9c04818bf5e5e46c6acb075d2f20dabef658d9b3cc0387ecd52f01c32c6"
+      },
+      {
+        "timestamp": 1781733682,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 32.75,
+        "tx": "0x6a15dbdec8e3f6ced6677c400cf81d6cdc2f10d97ea742224821a505b6cfb655"
+      },
+      {
+        "timestamp": 1781733682,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 1.96,
+        "tx": "0x21537d7690899f0b69f391cabc5caa6665480e9b3e39a1d65e226ca96a2221f6"
+      },
+      {
+        "timestamp": 1781733682,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 323.79,
+        "tx": "0xb47ff7d70f58135cca95e25d0d3c81bcf8fb664da68ee1752fbdd973522f905b"
+      },
+      {
+        "timestamp": 1781733683,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 7.01,
+        "tx": "0x8107aeafe335cb273291189f75cae80195af118f7b0078e6506e720ec2cac48f"
+      },
+      {
+        "timestamp": 1781733683,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 8.77,
+        "tx": "0x1d608ada3de8724e01e9b26963e006a39baff6676ea9083ac3cf702bb3161775"
+      },
+      {
+        "timestamp": 1781733683,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 77.58,
+        "tx": "0x0b8adaa77d53297a4060c6795ade6dc57f656897c665f74641c5d8a622fcd299"
+      },
+      {
+        "timestamp": 1781733683,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 19.6,
+        "tx": "0x9fcac71f1bb8094b1d2ea89dab3c4a18618ce26dfda12f9915e7bec3cc00adf8"
+      },
+      {
+        "timestamp": 1781733685,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 18.33,
+        "tx": "0x4cb070afadb2014e59f4a72a1198b6a9dac6f1120d175738e4b809fa780c32ca"
+      },
+      {
+        "timestamp": 1781733685,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 6.18,
+        "tx": "0x977f18ac1ecf9aaed9d879861b4cee6765c8ccc846925fef784c8a5e45351456"
+      },
+      {
+        "timestamp": 1781733685,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 12.04,
+        "tx": "0xda3ae82b41a6337e928f20baaf42a77c095aa405a7b6562b89ba61549da63dc0"
+      },
+      {
+        "timestamp": 1781733685,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 147.75,
+        "tx": "0x87a8a9b75e21363dc07d0d93518a801e4106f3d910de78e4456945110768febe"
+      },
+      {
+        "timestamp": 1781733685,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 1724.13,
+        "tx": "0x441e3f06df228c45da384190078cbd0fccad40f446a74685c2b004a73b5b064f"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 77,
+    "size_le_0.999_60": 12253.16
+  },
+  {
+    "date": "2026-06-18",
+    "slug": "fifwc-uzb-col-2026-06-17",
+    "title": "Uzbekistan vs. Colombia",
+    "score": "1-3",
+    "margin": 2,
+    "winner": "Colombia",
+    "market_slug": "fifwc-uzb-col-2026-06-17-col",
+    "question": "Will Colombia win on 2026-06-17?",
+    "conditionId": "0x2f00e48e914ba6606867a6347e90c48cc1fd4da66cc196a191786637f40848e9",
+    "token": "107303881689780116979934419713652545873528717512161697004408881489729317049047",
+    "fetched_trades": 3986,
+    "page_errors": [],
+    "buy_trades_60": 37,
+    "buy_size_60": 12873.26,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781755268,
+        "sec_to_finish": 56,
+        "price": 0.999,
+        "size": 70.42,
+        "tx": "0x4b9cde0329445c2dea52af8935bd6b343d0e209f42c3c4e84c7a4e2e8ce0c100"
+      },
+      {
+        "timestamp": 1781755273,
+        "sec_to_finish": 51,
+        "price": 0.999,
+        "size": 65.93,
+        "tx": "0xe8be21a5ed35fed1048228fe5a779391824aebcca85d70e5cd359f0ae4d77939"
+      },
+      {
+        "timestamp": 1781755274,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 27.39,
+        "tx": "0xa0e189f3352e3b6f4e03e2b50c4a208cd76c0989b07bc34424df32393eee8945"
+      },
+      {
+        "timestamp": 1781755274,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 34.24,
+        "tx": "0x57a37cac97c7ee029ff5774c5cf66ad338e038dc4038f6ea8a8c0585a20550d7"
+      },
+      {
+        "timestamp": 1781755274,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 247.97,
+        "tx": "0x411d4e0c81804ad7ce08fbe149a05ed705449e52305f2f4b2510529c1a3eceab"
+      },
+      {
+        "timestamp": 1781755277,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 11.11,
+        "tx": "0xaf8a7103ea99a1341b37ef4d49eaa4e7268d09c20a40088fa73c3849197a04c2"
+      },
+      {
+        "timestamp": 1781755277,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 9.01,
+        "tx": "0xd9f517672c47761dbb979eae71897f2a2cdeb6224480f4b2765a3218dfde1a1a"
+      },
+      {
+        "timestamp": 1781755277,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 6.57,
+        "tx": "0xeed3845eea7657c1fc09045d7d92229cc475ae2b9eb0913eb242ba460d224faa"
+      },
+      {
+        "timestamp": 1781755283,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 2.03,
+        "tx": "0x432b1d8333212e02a00da9bd9afc754404e5b10d214757af7acda31d3afe71d6"
+      },
+      {
+        "timestamp": 1781755283,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 13.88,
+        "tx": "0x62c6572b9e20ff717b9b6f8b4ffa2d64ed39ac1027c34df66bd02388a1eef734"
+      },
+      {
+        "timestamp": 1781755285,
+        "sec_to_finish": 39,
+        "price": 0.999,
+        "size": 1.4,
+        "tx": "0x4af1d496cea81cf2ab85fb470f3a9a6fa1094d38dd6969524022a7eda917bb50"
+      },
+      {
+        "timestamp": 1781755285,
+        "sec_to_finish": 39,
+        "price": 0.999,
+        "size": 577.51,
+        "tx": "0x8ccd28c4cbd9b93a2c2330174bb4db1a272d7a9dc37250e2c0a95cafeae5ac91"
+      },
+      {
+        "timestamp": 1781755286,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 7737.27,
+        "tx": "0xe3a20b9e17a8d4e5388604c23de080e5dfc751767f67c37d28b4668a5f689b9d"
+      },
+      {
+        "timestamp": 1781755291,
+        "sec_to_finish": 33,
+        "price": 0.999,
+        "size": 45.52,
+        "tx": "0xd96c29375d67fb6bd9230ef0b838073dbdbc181dfff8dc249ef723d9fdc3a9d6"
+      },
+      {
+        "timestamp": 1781755291,
+        "sec_to_finish": 33,
+        "price": 0.999,
+        "size": 15.49,
+        "tx": "0xacbf88372825e89c9eb995d51454704bc14b176b44884db83dbcf3fa317ec501"
+      },
+      {
+        "timestamp": 1781755291,
+        "sec_to_finish": 33,
+        "price": 0.999,
+        "size": 131.11,
+        "tx": "0x914c03eab7d6610d4ab33fe1df0c35dd769d84bc936e40b167e5de54dac5ed16"
+      },
+      {
+        "timestamp": 1781755295,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 11.84,
+        "tx": "0xec85547d824506e546cd44ac907fb033bbfcf4fa175bb1864dfd1b522661f973"
+      },
+      {
+        "timestamp": 1781755295,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 201.8,
+        "tx": "0xbeddd257fb39b4993d03b9d7ed3a81f3ebaf93ed8f9ed93285c5af8f2aaf3b79"
+      },
+      {
+        "timestamp": 1781755297,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 462.96,
+        "tx": "0xb5ba28af875aeb459b9dc9bfbee56ab9d3a26311424b546b40f47213d15e2f00"
+      },
+      {
+        "timestamp": 1781755297,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 25.09,
+        "tx": "0x094a72b72aca17fca901af36257b756fd0cdd0003d6c9293609c1918e5e64e42"
+      },
+      {
+        "timestamp": 1781755300,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 15.17,
+        "tx": "0x859c4374dd4af827536840103efbd0e4f2be70d2bf87c1c3f46dac60e0a989b6"
+      },
+      {
+        "timestamp": 1781755300,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 38.02,
+        "tx": "0xf2a4dddf79a16a8a5e391cad1ecbebf77141aea8e07be4c9c200a4addf7d69f6"
+      },
+      {
+        "timestamp": 1781755300,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 1.81,
+        "tx": "0xcad3451563755dd051b1206c02195cd61cf70914fea178af466ae38857c0eb1d"
+      },
+      {
+        "timestamp": 1781755307,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 46.02,
+        "tx": "0xedc508eccdd2f8a0e52e3e442b05eb3c92069c15a7bfc705f914338b45ad9e6f"
+      },
+      {
+        "timestamp": 1781755309,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 106.66,
+        "tx": "0xa4ddb36ad1e3a1329891ed58eb121c3c78465e034df813e4c5cb751066ed2808"
+      },
+      {
+        "timestamp": 1781755309,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 5.44,
+        "tx": "0xe2a26d310bab3ff6a64809a6e304743114a7c9fd56e41702af4f79bf5fb1b74b"
+      },
+      {
+        "timestamp": 1781755312,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 25.02,
+        "tx": "0x2e42e5d2c6b79ba775b74ce3701c804ca67cfc04145941b959cc6adb62b6de01"
+      },
+      {
+        "timestamp": 1781755312,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 392.0,
+        "tx": "0x1dfbdc539dbd7d5b67589f9ec80c2ecb451b0a3450672d830114538072daf1a1"
+      },
+      {
+        "timestamp": 1781755313,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 5.12,
+        "tx": "0xc800eac8e07735dbbd8d69d225071b1d5e791b66ef1d24a2ffa1047155d0aaae"
+      },
+      {
+        "timestamp": 1781755315,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 26.38,
+        "tx": "0xce50ba956593a46a3cb2d47e9b44df76d7559c302db9dbbe620a8a8a075e972c"
+      },
+      {
+        "timestamp": 1781755315,
+        "sec_to_finish": 9,
+        "price": 0.999,
+        "size": 21.0,
+        "tx": "0x1352008794531a8a68e03ba1fe6ad3092095648e384fa6a711b78790b3baaaad"
+      },
+      {
+        "timestamp": 1781755316,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 159.0,
+        "tx": "0xc9caeaffa985bc691937711e3ec4d6b7f2cf978fc3c220052d2e0409e510b0d0"
+      },
+      {
+        "timestamp": 1781755318,
+        "sec_to_finish": 6,
+        "price": 0.999,
+        "size": 877.15,
+        "tx": "0x7a3aac71a9ef5931859df4a4711c8bb6828e639a27924bd0c73ba8caeba2766f"
+      },
+      {
+        "timestamp": 1781755319,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 625.69,
+        "tx": "0x04b144e35a8fd55a453a192a7a6441addc5a6565238707882b111d49b795bac6"
+      },
+      {
+        "timestamp": 1781755321,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 45.45,
+        "tx": "0x0337de3c57a7f32d0de3aff8192d6bd1d08da60c37a392c191208f827e81b26c"
+      },
+      {
+        "timestamp": 1781755321,
+        "sec_to_finish": 3,
+        "price": 0.999,
+        "size": 718.3,
+        "tx": "0xe8850fdea7a27d53784348aac1bf5cb2a7e612bd9054cc9a09ccf39ebf20a81b"
+      },
+      {
+        "timestamp": 1781755324,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 66.49,
+        "tx": "0xab51c7275112edd57044ab1d2459b38f8f5d0e8b0a26914e40a0015ed23af221"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 37,
+    "size_le_0.999_60": 12873.26
+  },
+  {
+    "date": "2026-06-18",
+    "slug": "fifwc-che-bih-2026-06-18",
+    "title": "Switzerland vs. Bosnia-Herzegovina",
+    "score": "4-1",
+    "margin": 3,
+    "winner": "Switzerland",
+    "market_slug": "fifwc-che-bih-2026-06-18-che",
+    "question": "Will Switzerland win on 2026-06-18?",
+    "conditionId": "0x870bb248c96c52dcf35390a66542471c5bba2896942d6bc97ade41a418646ba8",
+    "token": "106591280142630626115724651117201657682325101150171422307265130569697670708657",
+    "fetched_trades": 3938,
+    "page_errors": [],
+    "buy_trades_60": 34,
+    "buy_size_60": 10457.11,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781816198,
+        "sec_to_finish": 60,
+        "price": 0.999,
+        "size": 70.68,
+        "tx": "0x007b889c711785e1b753e0e05355e56294c25b8e7aa1418821f8f3aaa18d5b72"
+      },
+      {
+        "timestamp": 1781816201,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 6.2,
+        "tx": "0x208a34a009ccfdea3773c815e6faa75ef81fe16c2ef6ab82fa56d8a501a2c4cf"
+      },
+      {
+        "timestamp": 1781816203,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 8.84,
+        "tx": "0x80ed54fc8c8d319829bf8e94af78e03a8ed70eb56ffaa5a77daa05192462d56c"
+      },
+      {
+        "timestamp": 1781816204,
+        "sec_to_finish": 54,
+        "price": 0.999,
+        "size": 47.61,
+        "tx": "0xacc4a4998aee182b21dc31e6490a0c3977234d7bb5c665c8358e19971d1427f3"
+      },
+      {
+        "timestamp": 1781816209,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 2.55,
+        "tx": "0xe2cd0ec313e9a71fc3746ed73ec2f9c78bd80f86cfaadee684fad8d8ae906603"
+      },
+      {
+        "timestamp": 1781816219,
+        "sec_to_finish": 39,
+        "price": 0.999,
+        "size": 26.25,
+        "tx": "0x7f5317455133f1c0e0ea5aa8621de993a95b2894bd32158de4d16c2151d0f272"
+      },
+      {
+        "timestamp": 1781816221,
+        "sec_to_finish": 37,
+        "price": 0.999,
+        "size": 158.73,
+        "tx": "0x8747e41f2f70b4915d206b557e3f42c3b7ed500f0dbf2ce967067c193fcb3651"
+      },
+      {
+        "timestamp": 1781816224,
+        "sec_to_finish": 34,
+        "price": 0.999,
+        "size": 476.19,
+        "tx": "0x9b7d33b2a33e08e6928a52785ad960a8444117c2f7ab9c4bf9c64d660cc7e220"
+      },
+      {
+        "timestamp": 1781816224,
+        "sec_to_finish": 34,
+        "price": 0.999,
+        "size": 9.43,
+        "tx": "0x4f8a3e6e58dd8d7497272356cb3c20a47b155f1a41bf2c89f9144ab0e2291ace"
+      },
+      {
+        "timestamp": 1781816224,
+        "sec_to_finish": 34,
+        "price": 0.999,
+        "size": 111.0,
+        "tx": "0x06d617e613d95c829b8bcf85463e7cf9536632fdcd3c30fe34d2042c1a790205"
+      },
+      {
+        "timestamp": 1781816225,
+        "sec_to_finish": 33,
+        "price": 0.999,
+        "size": 9.39,
+        "tx": "0xef475ed83a2d45d857c6f7873e4043e1b6b4467d802e1c0de27e636ed58c883e"
+      },
+      {
+        "timestamp": 1781816225,
+        "sec_to_finish": 33,
+        "price": 0.999,
+        "size": 47.16,
+        "tx": "0xc51a6ad902eea2c158ae2947db6ca555ba2285b781b92b156580a342ddfae7f5"
+      },
+      {
+        "timestamp": 1781816228,
+        "sec_to_finish": 30,
+        "price": 0.999,
+        "size": 793.65,
+        "tx": "0x5aa1911bd02a975ea16176004f78cb24bdeac851e98e72c7f0b935f6644bd3a1"
+      },
+      {
+        "timestamp": 1781816228,
+        "sec_to_finish": 30,
+        "price": 0.999,
+        "size": 0.37,
+        "tx": "0x1060b818965568e113a3e10b3551aa53c64509ab173ada11812fc433c52d5356"
+      },
+      {
+        "timestamp": 1781816230,
+        "sec_to_finish": 28,
+        "price": 0.999,
+        "size": 2.27,
+        "tx": "0x722eacbcf1939bb8dce6dd8d8c33787ce261b74c14440517bf59e42326eae1df"
+      },
+      {
+        "timestamp": 1781816231,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 106.38,
+        "tx": "0x0b2ef0c14cfd1125e26ab2abb3cd4ed44ef22a31bb9d8b3bd9bdb3145229af79"
+      },
+      {
+        "timestamp": 1781816233,
+        "sec_to_finish": 25,
+        "price": 0.999,
+        "size": 3.17,
+        "tx": "0x32da4c5c13e0a9c6cae49223ec5306411de34013b0ec68315c5be58b00e40305"
+      },
+      {
+        "timestamp": 1781816234,
+        "sec_to_finish": 24,
+        "price": 0.999,
+        "size": 188.67,
+        "tx": "0x1e5de30edbadd2ef5182ad9b5b85a9d4aead4847a70b90c187bd3fd8b3828ca0"
+      },
+      {
+        "timestamp": 1781816237,
+        "sec_to_finish": 21,
+        "price": 0.999,
+        "size": 1445.28,
+        "tx": "0x3ee454a039d8b50a5007e47be820276a2e25a7bbec01b0078995908a30f81cc1"
+      },
+      {
+        "timestamp": 1781816239,
+        "sec_to_finish": 19,
+        "price": 0.999,
+        "size": 3.42,
+        "tx": "0x6cde97b1d4ffb333b4802d11ef2a757edbfa07df1906590060a602b66a88cfc3"
+      },
+      {
+        "timestamp": 1781816243,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 6.92,
+        "tx": "0xdc9c7808dd72b4405c81d4a63a3c0dbd7460304873abfb097400f536791c3ddd"
+      },
+      {
+        "timestamp": 1781816243,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 158.73,
+        "tx": "0x9ddfe80e49fa5d89a44692e659bf272a6ecfa95959b45105490916aa0e17cd22"
+      },
+      {
+        "timestamp": 1781816245,
+        "sec_to_finish": 13,
+        "price": 0.999,
+        "size": 0.11,
+        "tx": "0x406d9a600c824a2dfce5c295deb614d108214867232ef473db3f99ce35cafbea"
+      },
+      {
+        "timestamp": 1781816246,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 4407.93,
+        "tx": "0xcfc295cbdcea66e5aa058f0f30e9e623fba714c36c7d970cd02fb4f48bb68aed"
+      },
+      {
+        "timestamp": 1781816246,
+        "sec_to_finish": 12,
+        "price": 0.999,
+        "size": 31.74,
+        "tx": "0xa24012f4b87e5935202eeecf39dd82ffc63bc7890f08cf807cb793562eda330c"
+      },
+      {
+        "timestamp": 1781816248,
+        "sec_to_finish": 10,
+        "price": 0.999,
+        "size": 1.74,
+        "tx": "0x72b1092c927aec5c57fcd1014c4d45432842197218b24199463c6697c48e43cd"
+      },
+      {
+        "timestamp": 1781816248,
+        "sec_to_finish": 10,
+        "price": 0.999,
+        "size": 404.76,
+        "tx": "0x40e1e95d09564135ed255e53729ce7511a43eae4713ef1ae6f093613368427f1"
+      },
+      {
+        "timestamp": 1781816251,
+        "sec_to_finish": 7,
+        "price": 0.999,
+        "size": 206.34,
+        "tx": "0x593e230dd30ae92205f3d049353a4b318f70dc06bf8ec0986ab197c0bb61bbd6"
+      },
+      {
+        "timestamp": 1781816254,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 3.17,
+        "tx": "0x00c264a9fa8cb9cb3aa5823fa4e8cfc5109468bbe411dc2bad7c66c46001de83"
+      },
+      {
+        "timestamp": 1781816254,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 61.55,
+        "tx": "0x9589a0ce2b906c4ebc0e2ad4e25525a2cc380cd35bebb9e94889989c0c649b1e"
+      },
+      {
+        "timestamp": 1781816257,
+        "sec_to_finish": 1,
+        "price": 0.999,
+        "size": 1587.3,
+        "tx": "0x28d01aa25e5c16fee30cd8b863be644e7c622cb25a39bfd0f8de93541b128915"
+      },
+      {
+        "timestamp": 1781816257,
+        "sec_to_finish": 1,
+        "price": 0.999,
+        "size": 51.63,
+        "tx": "0x26f668f96da4dd1a6c8da5b8785a9e61fe5c3242fa243c194e74a39763addac0"
+      },
+      {
+        "timestamp": 1781816257,
+        "sec_to_finish": 1,
+        "price": 0.999,
+        "size": 7.93,
+        "tx": "0x4ac621b5dce6af611be9bc49aa839250e933fc381215a27ae6d2c7bbb70b847e"
+      },
+      {
+        "timestamp": 1781816258,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 10.02,
+        "tx": "0xce2c29e70f90e2ead328aaa4670e51de713cf6274fab4a71e14ba164eb26b840"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 34,
+    "size_le_0.999_60": 10457.11
+  },
+  {
+    "date": "2026-06-18",
+    "slug": "fifwc-can-qat-2026-06-18",
+    "title": "Canada vs. Qatar",
+    "score": "6-0",
+    "margin": 6,
+    "winner": "Canada",
+    "market_slug": "fifwc-can-qat-2026-06-18-can",
+    "question": "Will Canada win on 2026-06-18?",
+    "conditionId": "0xc90f95af1a5d4e392fe9cc484f1b1a0983687865e7b85910ae89300c2076e4a1",
+    "token": "72434460309427898004674696764153066565237298072408402131497058701161364650505",
+    "fetched_trades": 3932,
+    "page_errors": [],
+    "buy_trades_60": 4,
+    "buy_size_60": 200.25,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781827285,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 133.33,
+        "tx": "0xeb7f3eaeac9c75e43742265b27b4ed09b68b9bff9c226e4b352a482370f1b34d"
+      },
+      {
+        "timestamp": 1781827303,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 19.73,
+        "tx": "0x2783fda51f308b8b19e98989ff18eb2c8a44d0d1e938054cc3e1897e0561d8b2"
+      },
+      {
+        "timestamp": 1781827319,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 23.0,
+        "tx": "0x9e12e0a90e88db537aafe61076de5cb1d6f405df3bc152f4e4409ec070fa3398"
+      },
+      {
+        "timestamp": 1781827321,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 24.19,
+        "tx": "0x34485288a143b03b58ec600cfd5de3de7044aa6d1c851dd9990a9e064de503ce"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 4,
+    "size_le_0.999_60": 200.25
+  },
+  {
+    "date": "2026-06-19",
+    "slug": "fifwc-usa-aus-2026-06-19",
+    "title": "United States vs. Australia",
+    "score": "2-0",
+    "margin": 2,
+    "winner": "United States",
+    "market_slug": "fifwc-usa-aus-2026-06-19-usa",
+    "question": "Will United States win on 2026-06-19?",
+    "conditionId": "0x7ebb07134794576c154f06fbaa1cc61a5292d58e280ce98207977771c0326c27",
+    "token": "39108014906147153132558864303811863989716119429482110734018531773663181557097",
+    "fetched_trades": 3936,
+    "page_errors": [],
+    "buy_trades_60": 37,
+    "buy_size_60": 9384.84,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781902987,
+        "sec_to_finish": 59,
+        "price": 0.999,
+        "size": 24.59,
+        "tx": "0xce2c4cbd4959527b9429881cf20a53377a730184a39015d37298e8ee3595141a"
+      },
+      {
+        "timestamp": 1781902988,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 16.39,
+        "tx": "0xd97da60a1b479a1c650ce8409be7af830c40c213ce18759cf7e3982f970f5ee4"
+      },
+      {
+        "timestamp": 1781902988,
+        "sec_to_finish": 58,
+        "price": 0.999,
+        "size": 8.19,
+        "tx": "0xd74bd602e13e6167eec6620d2e1adb2371072ac14a755cc7b27ebb3085b4b55e"
+      },
+      {
+        "timestamp": 1781902991,
+        "sec_to_finish": 55,
+        "price": 0.999,
+        "size": 111.24,
+        "tx": "0xa847f0b5efd071e10613a386f295c1eb797c6f1f0869f312c3989983ea28406b"
+      },
+      {
+        "timestamp": 1781902993,
+        "sec_to_finish": 53,
+        "price": 0.999,
+        "size": 1.63,
+        "tx": "0x435d363959a8d322ec1428a782f695276bd39f29d4431325dd3d81f2bb59af0f"
+      },
+      {
+        "timestamp": 1781902994,
+        "sec_to_finish": 52,
+        "price": 0.999,
+        "size": 41.93,
+        "tx": "0xb8fbd617c611e4e951f986acb41119f19d2aa197632022c84a9ed29aa4c6e5d5"
+      },
+      {
+        "timestamp": 1781902997,
+        "sec_to_finish": 49,
+        "price": 0.999,
+        "size": 6.17,
+        "tx": "0xaed9526bfd33f1de7ee7b9c6d3cfa8163c119a6a867af1cc27ffd31dc0704fcd"
+      },
+      {
+        "timestamp": 1781902999,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 166.66,
+        "tx": "0x73a0eb38aaeab83c170a1d69e10ff5faa907bc0c2cf1a036e9bb459b75346cae"
+      },
+      {
+        "timestamp": 1781903000,
+        "sec_to_finish": 46,
+        "price": 0.999,
+        "size": 326.75,
+        "tx": "0x9af1a5fa13adf55b47318071932813a38a91ed5b727a2a9c72cf8846b1f1b790"
+      },
+      {
+        "timestamp": 1781903000,
+        "sec_to_finish": 46,
+        "price": 0.999,
+        "size": 262.29,
+        "tx": "0x42093e7fdcf3e3227adb70d51ee5af925a84efe442790789e1761c3195f16786"
+      },
+      {
+        "timestamp": 1781903003,
+        "sec_to_finish": 43,
+        "price": 0.999,
+        "size": 10.71,
+        "tx": "0x3dcf82161c007bf04985142f4a840b4e4cc577457072932d91c2f2729d54295d"
+      },
+      {
+        "timestamp": 1781903005,
+        "sec_to_finish": 41,
+        "price": 0.999,
+        "size": 19.04,
+        "tx": "0x3ac99c3258fb1ec9b7c4b5b28db4de752e9b60dd035da7687c89c188513a805a"
+      },
+      {
+        "timestamp": 1781903006,
+        "sec_to_finish": 40,
+        "price": 0.999,
+        "size": 1.58,
+        "tx": "0x6bd0cf229d8f2dd773a62fc86e7e559c2edbc94c77b44dbeabd22ebe0a28c75d"
+      },
+      {
+        "timestamp": 1781903008,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 3.27,
+        "tx": "0xddce3a9f7fe36f81ed970465934bbebcbd9042dcace75b57673365f90e01c3cd"
+      },
+      {
+        "timestamp": 1781903008,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 5.05,
+        "tx": "0xc41b21896aa3883a0230b896180bd1280e8bfd46fd3ef77348172d3a9c9328c6"
+      },
+      {
+        "timestamp": 1781903011,
+        "sec_to_finish": 35,
+        "price": 0.999,
+        "size": 159.14,
+        "tx": "0x1250f68bf8ecd62edde3c15386978792c77bac4ac724a7e26ed85026a96b0581"
+      },
+      {
+        "timestamp": 1781903014,
+        "sec_to_finish": 32,
+        "price": 0.999,
+        "size": 83.0,
+        "tx": "0x0cac3982dff7b3d030901ed7f0e5f3ebf1cc0e30dda1518e4a745ae628b72512"
+      },
+      {
+        "timestamp": 1781903015,
+        "sec_to_finish": 31,
+        "price": 0.999,
+        "size": 160.18,
+        "tx": "0x74d37c09286820d99b45e22caab8959c2cdf1729f39157b13552188486e30380"
+      },
+      {
+        "timestamp": 1781903017,
+        "sec_to_finish": 29,
+        "price": 0.999,
+        "size": 45.9,
+        "tx": "0x2ce626ab2b849c2afcaa1d9bcb1fd503dc0213c5cde984a86691d9da7162256f"
+      },
+      {
+        "timestamp": 1781903020,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 3968.25,
+        "tx": "0xdac05b1704b2950cc31b15edcf58708edf674bde2dd382b1eb12475ba686327f"
+      },
+      {
+        "timestamp": 1781903021,
+        "sec_to_finish": 25,
+        "price": 0.999,
+        "size": 15.0,
+        "tx": "0x1ba9e85dbe0f5eb942d8aa2c7c45d8f34d0ec3ba71db4b26f3e3805cbe6fe28b"
+      },
+      {
+        "timestamp": 1781903024,
+        "sec_to_finish": 22,
+        "price": 0.999,
+        "size": 43.29,
+        "tx": "0x4ebd06260ac9dbaaedf9600d1852444d01fe9f5c0d17e30b3f630a7fa32a98a0"
+      },
+      {
+        "timestamp": 1781903024,
+        "sec_to_finish": 22,
+        "price": 0.999,
+        "size": 16.0,
+        "tx": "0x377943102296054671793b5479ee9187c43e76bd75659f03bc47f5c1a4d1cf95"
+      },
+      {
+        "timestamp": 1781903026,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 19.44,
+        "tx": "0x2ca5d38ecda3cbbb20768de75ac6a8b5c8b42b41c8b6f04e71315ca28ca1e1e3"
+      },
+      {
+        "timestamp": 1781903026,
+        "sec_to_finish": 20,
+        "price": 0.999,
+        "size": 8.19,
+        "tx": "0x90503301a895f3a3b7b5bf5ae1cd0b8f8025d166b173c14caaf5bc3c6a2eb281"
+      },
+      {
+        "timestamp": 1781903032,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 4.26,
+        "tx": "0xfb0e57b9e04dfbe27ca47b538ff42fea289c018c9aa8a488292ea9d78a680a52"
+      },
+      {
+        "timestamp": 1781903032,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 16.39,
+        "tx": "0xc15e4ea628c2e4a90a7c2fe18cad81f5950396d84b1946fbf6c991874e9c1de0"
+      },
+      {
+        "timestamp": 1781903033,
+        "sec_to_finish": 13,
+        "price": 0.999,
+        "size": 48.37,
+        "tx": "0xfe518edd1c6ceb3535840ba32a268de0f9e10309a4be795561c2144426dc3090"
+      },
+      {
+        "timestamp": 1781903035,
+        "sec_to_finish": 11,
+        "price": 0.999,
+        "size": 40.58,
+        "tx": "0x592cabc8cc59df53a97c5b983a23cdc6a5e65510050848a3f0c37fb2e0df192c"
+      },
+      {
+        "timestamp": 1781903039,
+        "sec_to_finish": 7,
+        "price": 0.999,
+        "size": 134.91,
+        "tx": "0xecb6b4774808c35edf02b62dcf14cdd24c66d0315f44d184656e150a818574fd"
+      },
+      {
+        "timestamp": 1781903039,
+        "sec_to_finish": 7,
+        "price": 0.999,
+        "size": 2851.47,
+        "tx": "0x394eb4d4cdf2dc3f1a20ef08f5212640a9ff5a749237d0ec83ee1b36f5d04540"
+      },
+      {
+        "timestamp": 1781903041,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 396.72,
+        "tx": "0x5a4f2d0d1793457303c9a31eaeb4a04d13a5abc9c41e9fb8f6fe20ab17063058"
+      },
+      {
+        "timestamp": 1781903041,
+        "sec_to_finish": 5,
+        "price": 0.999,
+        "size": 13.0,
+        "tx": "0x82f5651fe857a99a327775abaeb64a6f36fe4a0964f31ba8eec778eaabd23a7f"
+      },
+      {
+        "timestamp": 1781903042,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 8.68,
+        "tx": "0xf295a505a735af46020d81a6a22050e3933ca6bbe370076be1775f2b11a329cc"
+      },
+      {
+        "timestamp": 1781903042,
+        "sec_to_finish": 4,
+        "price": 0.999,
+        "size": 304.91,
+        "tx": "0x7990926dff636f13626ac6352ad74b2956e42af84351e88c7c8199d2c902d8ae"
+      },
+      {
+        "timestamp": 1781903044,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 21.18,
+        "tx": "0xfbd11d334b016b5c01236e299122c9a483475546fb418f71d71205ed82a1b726"
+      },
+      {
+        "timestamp": 1781903045,
+        "sec_to_finish": 1,
+        "price": 0.999,
+        "size": 20.49,
+        "tx": "0x4db3735ebf62fb10af7e1c84c40cc758c8bf1eabe3d317e603f08015a2b15718"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 37,
+    "size_le_0.999_60": 9384.84
+  },
+  {
+    "date": "2026-06-20",
+    "slug": "fifwc-bra-hai-2026-06-19",
+    "title": "Brazil vs. Haiti",
+    "score": "3-0",
+    "margin": 3,
+    "winner": "Brazil",
+    "market_slug": "fifwc-bra-hai-2026-06-19-bra",
+    "question": "Will Brazil win on 2026-06-19?",
+    "conditionId": "0xc90381f6021b8dc8d07dd3d783d3927f34706f8ce1ed097b21cc92f31b5be076",
+    "token": "103041090730063233481678246468943921262520375914356653176409396265510672924686",
+    "fetched_trades": 3943,
+    "page_errors": [],
+    "buy_trades_60": 2,
+    "buy_size_60": 164.53,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1781922644,
+        "sec_to_finish": 36,
+        "price": 0.999,
+        "size": 108.36,
+        "tx": "0xf02602865ff7868d7fcd3f25f4d698613d0a7f361de490235e9471cb4e3cfcf1"
+      },
+      {
+        "timestamp": 1781922674,
+        "sec_to_finish": 6,
+        "price": 0.999,
+        "size": 56.17,
+        "tx": "0xfee8c4f517955415fb3814a6b42b9518f1221ccf49862f5b94d244fa7743dd6d"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 2,
+    "size_le_0.999_60": 164.53
+  },
+  {
+    "date": "2026-06-20",
+    "slug": "fifwc-nld-swe-2026-06-20",
+    "title": "Netherlands vs. Sweden",
+    "score": "5-1",
+    "margin": 4,
+    "winner": "Netherlands",
+    "market_slug": "fifwc-nld-swe-2026-06-20-nld",
+    "question": "Will Netherlands win on 2026-06-20?",
+    "conditionId": "0xde92d563a6d742a4750c8c83a9c490ee5b02bd5d972a1765ab41c0f9095ef6c0",
+    "token": "81043398291360463170235957547610256181022662944963722274721633505163503937838",
+    "fetched_trades": 3968,
+    "page_errors": [],
+    "buy_trades_60": 0,
+    "buy_size_60": 0,
+    "buy_min_price_60": null,
+    "buy_last_price_60": null,
+    "net_roi_min_pct_60": null,
+    "net_roi_last_pct_60": null,
+    "window_trades": [],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 0,
+    "size_le_0.999_60": 0
+  },
+  {
+    "date": "2026-06-21",
+    "slug": "fifwc-tun-jpn-2026-06-21",
+    "title": "Tunisia vs. Japan",
+    "score": "0-4",
+    "margin": 4,
+    "winner": "Japan",
+    "market_slug": "fifwc-tun-jpn-2026-06-21-jpn",
+    "question": "Will Japan win on 2026-06-21?",
+    "conditionId": "0x051e0ea5b3c394114eacf8ce5e944ca63cbb6ccdef1d086cadc5dd129a3804e6",
+    "token": "91234906493805354217250440222911012200186057450151286874925972448339630680686",
+    "fetched_trades": 3963,
+    "page_errors": [],
+    "buy_trades_60": 18,
+    "buy_size_60": 857.53,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1782021337,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 15.38,
+        "tx": "0xf66861fff942da085b0e835bb6d3f4fede65e949bb7bf75b25e6d82817e3ffff"
+      },
+      {
+        "timestamp": 1782021337,
+        "sec_to_finish": 57,
+        "price": 0.999,
+        "size": 50.72,
+        "tx": "0xbb67a202a5605f71ce994a4d435d64df7112385da536e0ec838002c141f109c9"
+      },
+      {
+        "timestamp": 1782021352,
+        "sec_to_finish": 42,
+        "price": 0.999,
+        "size": 4.41,
+        "tx": "0xe1ef4f15213aeff00b2a9cd63b569dbe09d600d60a63c981ca46854fa55651e5"
+      },
+      {
+        "timestamp": 1782021355,
+        "sec_to_finish": 39,
+        "price": 0.999,
+        "size": 15.93,
+        "tx": "0x6f3bff12f8d82122bb46a7b35538dfa3922243d62e49f0dd378bac79f92d66f4"
+      },
+      {
+        "timestamp": 1782021356,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 14.92,
+        "tx": "0x96b1c2d6201826a996bedbcbe64e030a322d41c9faeea190e92509ebc1ca113f"
+      },
+      {
+        "timestamp": 1782021361,
+        "sec_to_finish": 33,
+        "price": 0.999,
+        "size": 60.75,
+        "tx": "0x7225a850c8b6fa6904e37ca2fc7a17533b3dcde898fa7aa764d8c5ca4c99baa3"
+      },
+      {
+        "timestamp": 1782021362,
+        "sec_to_finish": 32,
+        "price": 0.999,
+        "size": 54.64,
+        "tx": "0xe9e5aab659c2992d594d283d410f58d9bad66ee9cad1609d1e60e9e76c75f1e9"
+      },
+      {
+        "timestamp": 1782021364,
+        "sec_to_finish": 30,
+        "price": 0.999,
+        "size": 149.99,
+        "tx": "0x0859a42597408a81d88a19c903a0706a424b2427d8211bbd6e26dd4a07eeeb12"
+      },
+      {
+        "timestamp": 1782021367,
+        "sec_to_finish": 27,
+        "price": 0.999,
+        "size": 73.52,
+        "tx": "0x36e0b3b992c251dc2782e305d60b57afe02ae647e5303f4571b92e02b175491d"
+      },
+      {
+        "timestamp": 1782021368,
+        "sec_to_finish": 26,
+        "price": 0.999,
+        "size": 15.58,
+        "tx": "0x2799542d88ae7f5dcdd86609867338266df2a25c6b706b63fc95237590243fc7"
+      },
+      {
+        "timestamp": 1782021371,
+        "sec_to_finish": 23,
+        "price": 0.999,
+        "size": 32.6,
+        "tx": "0xf6f4be61ef6c1b9be07fa1e88abee8296421f9b3f34ba72139eaf4d4978bff2b"
+      },
+      {
+        "timestamp": 1782021373,
+        "sec_to_finish": 21,
+        "price": 0.999,
+        "size": 4.41,
+        "tx": "0x280f1855aa7555265316548491c412c98136946a26417de7cff236133bf4e4e7"
+      },
+      {
+        "timestamp": 1782021373,
+        "sec_to_finish": 21,
+        "price": 0.999,
+        "size": 1.56,
+        "tx": "0x976ff0efc7b6d868707b6d913d24e160c4f7001ae1ec666a37c82328260ce6ca"
+      },
+      {
+        "timestamp": 1782021379,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 216.71,
+        "tx": "0xb7a46617c22f076a09ed61dfc676b67f6bd9d70c58b5177422981d7d915e67e9"
+      },
+      {
+        "timestamp": 1782021380,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 11.62,
+        "tx": "0xf4967c2c00208524413d7e1f690cb19b661f7329786abb258861711468d62fb9"
+      },
+      {
+        "timestamp": 1782021380,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 9.84,
+        "tx": "0xeb8edac7f570e02ff8b2a9bb449e86b4fa10532f2a1576f377d1359eb811e3ef"
+      },
+      {
+        "timestamp": 1782021380,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 120.48,
+        "tx": "0xab81fd3e0c72655b102a695d0cfc10b72fcc32886cbfd01e0317490f48236a12"
+      },
+      {
+        "timestamp": 1782021386,
+        "sec_to_finish": 8,
+        "price": 0.999,
+        "size": 4.47,
+        "tx": "0xa2e2a78c31edefc26cead56c134f3a51ca8772ec60366be87c8af3206c7428e4"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 18,
+    "size_le_0.999_60": 857.53
+  },
+  {
+    "date": "2026-06-21",
+    "slug": "fifwc-esp-ksa-2026-06-21",
+    "title": "Spain vs. Saudi Arabia",
+    "score": "4-0",
+    "margin": 4,
+    "winner": "Spain",
+    "market_slug": "fifwc-esp-ksa-2026-06-21-esp",
+    "question": "Will Spain win on 2026-06-21?",
+    "conditionId": "0x2fcf3968f5feff8c544b1be614f1c7aed22f5051949478bc0b39f9e966cab02a",
+    "token": "73510205866448375978164321647457824822309414197359016110940718743916953674850",
+    "fetched_trades": 3959,
+    "page_errors": [],
+    "buy_trades_60": 5,
+    "buy_size_60": 96.48,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1782064847,
+        "sec_to_finish": 59,
+        "price": 0.999,
+        "size": 2.2,
+        "tx": "0x99373b0856d0bf9c2cb7ff69eccf4473fd681c4bf9d995ca2550e0bd442f8a83"
+      },
+      {
+        "timestamp": 1782064873,
+        "sec_to_finish": 33,
+        "price": 0.999,
+        "size": 33.7,
+        "tx": "0x27972fd4310d07023b4d1086797c1b48f2471c5395f127cb4130225828953aa0"
+      },
+      {
+        "timestamp": 1782064891,
+        "sec_to_finish": 15,
+        "price": 0.999,
+        "size": 56.17,
+        "tx": "0x9fd6b9e2bcc9f5c51b714d3ab76a54cd3089d6644d23e7613c4f3ce6b47fdc7f"
+      },
+      {
+        "timestamp": 1782064904,
+        "sec_to_finish": 2,
+        "price": 0.999,
+        "size": 2.17,
+        "tx": "0x20210b5c40f05abb09251f4142a990c8571815019163250a707bd89cb87d9812"
+      },
+      {
+        "timestamp": 1782064906,
+        "sec_to_finish": 0,
+        "price": 0.999,
+        "size": 2.24,
+        "tx": "0xf5277aa44de5c6e0d89611d9630b6e0a4c7dec7c8f9e6e3ca5383248c4b654cc"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 5,
+    "size_le_0.999_60": 96.48
+  },
+  {
+    "date": "2026-06-22",
+    "slug": "fifwc-nzl-egy-2026-06-21",
+    "title": "New Zealand vs. Egypt",
+    "score": "1-3",
+    "margin": 2,
+    "winner": "Egypt",
+    "market_slug": "fifwc-nzl-egy-2026-06-21-egy",
+    "question": "Will Egypt win on 2026-06-21?",
+    "conditionId": "0x16c981b47490212bbb7d70edcccc419a84ff5771bc85c1b7abae37128975953e",
+    "token": "13689393741027779813840434297856122590360803048059505899834082936957632248186",
+    "fetched_trades": 3932,
+    "page_errors": [],
+    "buy_trades_60": 16,
+    "buy_size_60": 2741.03,
+    "buy_min_price_60": 0.999,
+    "buy_last_price_60": 0.999,
+    "net_roi_min_pct_60": 0.0971,
+    "net_roi_last_pct_60": 0.0971,
+    "window_trades": [
+      {
+        "timestamp": 1782097195,
+        "sec_to_finish": 59,
+        "price": 0.999,
+        "size": 642.85,
+        "tx": "0x75c58860534aa2bda486b3450a8aefe0c45bf91a430b148c6b948584a71727a4"
+      },
+      {
+        "timestamp": 1782097202,
+        "sec_to_finish": 52,
+        "price": 0.999,
+        "size": 129.43,
+        "tx": "0x2b727a2eee7b3c335c46cb2179dbd2d862c191f0412d645e10eb53b8c189781d"
+      },
+      {
+        "timestamp": 1782097204,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 67.39,
+        "tx": "0x005c304bf57bcaa3b3811a07e60b2da187497823d6bc7c17ffac8d45579ffdb8"
+      },
+      {
+        "timestamp": 1782097204,
+        "sec_to_finish": 50,
+        "price": 0.999,
+        "size": 901.27,
+        "tx": "0x005c304bf57bcaa3b3811a07e60b2da187497823d6bc7c17ffac8d45579ffdb8"
+      },
+      {
+        "timestamp": 1782097207,
+        "sec_to_finish": 47,
+        "price": 0.999,
+        "size": 1.58,
+        "tx": "0xa7f505d78a3dfb13ecd724d170b7ea1735773c6f4b18461bb4043263bba7063d"
+      },
+      {
+        "timestamp": 1782097210,
+        "sec_to_finish": 44,
+        "price": 0.999,
+        "size": 116.28,
+        "tx": "0x2feaaf4040ff83598340e9ad28d1e14ec1394919251f9370cd34038610571e7f"
+      },
+      {
+        "timestamp": 1782097216,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 295.76,
+        "tx": "0x20f1aea264901db7ba0a518f611ef64649e21af4e80e7dea4edb9a403f6b9575"
+      },
+      {
+        "timestamp": 1782097216,
+        "sec_to_finish": 38,
+        "price": 0.999,
+        "size": 46.51,
+        "tx": "0xcd6e01bd35e55a7ed0b15c1e75e23083909a269bb566ed0f78f4c2dda14bfca1"
+      },
+      {
+        "timestamp": 1782097220,
+        "sec_to_finish": 34,
+        "price": 0.999,
+        "size": 16.14,
+        "tx": "0x72c0ff084d344d2850fbea8e9049a7374e2e9d43d694713b9791b10603d6bb64"
+      },
+      {
+        "timestamp": 1782097222,
+        "sec_to_finish": 32,
+        "price": 0.999,
+        "size": 102.85,
+        "tx": "0xb10c9716c7380f861a9b2da1e3d5b510797d87ec30d23c8636b91b1aa42e7e17"
+      },
+      {
+        "timestamp": 1782097229,
+        "sec_to_finish": 25,
+        "price": 0.999,
+        "size": 129.18,
+        "tx": "0x95eacc65528bb187d0043a6b515a18026b7a34e68f17dc53f6214aaca7338654"
+      },
+      {
+        "timestamp": 1782097235,
+        "sec_to_finish": 19,
+        "price": 0.999,
+        "size": 53.57,
+        "tx": "0x93fb5c488be3b9177a2f5879fdb368c6f04feab8fde0c4eeac8e9980d74310b2"
+      },
+      {
+        "timestamp": 1782097237,
+        "sec_to_finish": 17,
+        "price": 0.999,
+        "size": 29.4,
+        "tx": "0x3cae789ea85c33ffc7bb7e3fa6f6e399a298ff81f525a34743e73545eabb40cc"
+      },
+      {
+        "timestamp": 1782097240,
+        "sec_to_finish": 14,
+        "price": 0.999,
+        "size": 38.33,
+        "tx": "0x108944acb6d27fc4593c71d092e40668d830cd287402ba27b4f9a4d6945b661a"
+      },
+      {
+        "timestamp": 1782097247,
+        "sec_to_finish": 7,
+        "price": 0.999,
+        "size": 68.5,
+        "tx": "0x999de60fbe093481a2cf31db442d3a3a1ad9200093c1cfa740cdcaff7463d16b"
+      },
+      {
+        "timestamp": 1782097253,
+        "sec_to_finish": 1,
+        "price": 0.999,
+        "size": 101.99,
+        "tx": "0x4f4dd19833148a0da10623a3d5ce7b419ee0b334ec62960777794e63088c00c0"
+      }
+    ],
+    "trades_le_0.97_60": 0,
+    "size_le_0.97_60": 0,
+    "trades_le_0.98_60": 0,
+    "size_le_0.98_60": 0,
+    "trades_le_0.99_60": 0,
+    "size_le_0.99_60": 0,
+    "trades_le_0.995_60": 0,
+    "size_le_0.995_60": 0,
+    "trades_le_0.999_60": 16,
+    "size_le_0.999_60": 2741.03
+  }
+]

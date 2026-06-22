@@ -1,0 +1,9 @@
+date,title,score,question,buy_trades_60,buy_size_60,buy_min_price_60,buy_last_price_60,buy_net_min_pct_60,trades_le_0.98_60,size_le_0.98_60,trades_le_0.97_60,size_le_0.97_60,trades_le_0.99_60,size_le_0.99_60
+2026-06-11,Mexico vs. South Africa,2-0,Spread: Mexico (-1.5),8,3132.346567,0.96,0.999,4.0467,5,376.020407,3,225.0,6,426.636567
+2026-06-14,Australia vs. Türkiye,2-0,Spread: Australia (-1.5),19,3675.520557,0.96,0.99,4.0467,15,1848.200157,8,325.87,19,3675.520557
+2026-06-16,France vs. Senegal,3-1,Spread: France (-1.5),128,27561.872248,0.1,0.999,897.3,108,16877.752248,107,16777.752248,123,25525.242248
+2026-06-17,Austria vs. Jordan,3-1,Spread: Austria (-1.5),13,1479.36,0.99,0.99,0.9801,0,0,0,0,13,1479.36
+2026-06-17,England vs. Croatia,4-2,Spread: England (-1.5),11,830.99,0.99,0.99,0.9801,0,0,0,0,11,830.99
+2026-06-18,Uzbekistan vs. Colombia,1-3,Spread: Colombia (-1.5),60,34193.35,0.99,0.999,0.9801,0,0,0,0,42,19242.45
+2026-06-19,United States vs. Australia,2-0,Spread: United States (-1.5),12,4908.7992,0.97,0.999,3.0028,7,1602.82,1,971.77,11,4888.7992
+2026-06-22,New Zealand vs. Egypt,1-3,Spread: Egypt (-1.5),17,8888.1612,0.97,0.99,3.0028,7,5965.83,3,139.93,17,8888.1612
