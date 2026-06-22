@@ -20,3 +20,6 @@ coverage/
 # temporary files
 /tmp/
 *.log
+
+# local git worktrees
+.worktrees/
