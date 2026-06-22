@@ -7,7 +7,7 @@ describe("CLI", () => {
       "--mode", "paper",
       "--match-file", "tests/fixtures/matches/spain-4-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
-      "--orderbook-file", "tests/fixtures/orderbooks/spain-3p5-ask-097.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "97"
     ]);
 
@@ -17,9 +17,11 @@ describe("CLI", () => {
       mode: "paper",
       status: "filled",
       action: "BUY",
-      marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-3pt5",
+      marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-2pt5",
       outcome: "Spain",
-      line: -3.5,
+      line: -2.5,
+      strategy: "spread_tight_loss_ge2",
+      lossRequiresGoals: 2,
       bestAsk: 0.97
     });
   });
@@ -29,7 +31,7 @@ describe("CLI", () => {
       "--mode", "live",
       "--match-file", "tests/fixtures/matches/spain-4-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
-      "--orderbook-file", "tests/fixtures/orderbooks/spain-3p5-ask-097.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "5",
       "--order-type", "FOK"
     ], {});

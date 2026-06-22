@@ -1,5 +1,5 @@
 import { inflateSync, unzipSync } from "node:zlib";
-import type { SpreadMarket } from "../domain/types.js";
+import type { SpreadMarket, StrategyMarket, StrategyMarketType } from "../domain/types.js";
 import { fetchText } from "./http.js";
 
 export async function fetchEventSpreadMarkets(eventSlug: string): Promise<SpreadMarket[]> {
@@ -7,6 +7,13 @@ export async function fetchEventSpreadMarkets(eventSlug: string): Promise<Spread
   const payload = extractNextInitialState(html);
   const state = decodeInitialStatePayload(payload);
   return findSpreadMarkets(state, eventSlug);
+}
+
+export async function fetchEventStrategyMarkets(eventSlug: string): Promise<StrategyMarket[]> {
+  const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
+  const payload = extractNextInitialState(html);
+  const state = decodeInitialStatePayload(payload);
+  return findStrategyMarkets(state, eventSlug);
 }
 
 export function extractNextInitialState(html: string): string {
@@ -38,6 +45,56 @@ export function findSpreadMarkets(state: unknown, eventSlug?: string): SpreadMar
   });
 
   return dedupeMarkets(markets);
+}
+
+export function findStrategyMarkets(state: unknown, eventSlug?: string): StrategyMarket[] {
+  const markets: StrategyMarket[] = [];
+
+  walk(state, (value) => {
+    const market = normalizeStrategyMarket(value, eventSlug);
+    if (market) markets.push(market);
+  });
+
+  return dedupeMarkets(markets);
+}
+
+export function normalizeStrategyMarket(value: unknown, eventSlug?: string): StrategyMarket | null {
+  if (!isRecord(value)) return null;
+
+  const question = stringValue(value.question ?? value.title ?? value.name);
+  const marketSlug = stringValue(value.marketSlug ?? value.slug);
+  const conditionId = stringValue(value.conditionId ?? value.condition_id);
+  const outcomes = stringArray(value.outcomes);
+  const clobTokenIds = stringArray(value.clobTokenIds ?? value.clob_token_ids ?? value.tokenIds);
+  const resolvedEventSlug = stringValue(value.eventSlug ?? value.event_slug ?? value.gameSlug) ?? eventSlug;
+
+  if (!question || !marketSlug || !conditionId || !resolvedEventSlug) return null;
+  if (eventSlug && resolvedEventSlug !== eventSlug) return null;
+  if (outcomes.length < 2 || clobTokenIds.length < 2) return null;
+
+  const marketType = inferMarketType(value, question);
+  if (marketType === "unknown") return null;
+
+  const line = numberValue(value.line ?? value.spreadLine ?? value.spread ?? value.total) ?? parseLine(question, marketType);
+  const market: StrategyMarket = {
+    eventSlug: resolvedEventSlug,
+    marketSlug,
+    question,
+    conditionId,
+    clobTokenIds,
+    outcomes,
+    marketType
+  };
+
+  if (line !== null) market.line = line;
+  const team = marketType === "team_total" ? parseTeamTotalTeam(question) : undefined;
+  if (team) market.team = team;
+  const tickSize = tickSizeValue(value.tickSize ?? value.tick_size);
+  if (tickSize) market.tickSize = tickSize;
+  if (typeof value.negRisk === "boolean") market.negRisk = value.negRisk;
+  if (typeof value.neg_risk === "boolean") market.negRisk = value.neg_risk;
+
+  return market;
 }
 
 export function normalizeSpreadMarket(value: unknown, eventSlug?: string): SpreadMarket | null {
@@ -82,6 +139,36 @@ export function parseSpreadLine(text: string): number | null {
   return match?.[1] ? Number(match[1]) : null;
 }
 
+function inferMarketType(value: Record<string, unknown>, question: string): StrategyMarketType {
+  const rawType = stringValue(value.sportsMarketType ?? value.sports_market_type ?? value.marketType)?.toLowerCase();
+  if (rawType === "spreads") return "spread";
+  if (rawType === "totals") return parseTeamTotalTeam(question) ? "team_total" : "total";
+  if (rawType === "moneyline") return "moneyline";
+
+  if (/^spread:/i.test(question)) return "spread";
+  if (/both teams to score/i.test(question)) return "btts";
+  if (/\bend in a draw\b/i.test(question)) return "draw";
+  if (/\bo\/u\b/i.test(question)) return parseTeamTotalTeam(question) ? "team_total" : "total";
+  if (/^will .+ win\b/i.test(question)) return "moneyline";
+  return "unknown";
+}
+
+function parseLine(question: string, marketType: StrategyMarketType): number | null {
+  if (marketType === "spread") return parseSpreadLine(question);
+  if (marketType === "total" || marketType === "team_total") {
+    const match = question.match(/\bO\/U\s+([+-]?\d+(?:\.\d+)?)/i);
+    return match?.[1] ? Number(match[1]) : null;
+  }
+  return null;
+}
+
+function parseTeamTotalTeam(question: string): string | undefined {
+  const afterColon = question.split(":").slice(1).join(":").trim();
+  if (!afterColon) return undefined;
+  const match = afterColon.match(/^(.+?)\s+O\/U\b/i);
+  return match?.[1]?.trim();
+}
+
 function inflateOrUnzip(buffer: Buffer): Buffer {
   try {
     return inflateSync(buffer);
@@ -101,7 +188,7 @@ function walk(value: unknown, visit: (value: unknown) => void): void {
   }
 }
 
-function dedupeMarkets(markets: SpreadMarket[]): SpreadMarket[] {
+function dedupeMarkets<T extends Pick<StrategyMarket, "conditionId" | "marketSlug">>(markets: T[]): T[] {
   const seen = new Set<string>();
   return markets.filter((market) => {
     const key = `${market.conditionId}:${market.marketSlug}`;

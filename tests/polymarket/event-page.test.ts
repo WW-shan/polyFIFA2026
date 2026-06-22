@@ -1,6 +1,6 @@
 import { deflateSync } from "node:zlib";
 import { describe, expect, test } from "vitest";
-import { decodeInitialStatePayload, extractNextInitialState, findSpreadMarkets, parseSpreadLine } from "../../src/polymarket/event-page.js";
+import { decodeInitialStatePayload, extractNextInitialState, findSpreadMarkets, findStrategyMarkets, parseSpreadLine } from "../../src/polymarket/event-page.js";
 
 describe("event page initial state parsing", () => {
   test("extracts base64 zlib initialState and normalizes spread markets", () => {
@@ -49,5 +49,51 @@ describe("event page initial state parsing", () => {
   test("parses spread line from question text", () => {
     expect(parseSpreadLine("Spread: Japan (-3.5)")).toBe(-3.5);
     expect(parseSpreadLine("Spread: Saudi Arabia (+3.5)")).toBe(3.5);
+  });
+
+  test("normalizes latest strategy markets beyond spreads", () => {
+    const state = {
+      markets: [
+        {
+          eventSlug: "fifwc-strong-weak-2026-06-23",
+          slug: "weak-moneyline",
+          question: "Will Weak win on 2026-06-23?",
+          conditionId: "cond-weak",
+          clobTokenIds: "[\"weak-yes\",\"weak-no\"]",
+          outcomes: "[\"Yes\",\"No\"]"
+        },
+        {
+          eventSlug: "fifwc-strong-weak-2026-06-23",
+          slug: "total-2pt5",
+          question: "Strong vs. Weak: O/U 2.5",
+          conditionId: "cond-total",
+          clobTokenIds: "[\"over\",\"under\"]",
+          outcomes: "[\"Over\",\"Under\"]"
+        },
+        {
+          eventSlug: "fifwc-strong-weak-2026-06-23",
+          slug: "weak-team-total-1pt5",
+          question: "Strong vs. Weak: Weak O/U 1.5",
+          conditionId: "cond-team-total",
+          clobTokenIds: "[\"team-over\",\"team-under\"]",
+          outcomes: "[\"Over\",\"Under\"]"
+        },
+        {
+          eventSlug: "fifwc-strong-weak-2026-06-23",
+          slug: "btts",
+          question: "Strong vs. Weak: Both Teams to Score",
+          conditionId: "cond-btts",
+          clobTokenIds: "[\"btts-yes\",\"btts-no\"]",
+          outcomes: "[\"Yes\",\"No\"]"
+        }
+      ]
+    };
+
+    const markets = findStrategyMarkets(state, "fifwc-strong-weak-2026-06-23");
+
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "weak-moneyline", marketType: "moneyline" }));
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "total-2pt5", marketType: "total", line: 2.5 }));
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "weak-team-total-1pt5", marketType: "team_total", team: "Weak", line: 1.5 }));
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "btts", marketType: "btts" }));
   });
 });

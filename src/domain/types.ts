@@ -23,6 +23,33 @@ export interface SpreadMarket {
   negRisk?: boolean;
 }
 
+export type StrategyMarketType = "moneyline" | "draw" | "spread" | "total" | "team_total" | "btts" | "unknown";
+
+export interface StrategyMarket {
+  eventSlug: string;
+  marketSlug: string;
+  question: string;
+  conditionId: string;
+  clobTokenIds: [string, string] | string[];
+  outcomes: [string, string] | string[];
+  line?: number;
+  marketType?: StrategyMarketType;
+  team?: string;
+  tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
+  negRisk?: boolean;
+}
+
+export type TailStrategy =
+  | "loser_no"
+  | "leader_yes_lead_ge2"
+  | "draw_no_lead_ge2"
+  | "spread_tight_loss_ge2"
+  | "total_under_loss_ge2"
+  | "team_total_under_loss_ge2"
+  | "total_over_locked"
+  | "team_total_over_locked"
+  | "btts_yes_locked";
+
 export interface SelectedSpread extends SpreadMarket {
   outcome: string;
   tokenId: string;
@@ -30,11 +57,22 @@ export interface SelectedSpread extends SpreadMarket {
   margin: number;
 }
 
+export interface SelectedStrategyMarket extends StrategyMarket {
+  strategy: TailStrategy;
+  outcome: string;
+  tokenId: string;
+  outcomeIndex: number;
+  lossRequiresGoals: number;
+  spreadSide?: "favorite_cover" | "other_side";
+  locked?: boolean;
+}
+
 export type NoTradeReason =
   | "NOT_WORLD_CUP"
   | "MATCH_NOT_LATE_ENOUGH"
   | "LEAD_TOO_SMALL"
   | "NO_COVERED_SPREAD"
+  | "NO_ELIGIBLE_STRATEGY"
   | "PRICE_TOO_HIGH"
   | "RETURN_TOO_LOW"
   | "DEPTH_TOO_SMALL"
@@ -77,7 +115,10 @@ export interface BuyTradeDecision {
   tokenId: string;
   conditionId: string;
   outcome: string;
-  line: number;
+  line?: number;
+  strategy?: TailStrategy;
+  lossRequiresGoals?: number;
+  locked?: boolean;
   bestAsk: number;
   availableSize: number;
   shares: number;

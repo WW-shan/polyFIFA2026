@@ -1,0 +1,9 @@
+{
+  "tokenId": "token-spain-2p5",
+  "bids": [],
+  "asks": [
+    { "price": 0.97, "size": 200 }
+  ],
+  "tickSize": "0.001",
+  "negRisk": false
+}

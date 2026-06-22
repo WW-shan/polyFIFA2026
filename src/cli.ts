@@ -1,13 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import type { DecisionThresholds, MatchState, OrderbookSnapshot, SpreadMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
+import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
-import { fetchEventSpreadMarkets } from "./polymarket/event-page.js";
-import { buildThresholds } from "./runner.js";
-import { buildTradeDecision } from "./domain/decision.js";
-import { selectCoveredSpread } from "./domain/spread-selector.js";
+import { fetchEventStrategyMarkets } from "./polymarket/event-page.js";
+import { buildThresholds, runDecisionFlow } from "./runner.js";
 import { LiveExecutor } from "./execution/live-executor.js";
 
 export interface CliResult {
@@ -35,18 +34,19 @@ export async function runCli(argv = process.argv.slice(2), env: Record<string, s
   try {
     const args = parseArgs(argv);
     const match = await readJsonFile<MatchState>(args.matchFile);
-    const markets = args.marketsFile ? await readJsonFile<SpreadMarket[]>(args.marketsFile) : await fetchEventSpreadMarkets(match.eventSlug);
+    const markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : await fetchEventStrategyMarkets(match.eventSlug);
     const thresholds = buildThresholds(args.stake, thresholdOverridesFromArgs(args));
+    const orderbooks = args.orderbookFile
+      ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
+      : await fetchCandidateOrderbooks(match, markets, thresholds.watchStartMinute);
 
-    const selection = selectCoveredSpread(match, markets, { watchStartMinute: thresholds.watchStartMinute });
-    if (selection.action === "NO_TRADE") {
-      const decision: TradeDecision = { action: "NO_TRADE", reason: selection.reason, eventSlug: match.eventSlug };
-      if (selection.details) decision.details = selection.details;
-      return ok(summary(args.mode, decision));
-    }
-
-    const orderbook = args.orderbookFile ? await readJsonFile<OrderbookSnapshot>(args.orderbookFile) : await fetchOrderbook(selection.market.tokenId);
-    const decision = buildTradeDecision(match, selection.market, orderbook, thresholds);
+    const decision = runDecisionFlow({
+      match,
+      markets,
+      orderbooks,
+      stake: args.stake,
+      thresholds: thresholdOverridesFromArgs(args)
+    });
     if (decision.action !== "BUY") {
       return ok(summary(args.mode, decision));
     }
@@ -66,6 +66,16 @@ export async function runCli(argv = process.argv.slice(2), env: Record<string, s
 
 function ok(value: unknown): CliResult {
   return { exitCode: 0, stdout: `${JSON.stringify(value, null, 2)}\n`, stderr: "" };
+}
+
+async function fetchCandidateOrderbooks(
+  match: MatchState,
+  markets: readonly StrategyMarket[],
+  watchStartMinute: number
+): Promise<OrderbookSnapshot[]> {
+  const candidates = selectLossRequiresCandidates(match, markets, { watchStartMinute });
+  const tokenIds = [...new Set(candidates.map((candidate) => candidate.tokenId))];
+  return Promise.all(tokenIds.map((tokenId) => fetchOrderbook(tokenId)));
 }
 
 function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Record<string, unknown> {
@@ -90,6 +100,9 @@ function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Reco
     conditionId: decision.conditionId,
     outcome: decision.outcome,
     line: decision.line,
+    strategy: decision.strategy,
+    lossRequiresGoals: decision.lossRequiresGoals,
+    locked: decision.locked,
     bestAsk: decision.bestAsk,
     availableSize: decision.availableSize,
     shares: decision.shares,

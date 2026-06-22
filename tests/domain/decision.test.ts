@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { buildTradeDecision } from "../../src/domain/decision.js";
-import type { DecisionThresholds, MatchState, OrderbookSnapshot, SelectedSpread } from "../../src/domain/types.js";
+import type { DecisionThresholds, MatchState, OrderbookSnapshot, SelectedStrategyMarket } from "../../src/domain/types.js";
 
 const match: MatchState = {
   eventSlug: "fifwc-esp-ksa-2026-06-21",
@@ -13,7 +13,7 @@ const match: MatchState = {
   isLive: true
 };
 
-const selected: SelectedSpread = {
+const selected: SelectedStrategyMarket = {
   eventSlug: match.eventSlug,
   marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-3pt5",
   question: "Spread: Spain (-3.5)",
@@ -26,7 +26,8 @@ const selected: SelectedSpread = {
   outcome: "Spain",
   tokenId: "token-spain-3p5",
   outcomeIndex: 0,
-  margin: 4
+  strategy: "spread_tight_loss_ge2",
+  lossRequiresGoals: 1
 };
 
 const thresholds: DecisionThresholds = {

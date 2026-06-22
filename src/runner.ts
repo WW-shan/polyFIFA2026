@@ -1,20 +1,21 @@
 import { buildTradeDecision } from "./domain/decision.js";
-import { selectCoveredSpread } from "./domain/spread-selector.js";
-import type { DecisionThresholds, MatchState, OrderbookSnapshot, SpreadMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
+import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutor, type LiveExecuteOptions, type LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 
 export const DEFAULT_THRESHOLDS: Omit<DecisionThresholds, "maxNotional"> = {
   watchStartMinute: 82,
-  maxEntryPrice: 0.98,
-  minimumNetReturn: 0.019,
+  maxEntryPrice: 0.999999,
+  minimumNetReturn: 0,
   minimumNotional: 5
 };
 
 export interface FlowInput {
   match: MatchState;
-  markets: SpreadMarket[];
-  orderbook: OrderbookSnapshot;
+  markets: StrategyMarket[];
+  orderbook?: OrderbookSnapshot;
+  orderbooks?: OrderbookSnapshot[];
   stake: number;
   thresholds?: Partial<Omit<DecisionThresholds, "maxNotional">>;
 }
@@ -42,15 +43,42 @@ export function buildThresholds(stake: number, overrides: Partial<Omit<DecisionT
 
 export function runDecisionFlow(input: FlowInput): TradeDecision {
   const thresholds = buildThresholds(input.stake, input.thresholds);
-  const selection = selectCoveredSpread(input.match, input.markets, { watchStartMinute: thresholds.watchStartMinute });
+  const candidates = selectLossRequiresCandidates(input.match, input.markets, { watchStartMinute: thresholds.watchStartMinute });
 
-  if (selection.action === "NO_TRADE") {
-    const decision: TradeDecision = { action: "NO_TRADE", reason: selection.reason, eventSlug: input.match.eventSlug };
-    if (selection.details) decision.details = selection.details;
-    return decision;
+  if (candidates.length === 0) {
+    return { action: "NO_TRADE", reason: "NO_ELIGIBLE_STRATEGY", eventSlug: input.match.eventSlug };
   }
 
-  return buildTradeDecision(input.match, selection.market, input.orderbook, thresholds);
+  const orderbooks = input.orderbooks ?? (input.orderbook ? [input.orderbook] : []);
+  if (orderbooks.length === 0) {
+    return { action: "NO_TRADE", reason: "ORDERBOOK_UNAVAILABLE", eventSlug: input.match.eventSlug, details: "No orderbooks provided" };
+  }
+
+  const decisions = candidates.flatMap((candidate) => {
+    const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
+    if (!orderbook) return [];
+    return [buildTradeDecision(input.match, candidate, orderbook, thresholds)];
+  });
+
+  const buys = decisions
+    .filter((decision): decision is Extract<TradeDecision, { action: "BUY" }> => decision.action === "BUY")
+    .sort((a, b) => {
+      const returnDelta = b.estimatedNetReturn - a.estimatedNetReturn;
+      if (returnDelta !== 0) return returnDelta;
+      return (b.lossRequiresGoals ?? 0) - (a.lossRequiresGoals ?? 0);
+    });
+
+  if (buys[0]) return buys[0];
+
+  const noTrade = decisions.find((decision) => decision.action === "NO_TRADE");
+  if (noTrade) return noTrade;
+
+  return {
+    action: "NO_TRADE",
+    reason: "ORDERBOOK_UNAVAILABLE",
+    eventSlug: input.match.eventSlug,
+    details: "No orderbook matched any eligible strategy token"
+  };
 }
 
 export async function runPaperFlow(input: FlowInput): Promise<FlowResult> {

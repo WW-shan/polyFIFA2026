@@ -6,13 +6,13 @@ import type {
   NoTradeDecision,
   OrderbookSnapshot,
   PriceLevel,
-  SelectedSpread,
+  SelectedStrategyMarket,
   TradeDecision
 } from "./types.js";
 
 export function buildTradeDecision(
   match: MatchState,
-  selected: SelectedSpread,
+  selected: SelectedStrategyMarket,
   orderbook: OrderbookSnapshot,
   thresholds: DecisionThresholds
 ): TradeDecision {
@@ -66,15 +66,18 @@ export function buildTradeDecision(
     tokenId: selected.tokenId,
     conditionId: selected.conditionId,
     outcome: selected.outcome,
-    line: selected.line,
     bestAsk,
     availableSize,
     shares,
     notional,
     estimatedFee,
-    estimatedNetReturn
+    estimatedNetReturn,
+    strategy: selected.strategy,
+    lossRequiresGoals: selected.lossRequiresGoals
   };
 
+  if (selected.line !== undefined) decision.line = selected.line;
+  if (selected.locked !== undefined) decision.locked = selected.locked;
   if (selected.tickSize) decision.tickSize = selected.tickSize;
   if (selected.negRisk !== undefined) decision.negRisk = selected.negRisk;
 
