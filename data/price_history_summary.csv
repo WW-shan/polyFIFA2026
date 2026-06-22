@@ -1,0 +1,39 @@
+mode,date,title,score,market_slug,question,line,last_p_60,min_p_60,last_p_120,min_p_120,net_ret_last60_pct,volumeNum
+max_covered,2026-06-11,Mexico vs. South Africa,2-0,fifwc-mex-rsa-2026-06-11-spread-home-1pt5,Spread: Mexico (-1.5),-1.5,0.975,0.975,0.975,0.957,2.4891,2816846.1459249915
+minus_1_5,2026-06-11,Mexico vs. South Africa,2-0,fifwc-mex-rsa-2026-06-11-spread-home-1pt5,Spread: Mexico (-1.5),-1.5,0.975,0.975,0.975,0.957,2.4891,2816846.1459249915
+max_covered,2026-06-12,United States vs. Paraguay,4-1,fifwc-usa-par-2026-06-12-spread-home-2pt5,Spread: United States (-2.5),-2.5,0.995,0.995,0.995,0.995,0.4875,579166.2188710014
+minus_1_5,2026-06-12,United States vs. Paraguay,4-1,fifwc-usa-par-2026-06-12-spread-home-1pt5,Spread: United States (-1.5),-1.5,0.995,0.995,0.995,0.995,0.4875,1116537.3422299947
+max_covered,2026-06-14,Australia vs. Türkiye,2-0,fifwc-aus-tur-2026-06-14-spread-home-1pt5,Spread: Australia (-1.5),-1.5,0.965,0.965,0.965,0.89,3.5219,373262.9035250002
+minus_1_5,2026-06-14,Australia vs. Türkiye,2-0,fifwc-aus-tur-2026-06-14-spread-home-1pt5,Spread: Australia (-1.5),-1.5,0.965,0.965,0.965,0.89,3.5219,373262.9035250002
+max_covered,2026-06-14,Germany vs. Curaçao,7-1,fifwc-ger-kor-2026-06-14-spread-home-5pt5,Spread: Germany (-5.5),-5.5,0.995,0.995,0.995,0.985,0.4875,1340767.7751290037
+minus_1_5,2026-06-14,Germany vs. Curaçao,7-1,fifwc-ger-kor-2026-06-14-spread-home-1pt5,Spread: Germany (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,556645.1787580014
+max_covered,2026-06-14,Sweden vs. Tunisia,5-1,fifwc-swe-tun-2026-06-14-spread-home-2pt5,Spread: Sweden (-2.5),-2.5,0.995,0.995,0.995,0.995,0.4875,628051.1625550003
+minus_1_5,2026-06-14,Sweden vs. Tunisia,5-1,fifwc-swe-tun-2026-06-14-spread-home-1pt5,Spread: Sweden (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,1113848.2256509992
+max_covered,2026-06-16,France vs. Senegal,3-1,fifwc-fra-sen-2026-06-16-spread-home-1pt5,Spread: France (-1.5),-1.5,0.9945,0.9945,0.9945,0.9945,0.5365,3539124.960470994
+minus_1_5,2026-06-16,France vs. Senegal,3-1,fifwc-fra-sen-2026-06-16-spread-home-1pt5,Spread: France (-1.5),-1.5,0.9945,0.9945,0.9945,0.9945,0.5365,3539124.960470994
+max_covered,2026-06-16,Iraq vs. Norway,1-4,fifwc-irq-nor-2026-06-16-spread-away-2pt5,Spread: Norway (-2.5),-2.5,0.965,0.965,0.965,0.965,3.5219,1635321.8638309948
+minus_1_5,2026-06-16,Iraq vs. Norway,1-4,fifwc-irq-nor-2026-06-16-spread-away-1pt5,Spread: Norway (-1.5),-1.5,0.995,0.995,0.995,0.995,0.4875,2768363.5748300105
+max_covered,2026-06-16,Argentina vs. Algeria,3-0,fifwc-arg-alg-2026-06-16-spread-home-2pt5,Spread: Argentina (-2.5),-2.5,0.9945,0.9945,0.9945,0.97,0.5365,706779.3135309989
+minus_1_5,2026-06-16,Argentina vs. Algeria,3-0,fifwc-arg-alg-2026-06-16-spread-home-1pt5,Spread: Argentina (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,5602383.791640994
+max_covered,2026-06-17,Austria vs. Jordan,3-1,fifwc-aut-jor-2026-06-17-spread-home-1pt5,Spread: Austria (-1.5),-1.5,0.995,0.995,0.995,0.995,0.4875,2221640.343202988
+minus_1_5,2026-06-17,Austria vs. Jordan,3-1,fifwc-aut-jor-2026-06-17-spread-home-1pt5,Spread: Austria (-1.5),-1.5,0.995,0.995,0.995,0.995,0.4875,2221640.343202988
+max_covered,2026-06-17,England vs. Croatia,4-2,fifwc-eng-hrv-2026-06-17-spread-home-1pt5,Spread: England (-1.5),-1.5,0.995,0.995,0.995,0.995,0.4875,1774225.1521820007
+minus_1_5,2026-06-17,England vs. Croatia,4-2,fifwc-eng-hrv-2026-06-17-spread-home-1pt5,Spread: England (-1.5),-1.5,0.995,0.995,0.995,0.995,0.4875,1774225.1521820007
+max_covered,2026-06-17,Uzbekistan vs. Colombia,1-3,fifwc-uzb-col-2026-06-17-spread-away-1pt5,Spread: Colombia (-1.5),-1.5,0.9995,0.9995,0.9995,0.99,0.0485,2584162.249036987
+minus_1_5,2026-06-17,Uzbekistan vs. Colombia,1-3,fifwc-uzb-col-2026-06-17-spread-away-1pt5,Spread: Colombia (-1.5),-1.5,0.9995,0.9995,0.9995,0.99,0.0485,2584162.249036987
+max_covered,2026-06-18,Switzerland vs. Bosnia-Herzegovina,4-1,fifwc-che-bih-2026-06-18-spread-home-2pt5,Spread: Switzerland (-2.5),-2.5,0.9995,0.9995,0.9995,0.732,0.0485,338257.88967
+minus_1_5,2026-06-18,Switzerland vs. Bosnia-Herzegovina,4-1,fifwc-che-bih-2026-06-18-spread-home-1pt5,Spread: Switzerland (-1.5),-1.5,0.9995,0.9995,0.9995,0.995,0.0485,1080600.7267460008
+max_covered,2026-06-18,Canada vs. Qatar,6-0,fifwc-can-qat-2026-06-18-spread-home-5pt5,Spread: Canada (-5.5),-5.5,0.9945,0.9945,0.9945,0.9915,0.5365,213336.82504499986
+minus_1_5,2026-06-18,Canada vs. Qatar,6-0,fifwc-can-qat-2026-06-18-spread-home-1pt5,Spread: Canada (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,7622060.508901045
+max_covered,2026-06-19,United States vs. Australia,2-0,fifwc-usa-aus-2026-06-19-spread-home-1pt5,Spread: United States (-1.5),-1.5,0.9995,0.9995,0.9995,0.975,0.0485,1564512.9566019964
+minus_1_5,2026-06-19,United States vs. Australia,2-0,fifwc-usa-aus-2026-06-19-spread-home-1pt5,Spread: United States (-1.5),-1.5,0.9995,0.9995,0.9995,0.975,0.0485,1564512.9566019964
+max_covered,2026-06-19,Brazil vs. Haiti,3-0,fifwc-bra-hai-2026-06-19-spread-home-2pt5,Spread: Brazil (-2.5),-2.5,0.9995,0.9995,0.9995,0.943,0.0485,3889577.206391973
+minus_1_5,2026-06-19,Brazil vs. Haiti,3-0,fifwc-bra-hai-2026-06-19-spread-home-1pt5,Spread: Brazil (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,1571523.4332779993
+max_covered,2026-06-20,Netherlands vs. Sweden,5-1,fifwc-nld-swe-2026-06-20-spread-home-3pt5,Spread: Netherlands (-3.5),-3.5,0.995,0.995,0.995,0.94,0.4875,264249.11715999997
+minus_1_5,2026-06-20,Netherlands vs. Sweden,5-1,fifwc-nld-swe-2026-06-20-spread-home-1pt5,Spread: Netherlands (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,1595992.0111219992
+max_covered,2026-06-21,Tunisia vs. Japan,0-4,fifwc-tun-jpn-2026-06-21-spread-away-3pt5,Spread: Japan (-3.5),-3.5,0.9955,0.9955,0.9955,0.9945,0.4385,705885.017790999
+minus_1_5,2026-06-21,Tunisia vs. Japan,0-4,fifwc-tun-jpn-2026-06-21-spread-away-1pt5,Spread: Japan (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,4564203.1150559755
+max_covered,2026-06-21,Spain vs. Saudi Arabia,4-0,fifwc-esp-ksa-2026-06-21-spread-home-3pt5,Spread: Spain (-3.5),-3.5,0.9945,0.9945,0.9945,0.9905,0.5365,3160223.901893993
+minus_1_5,2026-06-21,Spain vs. Saudi Arabia,4-0,fifwc-esp-ksa-2026-06-21-spread-home-1pt5,Spread: Spain (-1.5),-1.5,0.9995,0.9995,0.9995,0.9995,0.0485,648031.3650329983
+max_covered,2026-06-21,New Zealand vs. Egypt,1-3,fifwc-nzl-egy-2026-06-21-spread-away-1pt5,Spread: Egypt (-1.5),-1.5,0.98,0.98,0.98,0.975,1.9808,5771933.05328
+minus_1_5,2026-06-21,New Zealand vs. Egypt,1-3,fifwc-nzl-egy-2026-06-21-spread-away-1pt5,Spread: Egypt (-1.5),-1.5,0.98,0.98,0.98,0.975,1.9808,5771933.05328
