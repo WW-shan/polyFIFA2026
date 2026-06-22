@@ -1,0 +1,9 @@
+{
+  "tokenId": "token-spain-3p5",
+  "market": "cond-spain-3p5",
+  "bids": [{ "price": 0.965, "size": 25 }],
+  "asks": [{ "price": 0.97, "size": 250 }, { "price": 0.981, "size": 500 }],
+  "tickSize": "0.001",
+  "negRisk": false,
+  "hash": "fixture-book-spain-3p5"
+}

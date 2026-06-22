@@ -1,0 +1,13 @@
+[
+  {
+    "eventSlug": "fifwc-nzl-egy-2026-06-21",
+    "marketSlug": "fifwc-nzl-egy-2026-06-21-spread-away-1pt5",
+    "question": "Spread: Egypt (-1.5)",
+    "conditionId": "cond-egypt-1p5",
+    "clobTokenIds": ["token-egypt-1p5", "token-new-zealand-plus-1p5"],
+    "outcomes": ["Egypt", "New Zealand"],
+    "line": -1.5,
+    "tickSize": "0.001",
+    "negRisk": false
+  }
+]

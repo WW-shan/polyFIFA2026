@@ -1,0 +1,35 @@
+[
+  {
+    "eventSlug": "fifwc-esp-ksa-2026-06-21",
+    "marketSlug": "fifwc-esp-ksa-2026-06-21-spread-home-1pt5",
+    "question": "Spread: Spain (-1.5)",
+    "conditionId": "cond-spain-1p5",
+    "clobTokenIds": ["token-spain-1p5", "token-saudi-plus-1p5"],
+    "outcomes": ["Spain", "Saudi Arabia"],
+    "line": -1.5,
+    "tickSize": "0.001",
+    "negRisk": false
+  },
+  {
+    "eventSlug": "fifwc-esp-ksa-2026-06-21",
+    "marketSlug": "fifwc-esp-ksa-2026-06-21-spread-home-2pt5",
+    "question": "Spread: Spain (-2.5)",
+    "conditionId": "cond-spain-2p5",
+    "clobTokenIds": ["token-spain-2p5", "token-saudi-plus-2p5"],
+    "outcomes": ["Spain", "Saudi Arabia"],
+    "line": -2.5,
+    "tickSize": "0.001",
+    "negRisk": false
+  },
+  {
+    "eventSlug": "fifwc-esp-ksa-2026-06-21",
+    "marketSlug": "fifwc-esp-ksa-2026-06-21-spread-home-3pt5",
+    "question": "Spread: Spain (-3.5)",
+    "conditionId": "cond-spain-3p5",
+    "clobTokenIds": ["token-spain-3p5", "token-saudi-plus-3p5"],
+    "outcomes": ["Spain", "Saudi Arabia"],
+    "line": -3.5,
+    "tickSize": "0.001",
+    "negRisk": false
+  }
+]

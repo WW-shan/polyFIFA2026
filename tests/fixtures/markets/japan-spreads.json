@@ -1,0 +1,13 @@
+[
+  {
+    "eventSlug": "fifwc-tun-jpn-2026-06-21",
+    "marketSlug": "fifwc-tun-jpn-2026-06-21-spread-away-3pt5",
+    "question": "Spread: Japan (-3.5)",
+    "conditionId": "cond-japan-3p5",
+    "clobTokenIds": ["token-japan-3p5", "token-tunisia-plus-3p5"],
+    "outcomes": ["Japan", "Tunisia"],
+    "line": -3.5,
+    "tickSize": "0.001",
+    "negRisk": false
+  }
+]
