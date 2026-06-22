@@ -12,6 +12,9 @@ export interface LiveExecutorConfig {
   apiSecret?: string;
   passphrase?: string;
   funderAddress?: string;
+  depositWalletAddress?: string;
+  rpcUrl?: string;
+  syncBalanceAllowance?: boolean;
 }
 
 export interface LiveExecuteOptions {
@@ -35,7 +38,7 @@ export interface LiveClobClient {
 export type LiveClientFactory = (config: RequiredLiveExecutorConfig) => Promise<LiveClobClient>;
 
 type RequiredLiveExecutorConfig = Required<Pick<LiveExecutorConfig, "host" | "chainId" | "signatureType" | "privateKey" | "apiKey" | "apiSecret" | "passphrase">> &
-  Pick<LiveExecutorConfig, "funderAddress">;
+  Pick<LiveExecutorConfig, "funderAddress" | "depositWalletAddress" | "rpcUrl" | "syncBalanceAllowance">;
 
 export class LiveExecutionError extends Error {
   readonly code: LiveErrorCode;
@@ -77,17 +80,28 @@ export class LiveExecutor {
 }
 
 export function liveConfigFromEnv(env: Record<string, string | undefined>): LiveExecutorConfig {
+  const depositWalletAddress = env.POLY_DEPOSIT_WALLET_ADDRESS ?? env.DEPOSIT_WALLET_ADDRESS;
   const config: LiveExecutorConfig = {
     host: env.POLY_CLOB_HOST ?? "https://clob.polymarket.com",
     chainId: Number(env.POLY_CHAIN_ID ?? 137),
-    signatureType: Number(env.POLY_SIGNATURE_TYPE ?? 1)
+    signatureType: depositWalletAddress ? 3 : Number(env.POLY_SIGNATURE_TYPE ?? 1)
   };
 
   if (env.POLY_PRIVATE_KEY) config.privateKey = env.POLY_PRIVATE_KEY;
-  if (env.POLY_API_KEY) config.apiKey = env.POLY_API_KEY;
-  if (env.POLY_API_SECRET) config.apiSecret = env.POLY_API_SECRET;
-  if (env.POLY_PASSPHRASE) config.passphrase = env.POLY_PASSPHRASE;
-  if (env.POLY_FUNDER_ADDRESS) config.funderAddress = env.POLY_FUNDER_ADDRESS;
+  const apiKey = env.POLY_API_KEY ?? env.CLOB_API_KEY;
+  const apiSecret = env.POLY_API_SECRET ?? env.CLOB_SECRET;
+  const passphrase = env.POLY_PASSPHRASE ?? env.CLOB_PASS_PHRASE;
+  if (apiKey) config.apiKey = apiKey;
+  if (apiSecret) config.apiSecret = apiSecret;
+  if (passphrase) config.passphrase = passphrase;
+  if (env.POLY_RPC_URL) config.rpcUrl = env.POLY_RPC_URL;
+  if (env.POLY_SYNC_BALANCE_ALLOWANCE) config.syncBalanceAllowance = parseBooleanEnv(env.POLY_SYNC_BALANCE_ALLOWANCE);
+  if (depositWalletAddress) {
+    config.depositWalletAddress = depositWalletAddress;
+    config.funderAddress = depositWalletAddress;
+  } else if (env.POLY_FUNDER_ADDRESS) {
+    config.funderAddress = env.POLY_FUNDER_ADDRESS;
+  }
 
   return config;
 }
@@ -117,14 +131,25 @@ function requireLiveConfig(config: LiveExecutorConfig): RequiredLiveExecutorConf
     passphrase
   };
   if (config.funderAddress) required.funderAddress = config.funderAddress;
+  if (config.depositWalletAddress) required.depositWalletAddress = config.depositWalletAddress;
+  if (config.rpcUrl) required.rpcUrl = config.rpcUrl;
+  if (config.syncBalanceAllowance !== undefined) required.syncBalanceAllowance = config.syncBalanceAllowance;
   return required;
 }
 
 async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Promise<LiveClobClient> {
   try {
     const clob = await import("@polymarket/clob-client-v2");
-    const walletModule = await import("@ethersproject/wallet");
-    const signer = new walletModule.Wallet(config.privateKey);
+    const viem = await import("viem");
+    const accounts = await import("viem/accounts");
+    const chains = await import("viem/chains");
+    const account = accounts.privateKeyToAccount(config.privateKey as `0x${string}`);
+    const chain = config.chainId === 80002 ? chains.polygonAmoy : chains.polygon;
+    const signer = viem.createWalletClient({
+      account,
+      chain,
+      transport: viem.http(config.rpcUrl)
+    });
     const creds = {
       key: config.apiKey,
       secret: config.apiSecret,
@@ -142,6 +167,10 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
 
     return {
       async placeLimitBuy(order: LiveOrderRequest): Promise<TradeResult> {
+        if (config.syncBalanceAllowance) {
+          await client.updateBalanceAllowance({ asset_type: clob.AssetType.COLLATERAL });
+        }
+
         const raw = await client.createAndPostMarketOrder(
           {
             tokenID: order.tokenId,
@@ -161,6 +190,10 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
     if (error instanceof LiveExecutionError) throw error;
     throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", `Unable to initialize Polymarket CLOB client: ${String(error)}`, { raw: error });
   }
+}
+
+function parseBooleanEnv(value: string): boolean {
+  return ["1", "true", "yes", "y", "on"].includes(value.trim().toLowerCase());
 }
 
 export function normalizeLiveOrderResult(order: LiveOrderRequest, raw: unknown): TradeResult {

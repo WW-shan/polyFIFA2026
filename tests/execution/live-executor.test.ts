@@ -82,6 +82,45 @@ describe("LiveExecutor", () => {
     });
   });
 
+  test("uses deposit wallet env as the live funder with POLY_1271 signing", async () => {
+    const placeLimitBuy = vi.fn(async (): Promise<TradeResult> => ({
+      mode: "live",
+      status: "posted",
+      orderId: "live-order-1",
+      tokenId: buyDecision.tokenId,
+      price: buyDecision.bestAsk,
+      shares: buyDecision.shares,
+      notional: buyDecision.notional,
+      fee: buyDecision.estimatedFee,
+      estimatedPayout: buyDecision.shares,
+      estimatedProfit: buyDecision.shares - buyDecision.notional - buyDecision.estimatedFee,
+      raw: { success: true }
+    }));
+    let capturedConfig: { signatureType: number; funderAddress?: string } | undefined;
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xrelayerSignerAddress",
+        POLY_DEPOSIT_WALLET_ADDRESS: "0xdepositWalletAddress",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async (config) => {
+        capturedConfig = config;
+        return { placeLimitBuy };
+      }
+    );
+
+    await executor.execute(buyDecision);
+
+    expect(capturedConfig).toMatchObject({
+      signatureType: 3,
+      funderAddress: "0xdepositWalletAddress"
+    });
+  });
+
   test("LiveExecutionError exposes a stable error code", () => {
     const error = new LiveExecutionError("LIVE_ORDER_REJECTED", "rejected");
 

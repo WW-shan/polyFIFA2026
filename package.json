@@ -13,9 +13,9 @@
     "live:smoke": "BOT_MODE=live tsx src/cli.ts --mode live --match-file tests/fixtures/matches/spain-4-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json --stake 5 --order-type FOK"
   },
   "dependencies": {
-    "@ethersproject/wallet": "^5.8.0",
     "@polymarket/clob-client-v2": "^1.0.6",
-    "undici": "^8.5.0"
+    "undici": "^8.5.0",
+    "viem": "^2.53.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.2",

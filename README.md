@@ -102,11 +102,14 @@ Required live env vars:
 Optional live env vars:
 
 - `POLY_FUNDER_ADDRESS`
-- `POLY_SIGNATURE_TYPE` defaults to `1`
+- `POLY_DEPOSIT_WALLET_ADDRESS` for CLOB v2 deposit-wallet accounts; this overrides `POLY_FUNDER_ADDRESS` and forces `POLY_SIGNATURE_TYPE=3`
+- `POLY_SIGNATURE_TYPE` defaults to `1` unless `POLY_DEPOSIT_WALLET_ADDRESS` is set
+- `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order
+- `POLY_RPC_URL` for viem wallet transport
 - `POLY_CHAIN_ID` defaults to `137`
 - `POLY_CLOB_HOST` defaults to `https://clob.polymarket.com`
 
-Polymarket CLOB v2 may reject older proxy/profile makers with `maker address not allowed, please use the deposit wallet flow`. In that case, configure the deposit-wallet/relayer flow in Polymarket settings, fund that wallet, then use its allowed maker address as `POLY_FUNDER_ADDRESS` with the matching signature type/API credentials.
+Polymarket CLOB v2 may reject older proxy/profile makers with `maker address not allowed, please use the deposit wallet flow`. In that case, use the deposit wallet that holds pUSD as `POLY_DEPOSIT_WALLET_ADDRESS`; do not use `RELAYER_API_KEY_ADDRESS` as the funder. The private key must recover the owner/session signer for that same Polymarket account, and the CLOB API key must be derived from that signer.
 
 ## Network Proxy
 
