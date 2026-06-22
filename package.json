@@ -1,0 +1,26 @@
+{
+  "name": "poly-fifa-2026-tail-spread-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Polymarket World Cup single-match spread tail-entry detector and paper/live executor.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "cli": "tsx src/cli.ts",
+    "paper:fixture": "tsx src/cli.ts --mode paper --match-file tests/fixtures/matches/spain-4-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-3p5-ask-097.json --stake 97",
+    "live:smoke": "BOT_MODE=live tsx src/cli.ts --mode live --match-file tests/fixtures/matches/spain-4-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-3p5-ask-097.json --stake 5 --order-type FOK"
+  },
+  "dependencies": {
+    "@ethersproject/wallet": "^5.8.0",
+    "@polymarket/clob-client": "^5.8.1",
+    "undici": "^8.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.15"
+  }
+}
