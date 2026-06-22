@@ -11,18 +11,6 @@ interface TeamScore {
   goals: number;
 }
 
-const STRATEGY_PRIORITY: Record<TailStrategy, number> = {
-  total_under_loss_ge2: 1,
-  spread_tight_loss_ge2: 2,
-  team_total_under_loss_ge2: 3,
-  draw_no_lead_ge2: 4,
-  leader_yes_lead_ge2: 5,
-  loser_no: 6,
-  total_over_locked: 7,
-  team_total_over_locked: 8,
-  btts_yes_locked: 9
-};
-
 export function selectLossRequiresCandidates(
   match: MatchState,
   markets: readonly StrategyMarket[],
@@ -37,11 +25,7 @@ export function selectLossRequiresCandidates(
     .filter((market) => market.eventSlug === match.eventSlug)
     .flatMap((market) => candidatesForMarket(match, market, includeLocked));
 
-  return dedupeCandidates(candidates).sort((a, b) => {
-    const priorityDelta = STRATEGY_PRIORITY[a.strategy] - STRATEGY_PRIORITY[b.strategy];
-    if (priorityDelta !== 0) return priorityDelta;
-    return b.lossRequiresGoals - a.lossRequiresGoals;
-  });
+  return dedupeCandidates(candidates);
 }
 
 function candidatesForMarket(match: MatchState, market: StrategyMarket, includeLocked: boolean): SelectedStrategyMarket[] {

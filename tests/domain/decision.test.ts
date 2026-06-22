@@ -81,6 +81,12 @@ describe("buildTradeDecision", () => {
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
   });
 
+  test("does not count worse ask levels as size available at the best edge", () => {
+    const decision = buildTradeDecision(match, selected, book([[0.97, 1], [0.98, 200]]), thresholds);
+
+    expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+  });
+
   test("net return below minimum returns RETURN_TOO_LOW", () => {
     const decision = buildTradeDecision(match, selected, book([[0.981, 200]]), {
       ...thresholds,

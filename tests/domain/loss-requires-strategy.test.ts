@@ -44,6 +44,27 @@ describe("selectLossRequiresCandidates", () => {
     }));
   });
 
+  test("does not impose a fixed strategy priority before pricing is known", () => {
+    const candidates = selectLossRequiresCandidates(match, [
+      market({
+        question: "Will Weak win on 2026-06-23?",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["weak-yes", "weak-no"]
+      }),
+      market({
+        question: "Strong vs. Weak: O/U 2.5",
+        outcomes: ["Over", "Under"],
+        clobTokenIds: ["total-over", "total-under"],
+        line: 2.5
+      })
+    ]);
+
+    expect(candidates.map((candidate) => candidate.strategy)).toEqual([
+      "loser_no",
+      "total_under_loss_ge2"
+    ]);
+  });
+
   test("two-goal lead includes leader Yes and draw No", () => {
     const twoGoalLead = { ...match, homeGoals: 2, awayGoals: 0 };
     const candidates = selectLossRequiresCandidates(twoGoalLead, [

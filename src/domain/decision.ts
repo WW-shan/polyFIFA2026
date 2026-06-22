@@ -48,7 +48,7 @@ export function buildTradeDecision(
   }
 
   const availableSize = asks
-    .filter((ask) => ask.price <= thresholds.maxEntryPrice)
+    .filter((ask) => ask.price === bestAsk)
     .reduce((total, ask) => total + ask.size, 0);
   const shares = Math.min(thresholds.maxNotional / bestAsk, availableSize);
   const notional = shares * bestAsk;

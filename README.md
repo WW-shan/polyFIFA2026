@@ -14,7 +14,7 @@ Start here:
 
 ## What The Bot Does
 
-This phase handles World Cup single-match markets where the selected bet only loses after at least two adverse goals, plus locked result markets. It accepts an explicit match state, builds all eligible strategy candidates, checks CLOB asks after fees, and sends the best positive-net decision to either a paper executor or an opt-in live CLOB executor.
+This phase handles World Cup single-match markets where the selected bet only loses after at least two adverse goals, plus locked result markets. It accepts an explicit match state, builds all eligible strategy candidates, checks CLOB asks after fees, and sends the highest estimated net-return positive decision to either a paper executor or an opt-in live CLOB executor.
 
 Examples:
 
@@ -25,6 +25,8 @@ Examples:
 - Already-hit markets such as total `Over` or BTTS `Yes` are included as locked candidates.
 
 Default entry logic has no minimum profit hurdle beyond positive estimated net return after the Polymarket sports taker fee. Since orderbook asks must be `< 1`, the default `minimumNetReturn` is `0` and `maxEntryPrice` is `0.999999`.
+
+Capital allocation is edge-first, not strategy-name-first: once candidates pass `lossRequiresGoals >= 2`, the bot chooses the currently executable candidate with the largest `estimatedNetReturn`. It only counts size available at that best ask price, so worse ask levels are not treated as part of the same edge.
 
 ## Setup
 
