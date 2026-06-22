@@ -1,0 +1,79 @@
+import { describe, expect, test, vi } from "vitest";
+import { LiveExecutionError, LiveExecutor, liveConfigFromEnv } from "../../src/execution/live-executor.js";
+import type { BuyTradeDecision, TradeResult } from "../../src/domain/types.js";
+
+const buyDecision: BuyTradeDecision = {
+  action: "BUY",
+  eventSlug: "fifwc-esp-ksa-2026-06-21",
+  marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-3pt5",
+  question: "Spread: Spain (-3.5)",
+  tokenId: "token-spain-3p5",
+  conditionId: "cond-spain-3p5",
+  outcome: "Spain",
+  line: -3.5,
+  bestAsk: 0.97,
+  availableSize: 200,
+  shares: 100,
+  notional: 97,
+  estimatedFee: 0.0873,
+  estimatedNetReturn: 0.03003,
+  tickSize: "0.001",
+  negRisk: false
+};
+
+describe("LiveExecutor", () => {
+  test("fails clearly when required credentials are missing", async () => {
+    const executor = new LiveExecutor(liveConfigFromEnv({}));
+
+    await expect(executor.execute(buyDecision)).rejects.toMatchObject({
+      code: "LIVE_CREDENTIALS_MISSING",
+      missing: ["POLY_PRIVATE_KEY", "POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE"]
+    });
+  });
+
+  test("passes order details to injected live client", async () => {
+    const placeLimitBuy = vi.fn(async (): Promise<TradeResult> => ({
+      mode: "live",
+      status: "posted",
+      orderId: "live-order-1",
+      tokenId: buyDecision.tokenId,
+      price: buyDecision.bestAsk,
+      shares: buyDecision.shares,
+      notional: buyDecision.notional,
+      fee: buyDecision.estimatedFee,
+      estimatedPayout: buyDecision.shares,
+      estimatedProfit: buyDecision.shares - buyDecision.notional - buyDecision.estimatedFee,
+      raw: { success: true }
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(buyDecision, { orderType: "FAK" });
+
+    expect(result).toMatchObject({ mode: "live", status: "posted", orderId: "live-order-1" });
+    expect(placeLimitBuy).toHaveBeenCalledWith({
+      tokenId: "token-spain-3p5",
+      price: 0.97,
+      size: 100,
+      orderType: "FAK",
+      tickSize: "0.001",
+      negRisk: false
+    });
+  });
+
+  test("LiveExecutionError exposes a stable error code", () => {
+    const error = new LiveExecutionError("LIVE_ORDER_REJECTED", "rejected");
+
+    expect(error.code).toBe("LIVE_ORDER_REJECTED");
+    expect(error.message).toBe("rejected");
+  });
+});
