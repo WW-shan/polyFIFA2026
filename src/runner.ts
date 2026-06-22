@@ -45,7 +45,9 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
   const selection = selectCoveredSpread(input.match, input.markets, { watchStartMinute: thresholds.watchStartMinute });
 
   if (selection.action === "NO_TRADE") {
-    return { action: "NO_TRADE", reason: selection.reason, eventSlug: input.match.eventSlug, details: selection.details };
+    const decision: TradeDecision = { action: "NO_TRADE", reason: selection.reason, eventSlug: input.match.eventSlug };
+    if (selection.details) decision.details = selection.details;
+    return decision;
   }
 
   return buildTradeDecision(input.match, selection.market, input.orderbook, thresholds);

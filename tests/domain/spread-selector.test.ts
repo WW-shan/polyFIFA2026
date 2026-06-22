@@ -33,8 +33,9 @@ describe("selectCoveredSpread", () => {
     const result = selectCoveredSpread(baseMatch, [market("Spain", -1.5), market("Spain", -2.5), market("Spain", -3.5)]);
 
     expect(result.action).toBe("SELECTED");
-    expect(result.market?.outcome).toBe("Spain");
-    expect(result.market?.line).toBe(-3.5);
+    if (result.action !== "SELECTED") throw new Error("expected selected spread");
+    expect(result.market.outcome).toBe("Spain");
+    expect(result.market.line).toBe(-3.5);
   });
 
   test("3-0 Argentina selects Argentina -2.5", () => {
@@ -42,8 +43,9 @@ describe("selectCoveredSpread", () => {
     const result = selectCoveredSpread(match, [market("Argentina", -1.5, match.eventSlug), market("Argentina", -2.5, match.eventSlug), market("Argentina", -3.5, match.eventSlug)]);
 
     expect(result.action).toBe("SELECTED");
-    expect(result.market?.outcome).toBe("Argentina");
-    expect(result.market?.line).toBe(-2.5);
+    if (result.action !== "SELECTED") throw new Error("expected selected spread");
+    expect(result.market.outcome).toBe("Argentina");
+    expect(result.market.line).toBe(-2.5);
   });
 
   test("2-0 Australia selects Australia -1.5", () => {
@@ -51,8 +53,9 @@ describe("selectCoveredSpread", () => {
     const result = selectCoveredSpread(match, [market("Australia", -1.5, match.eventSlug), market("Australia", -2.5, match.eventSlug)]);
 
     expect(result.action).toBe("SELECTED");
-    expect(result.market?.outcome).toBe("Australia");
-    expect(result.market?.line).toBe(-1.5);
+    if (result.action !== "SELECTED") throw new Error("expected selected spread");
+    expect(result.market.outcome).toBe("Australia");
+    expect(result.market.line).toBe(-1.5);
   });
 
   test("one-goal lead returns LEAD_TOO_SMALL", () => {

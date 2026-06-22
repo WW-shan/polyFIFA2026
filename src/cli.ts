@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import type { MatchState, OrderbookSnapshot, SpreadMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import type { DecisionThresholds, MatchState, OrderbookSnapshot, SpreadMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
@@ -36,16 +36,13 @@ export async function runCli(argv = process.argv.slice(2), env: Record<string, s
     const args = parseArgs(argv);
     const match = await readJsonFile<MatchState>(args.matchFile);
     const markets = args.marketsFile ? await readJsonFile<SpreadMarket[]>(args.marketsFile) : await fetchEventSpreadMarkets(match.eventSlug);
-    const thresholds = buildThresholds(args.stake, {
-      maxEntryPrice: args.maxEntryPrice,
-      minimumNetReturn: args.minimumNetReturn,
-      minimumNotional: args.minimumNotional,
-      watchStartMinute: args.watchStartMinute
-    });
+    const thresholds = buildThresholds(args.stake, thresholdOverridesFromArgs(args));
 
     const selection = selectCoveredSpread(match, markets, { watchStartMinute: thresholds.watchStartMinute });
     if (selection.action === "NO_TRADE") {
-      return ok(summary(args.mode, { action: "NO_TRADE", reason: selection.reason, eventSlug: match.eventSlug, details: selection.details }));
+      const decision: TradeDecision = { action: "NO_TRADE", reason: selection.reason, eventSlug: match.eventSlug };
+      if (selection.details) decision.details = selection.details;
+      return ok(summary(args.mode, decision));
     }
 
     const orderbook = args.orderbookFile ? await readJsonFile<OrderbookSnapshot>(args.orderbookFile) : await fetchOrderbook(selection.market.tokenId);
@@ -101,6 +98,15 @@ function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Reco
     decision,
     trade
   };
+}
+
+function thresholdOverridesFromArgs(args: ParsedArgs): Partial<Omit<DecisionThresholds, "maxNotional">> {
+  const overrides: Partial<Omit<DecisionThresholds, "maxNotional">> = {};
+  if (args.maxEntryPrice !== undefined) overrides.maxEntryPrice = args.maxEntryPrice;
+  if (args.minimumNetReturn !== undefined) overrides.minimumNetReturn = args.minimumNetReturn;
+  if (args.minimumNotional !== undefined) overrides.minimumNotional = args.minimumNotional;
+  if (args.watchStartMinute !== undefined) overrides.watchStartMinute = args.watchStartMinute;
+  return overrides;
 }
 
 async function readJsonFile<T>(file: string): Promise<T> {

@@ -91,26 +91,31 @@ export function liveConfigFromEnv(env: Record<string, string | undefined>): Live
 }
 
 function requireLiveConfig(config: LiveExecutorConfig): RequiredLiveExecutorConfig {
+  const privateKey = config.privateKey;
+  const apiKey = config.apiKey;
+  const apiSecret = config.apiSecret;
+  const passphrase = config.passphrase;
   const missing: string[] = [];
-  if (!config.privateKey) missing.push("POLY_PRIVATE_KEY");
-  if (!config.apiKey) missing.push("POLY_API_KEY");
-  if (!config.apiSecret) missing.push("POLY_API_SECRET");
-  if (!config.passphrase) missing.push("POLY_PASSPHRASE");
+  if (!privateKey) missing.push("POLY_PRIVATE_KEY");
+  if (!apiKey) missing.push("POLY_API_KEY");
+  if (!apiSecret) missing.push("POLY_API_SECRET");
+  if (!passphrase) missing.push("POLY_PASSPHRASE");
 
-  if (missing.length > 0) {
+  if (missing.length > 0 || !privateKey || !apiKey || !apiSecret || !passphrase) {
     throw new LiveExecutionError("LIVE_CREDENTIALS_MISSING", `Missing live Polymarket credentials: ${missing.join(", ")}`, { missing });
   }
 
-  return {
+  const required: RequiredLiveExecutorConfig = {
     host: config.host,
     chainId: config.chainId,
     signatureType: config.signatureType,
-    privateKey: config.privateKey,
-    apiKey: config.apiKey,
-    apiSecret: config.apiSecret,
-    passphrase: config.passphrase,
-    funderAddress: config.funderAddress
+    privateKey,
+    apiKey,
+    apiSecret,
+    passphrase
   };
+  if (config.funderAddress) required.funderAddress = config.funderAddress;
+  return required;
 }
 
 async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Promise<LiveClobClient> {
@@ -127,12 +132,13 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
 
     return {
       async placeLimitBuy(order: LiveOrderRequest): Promise<TradeResult> {
-        const raw = await client.createAndPostOrder(
+        const raw = await client.createAndPostMarketOrder(
           {
             tokenID: order.tokenId,
             price: order.price,
             side: clob.Side.BUY,
-            size: order.size
+            amount: order.price * order.size,
+            orderType: clob.OrderType[order.orderType]
           },
           { tickSize: order.tickSize, negRisk: order.negRisk },
           clob.OrderType[order.orderType]
