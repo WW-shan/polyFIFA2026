@@ -221,56 +221,101 @@ async function defaultSportsUpdates(
   options: { auditFile?: string; proxyUrl?: string }
 ): Promise<AsyncIterable<MatchState>> {
   const queue: MatchState[] = [];
+  let failure: Error | undefined;
   let closed = false;
+  let socketClosed = false;
   let pending: (() => void) | undefined;
+  let socket: ReturnType<SportsLiveProvider["connect"]> | undefined;
 
   const wake = (): void => {
     pending?.();
     pending = undefined;
   };
+  const closeSocket = (): void => {
+    if (socketClosed) return;
+    socketClosed = true;
+    try {
+      socket?.close();
+    } catch {
+      // The socket may already be closed by the remote endpoint.
+    }
+  };
+  const fail = (error: unknown): void => {
+    failure ??= toError(error, "Sports live provider failed");
+    closed = true;
+    closeSocket();
+    wake();
+  };
 
   const providerOptions = {
     events,
+    onError: fail,
     ...(options.auditFile !== undefined ? { auditFile: options.auditFile } : {}),
     ...(options.proxyUrl !== undefined ? { proxyUrl: options.proxyUrl } : {})
   };
-  const socket = new SportsLiveProvider(providerOptions).connect((update) => {
+  socket = new SportsLiveProvider(providerOptions).connect((update) => {
     queue.push(update);
     wake();
   });
 
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
+    socketClosed = true;
+    failure ??= abnormalCloseError(event);
     closed = true;
     wake();
   });
-  socket.addEventListener("error", () => {
-    closed = true;
-    wake();
-  });
+  socket.addEventListener("error", fail);
 
   async function* stream(): AsyncIterable<MatchState> {
     try {
       while (true) {
+        if (failure) throw failure;
         const next = queue.shift();
         if (next) {
           yield next;
           continue;
         }
+        if (failure) throw failure;
         if (closed) return;
         await new Promise<void>((resolve) => {
           pending = resolve;
         });
       }
     } finally {
-      try {
-        socket.close();
-      } catch {
-        // The socket may already be closed by the remote endpoint.
-      }
+      closeSocket();
     }
   }
 
   return stream();
+}
+
+function toError(error: unknown, fallback: string): Error {
+  if (error instanceof Error) return error;
+  if (isRecord(error) && error.error instanceof Error) return error.error;
+  const message = isRecord(error) && typeof error.error === "string"
+    ? error.error
+    : typeof error === "string"
+      ? error
+      : fallback;
+  return new Error(message);
+}
+
+function abnormalCloseError(event: unknown): Error | undefined {
+  if (!isRecord(event)) return undefined;
+  const code = typeof event.code === "number" ? event.code : undefined;
+  const reason = typeof event.reason === "string" ? event.reason : "";
+  const wasClean = typeof event.wasClean === "boolean" ? event.wasClean : undefined;
+  if (wasClean !== false && (code === undefined || code === 1000 || code === 1001)) return undefined;
+
+  const details = [
+    code !== undefined ? `code=${code}` : undefined,
+    reason ? `reason=${reason}` : undefined
+  ].filter((part): part is string => part !== undefined);
+  return new Error(`Sports live WebSocket closed unexpectedly${details.length ? ` (${details.join(" ")})` : ""}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function proxyFromEnv(env: Record<string, string | undefined>): string | undefined {
