@@ -1,4 +1,5 @@
 import type { TradeDecision, TradeResult } from "../domain/types.js";
+import { signPoly1271Order } from "./poly1271-signature.js";
 
 export type LiveOrderType = "FOK" | "FAK";
 export type LiveErrorCode = "LIVE_CREDENTIALS_MISSING" | "LIVE_NO_TRADE_DECISION" | "LIVE_ORDER_REJECTED" | "LIVE_CLIENT_UNAVAILABLE";
@@ -171,17 +172,18 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
           await client.updateBalanceAllowance({ asset_type: clob.AssetType.COLLATERAL });
         }
 
-        const raw = await client.createAndPostMarketOrder(
-          {
-            tokenID: order.tokenId,
-            price: order.price,
-            side: clob.Side.BUY,
-            amount: order.price * order.size,
-            orderType: clob.OrderType[order.orderType]
-          },
-          { tickSize: order.tickSize, negRisk: order.negRisk },
-          clob.OrderType[order.orderType]
-        );
+        const orderType = clob.OrderType[order.orderType] as unknown;
+        const userMarketOrder = {
+          tokenID: order.tokenId,
+          price: order.price,
+          side: clob.Side.BUY,
+          amount: order.price * order.size,
+          orderType
+        };
+        const createOptions = { tickSize: order.tickSize, negRisk: order.negRisk };
+        const raw = config.signatureType === 3
+          ? await createAndPostPoly1271MarketOrder(client as unknown as Poly1271PostingClient, config, userMarketOrder, createOptions, orderType)
+          : await client.createAndPostMarketOrder(userMarketOrder as never, createOptions, orderType as never);
 
         return normalizeLiveOrderResult(order, raw);
       }
@@ -190,6 +192,61 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
     if (error instanceof LiveExecutionError) throw error;
     throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", `Unable to initialize Polymarket CLOB client: ${String(error)}`, { raw: error });
   }
+}
+
+interface Poly1271PostingClient {
+  createMarketOrder: (userMarketOrder: any, options: any) => Promise<Record<string, unknown>>;
+  postOrder: (signedOrder: Record<string, unknown>, orderType: any) => Promise<unknown>;
+}
+
+async function createAndPostPoly1271MarketOrder(
+  client: Poly1271PostingClient,
+  config: RequiredLiveExecutorConfig,
+  userMarketOrder: unknown,
+  createOptions: { negRisk: boolean },
+  orderType: unknown
+): Promise<unknown> {
+  const signedOrder = await client.createMarketOrder(userMarketOrder, createOptions);
+  signedOrder.signature = await signPoly1271Order({
+    privateKey: config.privateKey,
+    chainId: config.chainId,
+    exchangeAddress: exchangeV2Address(createOptions.negRisk),
+    order: {
+      salt: field(signedOrder, "salt"),
+      maker: stringRequired(signedOrder, "maker"),
+      signer: stringRequired(signedOrder, "signer"),
+      tokenId: field(signedOrder, "tokenId"),
+      makerAmount: field(signedOrder, "makerAmount"),
+      takerAmount: field(signedOrder, "takerAmount"),
+      side: sideField(signedOrder.side),
+      signatureType: field(signedOrder, "signatureType"),
+      timestamp: field(signedOrder, "timestamp"),
+      metadata: stringField(signedOrder, "metadata"),
+      builder: stringField(signedOrder, "builder")
+    }
+  });
+  return client.postOrder(signedOrder, orderType);
+}
+
+function exchangeV2Address(negRisk: boolean): string {
+  return negRisk ? "0xe2222d279d744050d28e00520010520000310F59" : "0xE111180000d2663C0091e4f400237545B87B996B";
+}
+
+function field(record: Record<string, unknown>, key: string): string | number | bigint {
+  const value = record[key];
+  if (typeof value === "string" || typeof value === "number" || typeof value === "bigint") return value;
+  throw new Error(`POLY_1271_ORDER_FIELD_MISSING: ${key}`);
+}
+
+function stringRequired(record: Record<string, unknown>, key: string): string {
+  const value = stringField(record, key);
+  if (value) return value;
+  throw new Error(`POLY_1271_ORDER_FIELD_MISSING: ${key}`);
+}
+
+function sideField(value: unknown): "BUY" | "SELL" | 0 | 1 {
+  if (value === "BUY" || value === "SELL" || value === 0 || value === 1) return value;
+  throw new Error("POLY_1271_ORDER_FIELD_MISSING: side");
 }
 
 function parseBooleanEnv(value: string): boolean {
