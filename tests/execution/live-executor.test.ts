@@ -26,6 +26,7 @@ const liveOrder: LiveOrderRequest = {
   tokenId: buyDecision.tokenId,
   price: buyDecision.bestAsk,
   size: buyDecision.shares,
+  notional: buyDecision.notional,
   orderType: "FOK",
   tickSize: "0.001",
   negRisk: false,
@@ -75,6 +76,7 @@ describe("LiveExecutor", () => {
       tokenId: "token-spain-3p5",
       price: 0.97,
       size: 100,
+      notional: 97,
       orderType: "FAK",
       tickSize: "0.001",
       negRisk: false,
@@ -162,5 +164,23 @@ describe("LiveExecutor", () => {
       status: "filled",
       orderId: "order-1"
     });
+  });
+
+  test("normalizes live results with the decision notional instead of recomputing floating math", () => {
+    const order: LiveOrderRequest = {
+      ...liveOrder,
+      price: 0.91,
+      size: 1.098901098901099,
+      notional: 1
+    };
+
+    const result = normalizeLiveOrderResult(order, {
+      success: true,
+      orderID: "order-1",
+      status: "matched"
+    });
+
+    expect(result.notional).toBe(1);
+    expect(result.estimatedProfit).toBeCloseTo(order.size - order.notional - order.estimatedFee);
   });
 });

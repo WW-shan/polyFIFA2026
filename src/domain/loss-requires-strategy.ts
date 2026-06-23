@@ -2,7 +2,7 @@ import { getLeader, isWorldCupMatch } from "./spread-selector.js";
 import type { MatchState, SelectedStrategyMarket, StrategyMarket, TailStrategy } from "./types.js";
 
 export interface LossRequiresStrategyOptions {
-  watchStartMinute?: number;
+  entryWindowMinutes?: number;
   includeLocked?: boolean;
 }
 
@@ -16,16 +16,24 @@ export function selectLossRequiresCandidates(
   markets: readonly StrategyMarket[],
   options: LossRequiresStrategyOptions = {}
 ): SelectedStrategyMarket[] {
-  const watchStartMinute = options.watchStartMinute ?? 82;
+  const entryWindowMinutes = options.entryWindowMinutes ?? 3;
   const includeLocked = options.includeLocked ?? true;
 
-  if (!isWorldCupMatch(match) || match.minute < watchStartMinute) return [];
+  if (!isWorldCupMatch(match) || !isInEntryWindow(match, entryWindowMinutes)) return [];
 
   const candidates = markets
     .filter((market) => market.eventSlug === match.eventSlug)
     .flatMap((market) => candidatesForMarket(match, market, includeLocked));
 
   return dedupeCandidates(candidates);
+}
+
+function isInEntryWindow(match: MatchState, entryWindowMinutes: number): boolean {
+  if (match.period !== "2H" || !match.isLive) return false;
+  if (match.remainingMinutes !== undefined) {
+    return match.remainingMinutes >= 0 && match.remainingMinutes <= entryWindowMinutes;
+  }
+  return false;
 }
 
 function candidatesForMarket(match: MatchState, market: StrategyMarket, includeLocked: boolean): SelectedStrategyMarket[] {

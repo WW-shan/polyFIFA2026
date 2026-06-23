@@ -26,6 +26,7 @@ export interface LiveOrderRequest {
   tokenId: string;
   price: number;
   size: number;
+  notional: number;
   orderType: LiveOrderType;
   tickSize: "0.1" | "0.01" | "0.001" | "0.0001";
   negRisk: boolean;
@@ -72,6 +73,7 @@ export class LiveExecutor {
       tokenId: decision.tokenId,
       price: decision.bestAsk,
       size: decision.shares,
+      notional: decision.notional,
       orderType: options.orderType ?? "FOK",
       tickSize: decision.tickSize ?? "0.001",
       negRisk: decision.negRisk ?? false,
@@ -177,7 +179,7 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
           tokenID: order.tokenId,
           price: order.price,
           side: clob.Side.BUY,
-          amount: order.price * order.size,
+          amount: order.notional,
           orderType
         };
         const createOptions = { tickSize: order.tickSize, negRisk: order.negRisk };
@@ -265,7 +267,7 @@ export function normalizeLiveOrderResult(order: LiveOrderRequest, raw: unknown):
   const orderId = stringField(raw, "orderID") ?? stringField(raw, "orderId") ?? stringField(raw, "id") ?? "live-order-unknown";
   const rawStatus = stringField(raw, "status")?.toLowerCase() ?? "";
   const status = rawStatus === "matched" || rawStatus === "filled" ? "filled" : "posted";
-  const notional = order.price * order.size;
+  const notional = order.notional;
   return {
     mode: "live",
     status,

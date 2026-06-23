@@ -10,7 +10,10 @@ const match: MatchState = {
   awayGoals: 0,
   minute: 90,
   period: "2H",
-  isLive: true
+  isLive: true,
+  stoppageMinutes: 3,
+  expectedEndMinute: 93,
+  remainingMinutes: 2
 };
 
 const selected: SelectedStrategyMarket = {
@@ -31,7 +34,7 @@ const selected: SelectedStrategyMarket = {
 };
 
 const thresholds: DecisionThresholds = {
-  watchStartMinute: 82,
+  entryWindowMinutes: 3,
   maxEntryPrice: 0.98,
   minimumNetReturn: 0.019,
   minimumNotional: 5,

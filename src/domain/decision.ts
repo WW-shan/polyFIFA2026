@@ -16,8 +16,8 @@ export function buildTradeDecision(
   orderbook: OrderbookSnapshot,
   thresholds: DecisionThresholds
 ): TradeDecision {
-  if (match.minute < thresholds.watchStartMinute) {
-    return noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug);
+  if (!isWithinEntryWindow(match, thresholds.entryWindowMinutes)) {
+    return noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, "Match is not inside the configured remaining-time entry window");
   }
 
   if (orderbook.tokenId !== selected.tokenId) {
@@ -85,6 +85,14 @@ export function buildTradeDecision(
   if (selected.negRisk !== undefined) decision.negRisk = selected.negRisk;
 
   return decision;
+}
+
+function isWithinEntryWindow(match: MatchState, entryWindowMinutes: number): boolean {
+  return match.period === "2H"
+    && match.isLive
+    && match.remainingMinutes !== undefined
+    && match.remainingMinutes >= 0
+    && match.remainingMinutes <= entryWindowMinutes;
 }
 
 function sortedPositiveAsks(asks: readonly PriceLevel[]): PriceLevel[] {

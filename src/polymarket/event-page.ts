@@ -95,10 +95,13 @@ export function findMatchState(state: unknown, eventSlug: string): MatchState | 
 
   const period = parsePeriod(stringValue(game.period));
   const minute = parseElapsedMinute(game.elapsed ?? game.minute);
+  const stoppageMinutes = parseStoppageMinutes(game.stoppageTime ?? game.stoppage_time ?? game.addedTime ?? game.added_time ?? game.injuryTime ?? game.injury_time);
+  const expectedEndMinute = parseExpectedEndMinute(game.expectedEndMinute ?? game.expected_end_minute ?? game.endMinute ?? game.end_minute, period, stoppageMinutes);
+  const remainingMinutes = parseRemainingMinutes(game.remainingMinutes ?? game.remaining_minutes ?? game.remainingTime ?? game.remaining_time, minute, expectedEndMinute);
   const live = typeof game.live === "boolean" ? game.live : game.gameState === "live" || game.gameState === "in-progress";
   const ended = game.ended === true || period === "FT";
 
-  return {
+  const matchState: MatchState = {
     eventSlug,
     homeTeam: teams.homeTeam,
     awayTeam: teams.awayTeam,
@@ -108,6 +111,10 @@ export function findMatchState(state: unknown, eventSlug: string): MatchState | 
     period,
     isLive: live && !ended
   };
+  if (stoppageMinutes !== undefined) matchState.stoppageMinutes = stoppageMinutes;
+  if (expectedEndMinute !== undefined) matchState.expectedEndMinute = expectedEndMinute;
+  if (remainingMinutes !== undefined) matchState.remainingMinutes = remainingMinutes;
+  return matchState;
 }
 
 export function normalizeStrategyMarket(value: unknown, eventSlug?: string): StrategyMarket | null {
@@ -192,6 +199,8 @@ export function parseSpreadLine(text: string): number | null {
 }
 
 function inferMarketType(value: Record<string, unknown>, question: string): StrategyMarketType {
+  if (isUnsupportedStrategyQuestion(question)) return "unknown";
+
   const rawType = stringValue(value.sportsMarketType ?? value.sports_market_type ?? value.marketType)?.toLowerCase();
   if (rawType === "spreads") return "spread";
   if (rawType === "totals") return parseTeamTotalTeam(question) ? "team_total" : "total";
@@ -203,6 +212,12 @@ function inferMarketType(value: Record<string, unknown>, question: string): Stra
   if (/\bo\/u\b/i.test(question)) return parseTeamTotalTeam(question) ? "team_total" : "total";
   if (/^will .+ win\b/i.test(question)) return "moneyline";
   return "unknown";
+}
+
+function isUnsupportedStrategyQuestion(question: string): boolean {
+  return /\b(corners?|cards?|bookings?|offsides?|shots?|saves?|passes?|tackles?|fouls?)\b/i.test(question)
+    || /\b(1st|first|2nd|second)\s+half\b/i.test(question)
+    || /\b(first-half|second-half|halftime|half-time)\b/i.test(question);
 }
 
 function parseLine(question: string, marketType: StrategyMarketType): number | null {
@@ -306,6 +321,43 @@ function parseElapsedMinute(value: unknown): number {
   if (typeof value !== "string") return 0;
   const match = value.trim().match(/^(\d+)(?:\s*\+\s*(\d+))?/);
   if (!match?.[1]) return 0;
+  return Number(match[1]) + (match[2] ? Number(match[2]) : 0);
+}
+
+function parseStoppageMinutes(value: unknown): number | undefined {
+  const parsed = parseLooseMinute(value);
+  return parsed !== null ? parsed : undefined;
+}
+
+function parseExpectedEndMinute(value: unknown, period: MatchPeriod, stoppageMinutes: number | undefined): number | undefined {
+  const parsed = parseAbsoluteMinute(value);
+  if (parsed !== null) return parsed;
+  if (period === "2H" && stoppageMinutes !== undefined) return 90 + stoppageMinutes;
+  if (period === "ET" && stoppageMinutes !== undefined) return 120 + stoppageMinutes;
+  return undefined;
+}
+
+function parseRemainingMinutes(value: unknown, minute: number, expectedEndMinute: number | undefined): number | undefined {
+  const parsed = parseLooseMinute(value);
+  if (parsed !== null) return Math.max(0, parsed);
+  if (expectedEndMinute !== undefined) return Math.max(0, expectedEndMinute - minute);
+  return undefined;
+}
+
+function parseLooseMinute(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  if (typeof value !== "string") return null;
+  const plus = value.match(/\+\s*(\d+)/);
+  if (plus?.[1]) return Number(plus[1]);
+  const match = value.match(/(\d+)/);
+  return match?.[1] ? Number(match[1]) : null;
+}
+
+function parseAbsoluteMinute(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(/^(\d+)(?:\s*\+\s*(\d+))?/);
+  if (!match?.[1]) return null;
   return Number(match[1]) + (match[2] ? Number(match[2]) : 0);
 }
 

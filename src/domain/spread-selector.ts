@@ -1,7 +1,7 @@
 import type { MatchState, SelectedSpread, SpreadMarket, SpreadSelection } from "./types.js";
 
 export interface SpreadSelectorOptions {
-  watchStartMinute?: number;
+  entryWindowMinutes?: number;
 }
 
 export function isWorldCupMatch(match: Pick<MatchState, "eventSlug">): boolean {
@@ -22,13 +22,13 @@ export function selectCoveredSpread(
   markets: readonly SpreadMarket[],
   options: SpreadSelectorOptions = {}
 ): SpreadSelection {
-  const watchStartMinute = options.watchStartMinute ?? 82;
+  const entryWindowMinutes = options.entryWindowMinutes ?? 3;
 
   if (!isWorldCupMatch(match)) {
     return { action: "NO_TRADE", reason: "NOT_WORLD_CUP" };
   }
 
-  if (match.minute < watchStartMinute) {
+  if (!isInEntryWindow(match, entryWindowMinutes)) {
     return { action: "NO_TRADE", reason: "MATCH_NOT_LATE_ENOUGH" };
   }
 
@@ -49,6 +49,14 @@ export function selectCoveredSpread(
   }
 
   return { action: "SELECTED", market: covered[0] };
+}
+
+function isInEntryWindow(match: MatchState, entryWindowMinutes: number): boolean {
+  return match.period === "2H"
+    && match.isLive
+    && match.remainingMinutes !== undefined
+    && match.remainingMinutes >= 0
+    && match.remainingMinutes <= entryWindowMinutes;
 }
 
 function toSelectedSpread(market: SpreadMarket, winner: string, margin: number): SelectedSpread | null {

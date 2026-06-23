@@ -10,7 +10,10 @@ const baseMatch: MatchState = {
   awayGoals: 0,
   minute: 90,
   period: "2H",
-  isLive: true
+  isLive: true,
+  stoppageMinutes: 3,
+  expectedEndMinute: 93,
+  remainingMinutes: 2
 };
 
 function market(outcome: string, line: number, eventSlug = baseMatch.eventSlug): SpreadMarket {
@@ -68,5 +71,26 @@ describe("selectCoveredSpread", () => {
     const result = selectCoveredSpread(baseMatch, [market("Saudi Arabia", -1.5)]);
 
     expect(result).toMatchObject({ action: "NO_TRADE", reason: "NO_COVERED_SPREAD" });
+  });
+
+  test("uses remaining time instead of a fixed minute threshold", () => {
+    const earlyClockWithLongStoppage = {
+      ...baseMatch,
+      minute: 80,
+      expectedEndMinute: 83,
+      remainingMinutes: 3
+    };
+
+    const result = selectCoveredSpread(earlyClockWithLongStoppage, [market("Spain", -2.5)]);
+
+    expect(result.action).toBe("SELECTED");
+  });
+
+  test("does not select when remaining time is unknown", () => {
+    const { remainingMinutes: _remainingMinutes, ...unknownRemaining } = baseMatch;
+
+    const result = selectCoveredSpread(unknownRemaining, [market("Spain", -2.5)]);
+
+    expect(result).toMatchObject({ action: "NO_TRADE", reason: "MATCH_NOT_LATE_ENOUGH" });
   });
 });

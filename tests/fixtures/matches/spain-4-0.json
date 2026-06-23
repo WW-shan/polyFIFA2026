@@ -6,5 +6,8 @@
   "awayGoals": 0,
   "minute": 90,
   "period": "2H",
-  "isLive": true
+  "isLive": true,
+  "stoppageMinutes": 3,
+  "expectedEndMinute": 93,
+  "remainingMinutes": 2
 }

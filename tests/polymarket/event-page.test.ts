@@ -163,6 +163,48 @@ describe("event page initial state parsing", () => {
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "btts", marketType: "btts" }));
   });
 
+  test("does not treat corners/cards prop markets as goal-total strategy markets", () => {
+    const markets = findStrategyMarkets({
+      markets: [
+        {
+          eventSlug: "fifwc-eng-gha-2026-06-23",
+          slug: "fifwc-eng-gha-2026-06-23-corners-total-6pt5",
+          question: "England vs. Ghana: O/U 6.5 Total Corners",
+          conditionId: "cond-corners",
+          clobTokenIds: "[\"over\",\"under\"]",
+          outcomes: "[\"Over\",\"Under\"]"
+        },
+        {
+          eventSlug: "fifwc-eng-gha-2026-06-23",
+          slug: "fifwc-eng-gha-2026-06-23-cards-total-3pt5",
+          question: "England vs. Ghana: O/U 3.5 Total Cards",
+          conditionId: "cond-cards",
+          clobTokenIds: "[\"cards-over\",\"cards-under\"]",
+          outcomes: "[\"Over\",\"Under\"]"
+        }
+      ]
+    }, "fifwc-eng-gha-2026-06-23");
+
+    expect(markets).toEqual([]);
+  });
+
+  test("does not treat first-half period markets as full-match strategy markets", () => {
+    const markets = findStrategyMarkets({
+      markets: [
+        {
+          eventSlug: "fifwc-eng-gha-2026-06-23",
+          slug: "fifwc-eng-gha-2026-06-23-first-half-team-total-home-1pt5",
+          question: "England vs. Ghana: England 1st Half O/U 1.5",
+          conditionId: "cond-first-half",
+          clobTokenIds: "[\"over\",\"under\"]",
+          outcomes: "[\"Over\",\"Under\"]"
+        }
+      ]
+    }, "fifwc-eng-gha-2026-06-23");
+
+    expect(markets).toEqual([]);
+  });
+
   test("extracts live match state from sports page games payload", () => {
     const state = {
       games: {
@@ -172,7 +214,8 @@ describe("event page initial state parsing", () => {
           ended: false,
           score: "3-1",
           period: "2H",
-          elapsed: "88'"
+          elapsed: "90+3'",
+          stoppageTime: "5'"
         }
       },
       events: {
@@ -189,9 +232,12 @@ describe("event page initial state parsing", () => {
       awayTeam: "Iraq",
       homeGoals: 3,
       awayGoals: 1,
-      minute: 88,
+      minute: 93,
       period: "2H",
-      isLive: true
+      isLive: true,
+      stoppageMinutes: 5,
+      expectedEndMinute: 95,
+      remainingMinutes: 2
     });
   });
 
@@ -214,5 +260,31 @@ describe("event page initial state parsing", () => {
     };
 
     expect(findMatchState(state, "fifwc-fra-irq-2026-06-22")?.minute).toBe(94);
+  });
+
+  test("parses absolute expected-end values like 90+5 instead of treating them as five minutes", () => {
+    const state = {
+      games: {
+        "fifwc-fra-irq-2026-06-22": {
+          event: "fifwc-fra-irq-2026-06-22",
+          live: true,
+          score: "3-1",
+          period: "2H",
+          elapsed: "90+3'",
+          expectedEndMinute: "90+5'"
+        }
+      },
+      events: {
+        "fifwc-fra-irq-2026-06-22": {
+          title: "France vs. Iraq"
+        }
+      }
+    };
+
+    expect(findMatchState(state, "fifwc-fra-irq-2026-06-22")).toMatchObject({
+      minute: 93,
+      expectedEndMinute: 95,
+      remainingMinutes: 2
+    });
   });
 });

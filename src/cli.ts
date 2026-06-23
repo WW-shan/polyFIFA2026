@@ -1,12 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
-import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import { capStakeToAvailableBalance, readPusdBalance } from "./execution/balance.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
+import type { LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
+import { LiveLedger } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
-import { buildThresholds, runDecisionFlow } from "./runner.js";
+import { fetchOpenWorldCupEventSlugs } from "./polymarket/worldcup-events.js";
+import { buildThresholds, DEFAULT_THRESHOLDS, runDecisionFlow } from "./runner.js";
 import { LiveExecutor } from "./execution/live-executor.js";
 
 export interface CliResult {
@@ -15,7 +19,7 @@ export interface CliResult {
   stderr: string;
 }
 
-type Mode = "paper" | "live";
+type Mode = "paper" | "live" | "status";
 
 interface ParsedArgs {
   mode: Mode;
@@ -27,12 +31,21 @@ interface ParsedArgs {
   maxEntryPrice?: number;
   minimumNetReturn?: number;
   minimumNotional?: number;
-  watchStartMinute?: number;
+  entryWindowMinutes?: number;
+  ledgerFile?: string;
+  useLiveBalance?: boolean;
+  balanceBuffer?: number;
+  watch?: boolean;
+  worldcup?: boolean;
+  intervalMs?: number;
+  maxIterations?: number;
   orderType: LiveOrderType;
 }
 
 export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
+  readPusdBalance?: (walletAddress: string, rpcUrl?: string) => Promise<number>;
+  fetchWorldCupEventSlugs?: () => Promise<string[]>;
 }
 
 export async function runCli(
@@ -42,31 +55,9 @@ export async function runCli(
 ): Promise<CliResult> {
   try {
     const args = parseArgs(argv);
-    const match = args.matchFile
-      ? await readJsonFile<MatchState>(args.matchFile)
-      : await (deps.fetchMatchState ?? fetchEventMatchState)(required(args.eventSlug, "--event-slug"));
-    const markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : await fetchEventStrategyMarkets(match.eventSlug);
-    const thresholds = buildThresholds(args.stake, thresholdOverridesFromArgs(args));
-    const orderbooks = args.orderbookFile
-      ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
-      : await fetchCandidateOrderbooks(match, markets, thresholds.watchStartMinute);
-
-    const decision = runDecisionFlow({
-      match,
-      markets,
-      orderbooks,
-      stake: args.stake,
-      thresholds: thresholdOverridesFromArgs(args)
-    });
-    if (decision.action !== "BUY") {
-      return ok(summary(args.mode, decision));
-    }
-
-    const trade = args.mode === "paper"
-      ? await new PaperExecutor().execute(decision)
-      : await new LiveExecutor(liveConfigFromEnv(env)).execute(decision, { orderType: args.orderType });
-
-    return ok(summary(args.mode, decision, trade));
+    if (args.mode === "status") return await runStatus(args, env, deps);
+    if (args.watch) return await runWatch(args, env, deps);
+    return await runSinglePass(args, env, deps);
   } catch (error) {
     if (error instanceof LiveExecutionError) {
       return { exitCode: 1, stdout: "", stderr: `${error.code}: ${error.message}` };
@@ -75,20 +66,175 @@ export async function runCli(
   }
 }
 
+async function runSinglePass(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies
+): Promise<CliResult> {
+    const match = args.matchFile
+      ? await readJsonFile<MatchState>(args.matchFile)
+      : await (deps.fetchMatchState ?? fetchEventMatchState)(required(args.eventSlug, "--event-slug"));
+    const liveConfig = args.mode === "live" ? liveConfigFromEnv(env) : undefined;
+    const liveStake = await resolveStake(args, match, env, liveConfig, deps);
+    if (liveStake.action === "NO_TRADE") return ok(summary(args.mode, liveStake.decision));
+
+    const markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : await fetchEventStrategyMarkets(match.eventSlug);
+    const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
+    const orderbooks = args.orderbookFile
+      ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
+      : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes);
+    const ledgerFile = resolveLedgerFile(args, env);
+    const ledger = ledgerFile ? new LiveLedger(ledgerFile) : undefined;
+
+    const decision = runDecisionFlow({
+      match,
+      markets,
+      orderbooks,
+      stake: liveStake.stake,
+      thresholds: thresholdOverridesFromArgs(args)
+    });
+    if (decision.action !== "BUY") {
+      return ok(summary(args.mode, decision));
+    }
+    if (ledger && await ledger.hasActiveTrade(decision.eventSlug, decision.tokenId)) {
+      return ok(summary(args.mode, {
+        action: "NO_TRADE",
+        reason: "DUPLICATE_TRADE",
+        eventSlug: decision.eventSlug,
+        details: "Ledger already has an active trade for this event/token"
+      }));
+    }
+
+    const trade = args.mode === "paper"
+      ? await new PaperExecutor().execute(decision)
+      : await new LiveExecutor(liveConfig).execute(decision, { orderType: args.orderType });
+    if (ledger) await ledger.recordResult(decision, trade);
+
+    return ok(summary(args.mode, decision, trade));
+}
+
+async function runWatch(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies
+): Promise<CliResult> {
+  if (!args.worldcup && !args.eventSlug) throw new Error("--watch requires --event-slug or --worldcup true so match state can be refreshed");
+  if (args.matchFile) throw new Error("--watch cannot be used with a static --match-file");
+
+  let last: Record<string, unknown> | undefined;
+  const maxIterations = args.maxIterations ?? Number.POSITIVE_INFINITY;
+  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+    const eventSlugs = args.worldcup
+      ? await (deps.fetchWorldCupEventSlugs ?? fetchOpenWorldCupEventSlugs)()
+      : [required(args.eventSlug, "--event-slug")];
+    for (const eventSlug of eventSlugs) {
+      const result = await runSinglePass({ ...args, eventSlug }, env, deps);
+      if (result.exitCode !== 0) return result;
+
+      last = JSON.parse(result.stdout) as Record<string, unknown>;
+      if (last.status !== "no_trade") return result;
+    }
+    if (iteration < maxIterations) await sleep(args.intervalMs ?? 1000);
+  }
+
+  return ok({
+    mode: args.mode,
+    status: "watch_complete",
+    iterations: Number.isFinite(maxIterations) ? maxIterations : undefined,
+    last
+  });
+}
+
+async function runStatus(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies
+): Promise<CliResult> {
+  const liveConfig = liveConfigFromEnv(env);
+  const walletAddress = liveConfig.depositWalletAddress ?? liveConfig.funderAddress;
+  const ledgerFile = resolveLedgerFile(args, env) ?? "data/live-ledger.json";
+  const entries = await new LiveLedger(ledgerFile).readEntries();
+  const status: Record<string, unknown> = {
+    mode: "status",
+    status: "ok",
+    ledger: {
+      file: ledgerFile,
+      entries: entries.length,
+      active: entries.filter((entry) => entry.status === "filled" || entry.status === "posted").length
+    }
+  };
+
+  if (walletAddress) {
+    status.depositWalletAddress = walletAddress;
+    status.pusdBalance = await (deps.readPusdBalance ?? readPusdBalance)(walletAddress, liveConfig.rpcUrl);
+  }
+
+  return ok(status);
+}
+
 function ok(value: unknown): CliResult {
   return { exitCode: 0, stdout: `${JSON.stringify(value, null, 2)}\n`, stderr: "" };
+}
+
+function sleep(ms: number): Promise<void> {
+  return ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function fetchCandidateOrderbooks(
   match: MatchState,
   markets: readonly StrategyMarket[],
-  watchStartMinute: number,
+  entryWindowMinutes: number,
   fetcher: (tokenId: string) => Promise<OrderbookSnapshot> = fetchOrderbook
 ): Promise<OrderbookSnapshot[]> {
-  const candidates = selectLossRequiresCandidates(match, markets, { watchStartMinute });
+  const candidates = selectLossRequiresCandidates(match, markets, { entryWindowMinutes });
   const tokenIds = [...new Set(candidates.map((candidate) => candidate.tokenId))];
   const results = await Promise.allSettled(tokenIds.map((tokenId) => fetcher(tokenId)));
   return results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+}
+
+async function resolveStake(
+  args: ParsedArgs,
+  match: MatchState,
+  env: Record<string, string | undefined>,
+  liveConfig: LiveExecutorConfig | undefined,
+  deps: CliDependencies
+): Promise<{ action: "USE_STAKE"; stake: number } | { action: "NO_TRADE"; decision: NoTradeDecision }> {
+  if (args.mode !== "live" || !liveConfig || !shouldUseLiveBalance(args, env, liveConfig)) {
+    return { action: "USE_STAKE", stake: args.stake };
+  }
+
+  const walletAddress = liveConfig.depositWalletAddress ?? liveConfig.funderAddress;
+  if (!walletAddress) return { action: "USE_STAKE", stake: args.stake };
+
+  const balance = await (deps.readPusdBalance ?? readPusdBalance)(walletAddress, liveConfig.rpcUrl);
+  const stakeDecision = capStakeToAvailableBalance(args.stake, balance, {
+    minimumNotional: args.minimumNotional ?? DEFAULT_THRESHOLDS.minimumNotional,
+    buffer: args.balanceBuffer ?? numberEnv(env.POLY_BALANCE_BUFFER) ?? 0.02
+  });
+  if (stakeDecision.action === "USE_STAKE") return stakeDecision;
+
+  return {
+    action: "NO_TRADE",
+    decision: {
+      action: "NO_TRADE",
+      reason: stakeDecision.reason,
+      eventSlug: match.eventSlug,
+      details: stakeDecision.details
+    }
+  };
+}
+
+function shouldUseLiveBalance(args: ParsedArgs, env: Record<string, string | undefined>, liveConfig: LiveExecutorConfig): boolean {
+  if (args.useLiveBalance !== undefined) return args.useLiveBalance;
+  const envChoice = booleanEnv(env.POLY_USE_LIVE_BALANCE);
+  if (envChoice !== undefined) return envChoice;
+  return Boolean(liveConfig.depositWalletAddress ?? liveConfig.funderAddress);
+}
+
+function resolveLedgerFile(args: ParsedArgs, env: Record<string, string | undefined>): string | undefined {
+  if (args.ledgerFile) return args.ledgerFile;
+  if (args.mode === "live" || args.mode === "status") return env.POLY_LEDGER_FILE ?? "data/live-ledger.json";
+  return undefined;
 }
 
 function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Record<string, unknown> {
@@ -131,7 +277,7 @@ function thresholdOverridesFromArgs(args: ParsedArgs): Partial<Omit<DecisionThre
   if (args.maxEntryPrice !== undefined) overrides.maxEntryPrice = args.maxEntryPrice;
   if (args.minimumNetReturn !== undefined) overrides.minimumNetReturn = args.minimumNetReturn;
   if (args.minimumNotional !== undefined) overrides.minimumNotional = args.minimumNotional;
-  if (args.watchStartMinute !== undefined) overrides.watchStartMinute = args.watchStartMinute;
+  if (args.entryWindowMinutes !== undefined) overrides.entryWindowMinutes = args.entryWindowMinutes;
   return overrides;
 }
 
@@ -155,7 +301,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   const mode = parseMode(raw.mode ?? "paper");
-  if (!raw.matchFile && !raw.eventSlug) {
+  const wantsWorldcupWatch = booleanEnv(raw.watch) === true && booleanEnv(raw.worldcup) === true;
+  if (mode !== "status" && !wantsWorldcupWatch && !raw.matchFile && !raw.eventSlug) {
     throw new Error("--match-file or --event-slug is required");
   }
   if (raw.matchFile && raw.eventSlug) {
@@ -172,16 +319,23 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.eventSlug) parsed.eventSlug = raw.eventSlug;
   if (raw.marketsFile) parsed.marketsFile = raw.marketsFile;
   if (raw.orderbookFile) parsed.orderbookFile = raw.orderbookFile;
+  if (raw.ledgerFile) parsed.ledgerFile = raw.ledgerFile;
+  if (raw.useLiveBalance) parsed.useLiveBalance = booleanArg(raw.useLiveBalance, "--use-live-balance");
+  if (raw.balanceBuffer) parsed.balanceBuffer = numberArg(raw.balanceBuffer, "--balance-buffer");
+  if (raw.watch) parsed.watch = booleanArg(raw.watch, "--watch");
+  if (raw.worldcup) parsed.worldcup = booleanArg(raw.worldcup, "--worldcup");
+  if (raw.intervalMs) parsed.intervalMs = numberArg(raw.intervalMs, "--interval-ms");
+  if (raw.maxIterations) parsed.maxIterations = numberArg(raw.maxIterations, "--max-iterations");
   if (raw.maxEntryPrice) parsed.maxEntryPrice = numberArg(raw.maxEntryPrice, "--max-entry-price");
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
   if (raw.minimumNotional) parsed.minimumNotional = numberArg(raw.minimumNotional, "--minimum-notional");
-  if (raw.watchStartMinute) parsed.watchStartMinute = numberArg(raw.watchStartMinute, "--watch-start-minute");
+  if (raw.entryWindowMinutes) parsed.entryWindowMinutes = numberArg(raw.entryWindowMinutes, "--entry-window-minutes");
   return parsed;
 }
 
 function parseMode(value: string): Mode {
-  if (value === "paper" || value === "live") return value;
-  throw new Error("--mode must be paper or live");
+  if (value === "paper" || value === "live" || value === "status") return value;
+  throw new Error("--mode must be paper, live, or status");
 }
 
 function parseOrderType(value: string): LiveOrderType {
@@ -193,6 +347,26 @@ function numberArg(value: string, flag: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`${flag} must be a number`);
   return parsed;
+}
+
+function numberEnv(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function booleanArg(value: string, flag: string): boolean {
+  const parsed = booleanEnv(value);
+  if (parsed === undefined) throw new Error(`${flag} must be true or false`);
+  return parsed;
+}
+
+function booleanEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return undefined;
 }
 
 function required(value: string | undefined, flag: string): string {

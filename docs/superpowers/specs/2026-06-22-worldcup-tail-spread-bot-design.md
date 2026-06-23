@@ -68,7 +68,7 @@ A match can be considered only if:
 
 - it is a World Cup match event (`soccer-fifwc` / slug starts with `fifwc-`);
 - it is live or in a manually supplied near-end state;
-- current minute is at least `watchStartMinute`, default `82`;
+- current remaining time is inside `entryWindowMinutes`, default `3`;
 - one team leads by at least 2 goals.
 
 ### Target Spread Selection
@@ -102,7 +102,7 @@ net_return = (1 - p - 0.03 * p * (1 - p)) / p
 
 Default thresholds:
 
-- `watchStartMinute = 82`
+- `entryWindowMinutes = 3`
 - `maxEntryPrice = 0.98` for 2% target mode
 - `minimumNetReturn = 0.019`
 - `minimumNotional = 5`

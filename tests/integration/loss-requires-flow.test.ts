@@ -10,7 +10,10 @@ const match: MatchState = {
   awayGoals: 0,
   minute: 88,
   period: "2H",
-  isLive: true
+  isLive: true,
+  stoppageMinutes: 5,
+  expectedEndMinute: 95,
+  remainingMinutes: 2
 };
 
 const markets: StrategyMarket[] = [

@@ -80,7 +80,29 @@ npm run cli -- \
   --order-type FOK
 ```
 
-If `--event-slug` is used, the CLI fetches the Polymarket sports page, extracts the current `score`, `period`, and `elapsed` minute, then extracts strategy markets from the same event. If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then picks the highest estimated net-return BUY.
+If `--event-slug` is used, the CLI fetches the Polymarket sports page, extracts the current `score`, `period`, `elapsed`, and remaining-time fields, then extracts strategy markets from the same event. If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then picks the highest estimated net-return BUY.
+
+The default entry window is the final 3 minutes of expected match time, not a fixed 87th minute. The selector requires a live 2H match with `remainingMinutes <= --entry-window-minutes`. `remainingMinutes` is parsed from Polymarket when present, or derived from `expectedEndMinute` / stoppage-time fields.
+
+Live automation modes:
+
+```bash
+# Check deposit-wallet pUSD balance and ledger state without placing orders.
+npm run live:status
+
+# Watch one match repeatedly.
+npm run cli -- \
+  --mode live \
+  --watch true \
+  --event-slug fifwc-fra-irq-2026-06-22 \
+  --entry-window-minutes 3 \
+  --stake 5
+
+# Discover open World Cup single-match events from Gamma, then watch all of them.
+npm run live:watch:worldcup -- --stake 5 --entry-window-minutes 3
+```
+
+Watch mode stops as soon as one order is filled/posted/rejected or a live error occurs. If no trade is available it sleeps `--interval-ms` milliseconds and retries; `--max-iterations` is mainly for tests/dry runs.
 
 ## Live Smoke Guard
 
@@ -103,6 +125,9 @@ Optional live env vars:
 
 - `POLY_FUNDER_ADDRESS`
 - `POLY_DEPOSIT_WALLET_ADDRESS` for CLOB v2 deposit-wallet accounts; this overrides `POLY_FUNDER_ADDRESS` and forces `POLY_SIGNATURE_TYPE=3`
+- `POLY_LEDGER_FILE` defaults to `data/live-ledger.json` in live mode; filled/posted orders are recorded and duplicate event/token buys are skipped
+- `POLY_USE_LIVE_BALANCE=true` to cap live stake to pUSD balance; this is automatic when a funder/deposit wallet is configured unless explicitly disabled
+- `POLY_BALANCE_BUFFER` defaults to `0.02` pUSD so stake sizing leaves a small balance cushion
 - `POLY_SIGNATURE_TYPE` defaults to `1` unless `POLY_DEPOSIT_WALLET_ADDRESS` is set
 - `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order
 - `POLY_RPC_URL` for viem wallet transport

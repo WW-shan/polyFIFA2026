@@ -9,6 +9,9 @@ export interface MatchState {
   minute: number;
   period: MatchPeriod;
   isLive: boolean;
+  stoppageMinutes?: number;
+  expectedEndMinute?: number;
+  remainingMinutes?: number;
 }
 
 export interface SpreadMarket {
@@ -77,7 +80,9 @@ export type NoTradeReason =
   | "RETURN_TOO_LOW"
   | "DEPTH_TOO_SMALL"
   | "MARKET_NOT_FOUND"
-  | "ORDERBOOK_UNAVAILABLE";
+  | "ORDERBOOK_UNAVAILABLE"
+  | "INSUFFICIENT_BALANCE"
+  | "DUPLICATE_TRADE";
 
 export type SpreadSelection =
   | { action: "SELECTED"; market: SelectedSpread }
@@ -100,7 +105,7 @@ export interface OrderbookSnapshot {
 }
 
 export interface DecisionThresholds {
-  watchStartMinute: number;
+  entryWindowMinutes: number;
   maxEntryPrice: number;
   minimumNetReturn: number;
   minimumNotional: number;

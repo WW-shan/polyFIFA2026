@@ -5,10 +5,10 @@ import { LiveExecutor, type LiveExecuteOptions, type LiveExecutorConfig } from "
 import { PaperExecutor } from "./execution/paper-executor.js";
 
 export const DEFAULT_THRESHOLDS: Omit<DecisionThresholds, "maxNotional"> = {
-  watchStartMinute: 82,
+  entryWindowMinutes: 3,
   maxEntryPrice: 0.999999,
   minimumNetReturn: 0,
-  minimumNotional: 5
+  minimumNotional: 1
 };
 
 export interface FlowInput {
@@ -43,7 +43,7 @@ export function buildThresholds(stake: number, overrides: Partial<Omit<DecisionT
 
 export function runDecisionFlow(input: FlowInput): TradeDecision {
   const thresholds = buildThresholds(input.stake, input.thresholds);
-  const candidates = selectLossRequiresCandidates(input.match, input.markets, { watchStartMinute: thresholds.watchStartMinute });
+  const candidates = selectLossRequiresCandidates(input.match, input.markets, { entryWindowMinutes: thresholds.entryWindowMinutes });
 
   if (candidates.length === 0) {
     return { action: "NO_TRADE", reason: "NO_ELIGIBLE_STRATEGY", eventSlug: input.match.eventSlug };
