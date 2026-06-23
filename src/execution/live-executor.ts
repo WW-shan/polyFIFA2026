@@ -300,7 +300,7 @@ export function normalizeLiveOrderResult(order: LiveOrderRequest, raw: unknown):
   assertNoPostError(raw);
 
   const orderId = extractLiveOrderId(raw) ?? "live-order-unknown";
-  const rawStatus = stringField(raw, "status")?.toLowerCase() ?? "";
+  const rawStatus = isRecord(raw) ? orderStatus(raw) ?? "" : "";
   if (["rejected", "failed", "expired"].includes(rawStatus)) {
     return emptyConfirmedLiveResult(order, orderId, "rejected", raw);
   }
@@ -419,25 +419,36 @@ function makerOrderTradeFill(order: LiveOrderRequest, orderId: string, makerOrde
   return validFill(shares, price);
 }
 
-const FILL_CONFIRMING_TRADE_STATUSES = new Set(["confirmed", "matched", "filled", "mined", "settled", "complete", "completed"]);
-
 function isFillConfirmingTrade(trade: Record<string, unknown>): boolean {
   if (hasTradeError(trade)) return false;
-  const status = normalizedStatus(trade);
-  return status !== undefined && FILL_CONFIRMING_TRADE_STATUSES.has(status);
+  return tradeStatus(trade) === "confirmed";
 }
 
 function hasNonConfirmingStatus(record: Record<string, unknown>): boolean {
-  const status = normalizedStatus(record);
-  return status !== undefined && !FILL_CONFIRMING_TRADE_STATUSES.has(status);
+  const status = tradeStatus(record);
+  return status !== undefined && status !== "confirmed";
 }
 
 function hasTradeError(record: Record<string, unknown>): boolean {
   return errorFieldMessage(record.err_msg) !== undefined || errorFieldMessage(record.errorMsg) !== undefined || errorFieldMessage(record.error) !== undefined;
 }
 
-function normalizedStatus(record: Record<string, unknown>): string | undefined {
-  return stringField(record, "status")?.toLowerCase().replace(/[\s_-]+/g, "");
+function tradeStatus(record: Record<string, unknown>): string | undefined {
+  return normalizedStatus(record, "TRADE_STATUS_");
+}
+
+function orderStatus(record: Record<string, unknown>): string | undefined {
+  return normalizedStatus(record, "ORDER_STATUS_");
+}
+
+function normalizedStatus(record: Record<string, unknown>, prefix: string): string | undefined {
+  const value = stringField(record, "status");
+  if (!value) return undefined;
+
+  const lower = value.toLowerCase();
+  const lowerPrefix = prefix.toLowerCase();
+  const withoutPrefix = lower.startsWith(lowerPrefix) ? lower.slice(lowerPrefix.length) : lower;
+  return withoutPrefix.replace(/[\s_-]+/g, "");
 }
 
 function validFill(shares: number | undefined, price: number | undefined): ConfirmedFill | undefined {
@@ -467,8 +478,8 @@ function isMatchingOpenOrder(order: LiveOrderRequest, orderId: string, candidate
   if (!matchesAnyField(candidate, ["id", "orderID", "orderId"], orderId)) return false;
   if (!matchesAnyField(candidate, ["asset_id", "assetId"], order.tokenId)) return false;
 
-  const status = stringField(candidate, "status")?.toLowerCase();
-  return !status || !["filled", "matched", "cancelled", "canceled", "rejected", "failed", "expired"].includes(status);
+  const status = orderStatus(candidate);
+  return !status || ["live", "open", "unmatched"].includes(status);
 }
 
 function emptyConfirmedLiveResult(order: LiveOrderRequest, orderId: string, status: "posted" | "rejected" | "canceled", raw: unknown): TradeResult {
@@ -571,7 +582,7 @@ function isCancelConfirmed(orderId: string, cancelResponse: unknown): boolean {
   const canceled = cancelResponse.canceled ?? cancelResponse.cancelled;
   if (canceled === true || containsOrderId(canceled, orderId)) return true;
 
-  const status = normalizedStatus(cancelResponse);
+  const status = orderStatus(cancelResponse);
   if (status === "canceled" || status === "cancelled") return true;
   return cancelResponse.success === true;
 }
