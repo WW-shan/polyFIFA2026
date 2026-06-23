@@ -113,4 +113,47 @@ describe("loss-requires decision flow", () => {
       lossRequiresGoals: 2
     });
   });
+
+  test("uses conservative 90-plus tail window when remaining time is unavailable", () => {
+    const { remainingMinutes: _remainingMinutes, ...matchWithoutRemainingMinutes } = match;
+    const ninetyPlusMatch = {
+      ...matchWithoutRemainingMinutes,
+      elapsedSeconds: 90 * 60
+    };
+
+    const decision = runDecisionFlow({
+      match: ninetyPlusMatch,
+      markets,
+      orderbooks: [book("weak-no", 0.99, 100)],
+      stake: 10,
+      thresholds: { entryWindowMinutes: 3 }
+    });
+
+    expect(decision).toMatchObject({
+      action: "BUY",
+      strategy: "loser_no",
+      tailWindowSource: "conservative_90_plus"
+    });
+  });
+
+  test("does not trade at 89:30 without remaining time", () => {
+    const { remainingMinutes: _remainingMinutes, ...matchWithoutRemainingMinutes } = match;
+    const earlyMatch = {
+      ...matchWithoutRemainingMinutes,
+      elapsedSeconds: 89 * 60 + 30
+    };
+
+    const decision = runDecisionFlow({
+      match: earlyMatch,
+      markets,
+      orderbooks: [book("weak-no", 0.99, 100)],
+      stake: 10,
+      thresholds: { entryWindowMinutes: 3 }
+    });
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "MATCH_NOT_LATE_ENOUGH"
+    });
+  });
 });

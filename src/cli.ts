@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
+import type { TailWindowMode } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, readPusdBalance } from "./execution/balance.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
@@ -40,6 +41,7 @@ interface ParsedArgs {
   intervalMs?: number;
   maxIterations?: number;
   orderType: LiveOrderType;
+  tailTimeMode?: TailWindowMode;
 }
 
 export interface CliDependencies {
@@ -81,19 +83,22 @@ async function runSinglePass(
 
     const markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : await fetchEventStrategyMarkets(match.eventSlug);
     const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
+    const tailWindowMode = args.tailTimeMode ?? tailWindowModeFromEnv(env);
     const orderbooks = args.orderbookFile
       ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
-      : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes);
+      : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes, tailWindowMode);
     const ledgerFile = resolveLedgerFile(args, env);
     const ledger = ledgerFile ? new LiveLedger(ledgerFile) : undefined;
 
-    const decision = runDecisionFlow({
+    const flowInput = {
       match,
       markets,
       orderbooks,
       stake: liveStake.stake,
-      thresholds: thresholdOverridesFromArgs(args)
-    });
+      thresholds: thresholdOverridesFromArgs(args),
+      ...(tailWindowMode ? { tailWindowMode } : {})
+    };
+    const decision = runDecisionFlow(flowInput);
     if (decision.action !== "BUY") {
       return ok(summary(args.mode, decision));
     }
@@ -187,11 +192,17 @@ export async function fetchCandidateOrderbooks(
   match: MatchState,
   markets: readonly StrategyMarket[],
   entryWindowMinutes: number,
+  tailWindowModeOrFetcher?: TailWindowMode | ((tokenId: string) => Promise<OrderbookSnapshot>),
   fetcher: (tokenId: string) => Promise<OrderbookSnapshot> = fetchOrderbook
 ): Promise<OrderbookSnapshot[]> {
-  const candidates = selectLossRequiresCandidates(match, markets, { entryWindowMinutes });
+  const tailWindowMode = typeof tailWindowModeOrFetcher === "string" ? tailWindowModeOrFetcher : undefined;
+  const orderbookFetcher = typeof tailWindowModeOrFetcher === "function" ? tailWindowModeOrFetcher : fetcher;
+  const candidates = selectLossRequiresCandidates(match, markets, {
+    entryWindowMinutes,
+    ...(tailWindowMode ? { tailWindowMode } : {})
+  });
   const tokenIds = [...new Set(candidates.map((candidate) => candidate.tokenId))];
-  const results = await Promise.allSettled(tokenIds.map((tokenId) => fetcher(tokenId)));
+  const results = await Promise.allSettled(tokenIds.map((tokenId) => orderbookFetcher(tokenId)));
   return results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 }
 
@@ -274,6 +285,8 @@ function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Reco
     shares: decision.shares,
     notional: decision.notional,
     estimatedNetReturn: decision.estimatedNetReturn,
+    tailWindowSource: decision.tailWindowSource,
+    tailWindowDetails: decision.tailWindowDetails,
     decision,
     trade
   };
@@ -341,6 +354,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
   if (raw.minimumNotional) parsed.minimumNotional = numberArg(raw.minimumNotional, "--minimum-notional");
   if (raw.entryWindowMinutes) parsed.entryWindowMinutes = numberArg(raw.entryWindowMinutes, "--entry-window-minutes");
+  if (raw.tailTimeMode) parsed.tailTimeMode = parseTailWindowMode(raw.tailTimeMode);
   return parsed;
 }
 
@@ -352,6 +366,15 @@ function parseMode(value: string): Mode {
 function parseOrderType(value: string): LiveOrderType {
   if (value === "FOK" || value === "FAK") return value;
   throw new Error("--order-type must be FOK or FAK");
+}
+
+function tailWindowModeFromEnv(env: Record<string, string | undefined>): TailWindowMode | undefined {
+  return env.POLY_TAIL_TIME_MODE ? parseTailWindowMode(env.POLY_TAIL_TIME_MODE) : undefined;
+}
+
+function parseTailWindowMode(value: string): TailWindowMode {
+  if (value === "remaining" || value === "conservative90") return value;
+  throw new Error("--tail-time-mode/POLY_TAIL_TIME_MODE must be remaining or conservative90");
 }
 
 function numberArg(value: string, flag: string): number {
