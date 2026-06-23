@@ -10,7 +10,8 @@ import { PaperExecutor } from "./execution/paper-executor.js";
 import { LiveLedger } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
-import { fetchOpenWorldCupEventSlugs } from "./polymarket/worldcup-events.js";
+import { SportsLiveProvider } from "./polymarket/sports-live.js";
+import { fetchOpenWorldCupEventRefs, type WorldCupEventRef } from "./polymarket/worldcup-events.js";
 import { buildThresholds, DEFAULT_THRESHOLDS, runDecisionFlow } from "./runner.js";
 import { LiveExecutor } from "./execution/live-executor.js";
 
@@ -40,6 +41,7 @@ interface ParsedArgs {
   worldcup?: boolean;
   intervalMs?: number;
   maxIterations?: number;
+  liveAuditFile?: string;
   orderType: LiveOrderType;
   tailTimeMode?: TailWindowMode;
 }
@@ -48,6 +50,8 @@ export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
   readPusdBalance?: (walletAddress: string, rpcUrl?: string) => Promise<number>;
   fetchWorldCupEventSlugs?: () => Promise<string[]>;
+  fetchWorldCupEventRefs?: () => Promise<WorldCupEventRef[]>;
+  watchSportsUpdates?: (events: readonly WorldCupEventRef[], options: { auditFile?: string; proxyUrl?: string }) => Promise<AsyncIterable<MatchState>>;
   executeLive?: (decision: Extract<TradeDecision, { action: "BUY" }>, options: { orderType: LiveOrderType }) => Promise<TradeResult>;
 }
 
@@ -59,7 +63,7 @@ export async function runCli(
   try {
     const args = parseArgs(argv);
     if (args.mode === "status") return await runStatus(args, env, deps);
-    if (args.watch) return await runWatch(args, env, deps);
+    if (args.watch) return args.worldcup ? await runSportsWatch(args, env, deps) : await runWatch(args, env, deps);
     return await runSinglePass(args, env, deps);
   } catch (error) {
     if (error instanceof LiveExecutionError) {
@@ -132,9 +136,7 @@ async function runWatch(
   let last: Record<string, unknown> | undefined;
   const maxIterations = args.maxIterations ?? Number.POSITIVE_INFINITY;
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-    const eventSlugs = args.worldcup
-      ? await (deps.fetchWorldCupEventSlugs ?? fetchOpenWorldCupEventSlugs)()
-      : [required(args.eventSlug, "--event-slug")];
+    const eventSlugs = [required(args.eventSlug, "--event-slug")];
     for (const eventSlug of eventSlugs) {
       const result = await runSinglePass({ ...args, eventSlug }, env, deps);
       if (result.exitCode !== 0) return result;
@@ -151,6 +153,131 @@ async function runWatch(
     iterations: Number.isFinite(maxIterations) ? maxIterations : undefined,
     last
   });
+}
+
+async function runSportsWatch(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies
+): Promise<CliResult> {
+  if (args.matchFile) throw new Error("--watch cannot be used with a static --match-file");
+
+  let last: Record<string, unknown> | undefined;
+  let iterations = 0;
+  const maxIterations = args.maxIterations ?? Number.POSITIVE_INFINITY;
+  if (maxIterations <= 0) {
+    return ok({
+      mode: args.mode,
+      status: "watch_complete",
+      iterations,
+      last
+    });
+  }
+
+  const events = await fetchWorldCupEventRefs(deps);
+  const updateOptions = sportsUpdateOptions(args, env);
+  const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
+
+  for await (const match of updates) {
+    iterations += 1;
+    const result = await runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
+      ...deps,
+      fetchMatchState: async () => match
+    });
+    if (result.exitCode !== 0) return result;
+
+    last = JSON.parse(result.stdout) as Record<string, unknown>;
+    if (last.status !== "no_trade") return result;
+    if (iterations >= maxIterations) break;
+  }
+
+  return ok({
+    mode: args.mode,
+    status: "watch_complete",
+    iterations,
+    last
+  });
+}
+
+async function fetchWorldCupEventRefs(deps: CliDependencies): Promise<WorldCupEventRef[]> {
+  if (deps.fetchWorldCupEventRefs) return deps.fetchWorldCupEventRefs();
+  if (deps.fetchWorldCupEventSlugs) {
+    return (await deps.fetchWorldCupEventSlugs()).map((eventSlug) => ({ eventSlug }));
+  }
+  return fetchOpenWorldCupEventRefs();
+}
+
+function sportsUpdateOptions(args: ParsedArgs, env: Record<string, string | undefined>): { auditFile?: string; proxyUrl?: string } {
+  const options: { auditFile?: string; proxyUrl?: string } = {};
+  const auditFile = args.liveAuditFile ?? env.POLY_LIVE_AUDIT_FILE;
+  const proxyUrl = proxyFromEnv(env);
+  if (auditFile) options.auditFile = auditFile;
+  if (proxyUrl) options.proxyUrl = proxyUrl;
+  return options;
+}
+
+async function defaultSportsUpdates(
+  events: readonly WorldCupEventRef[],
+  options: { auditFile?: string; proxyUrl?: string }
+): Promise<AsyncIterable<MatchState>> {
+  const queue: MatchState[] = [];
+  let closed = false;
+  let pending: (() => void) | undefined;
+
+  const wake = (): void => {
+    pending?.();
+    pending = undefined;
+  };
+
+  const providerOptions = {
+    events,
+    ...(options.auditFile !== undefined ? { auditFile: options.auditFile } : {}),
+    ...(options.proxyUrl !== undefined ? { proxyUrl: options.proxyUrl } : {})
+  };
+  const socket = new SportsLiveProvider(providerOptions).connect((update) => {
+    queue.push(update);
+    wake();
+  });
+
+  socket.addEventListener("close", () => {
+    closed = true;
+    wake();
+  });
+  socket.addEventListener("error", () => {
+    closed = true;
+    wake();
+  });
+
+  async function* stream(): AsyncIterable<MatchState> {
+    try {
+      while (true) {
+        const next = queue.shift();
+        if (next) {
+          yield next;
+          continue;
+        }
+        if (closed) return;
+        await new Promise<void>((resolve) => {
+          pending = resolve;
+        });
+      }
+    } finally {
+      try {
+        socket.close();
+      } catch {
+        // The socket may already be closed by the remote endpoint.
+      }
+    }
+  }
+
+  return stream();
+}
+
+function proxyFromEnv(env: Record<string, string | undefined>): string | undefined {
+  for (const value of [env.HTTPS_PROXY, env.HTTP_PROXY, env.https_proxy, env.http_proxy]) {
+    if (value) return value;
+  }
+  return undefined;
 }
 
 async function runStatus(
@@ -350,6 +477,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.worldcup) parsed.worldcup = booleanArg(raw.worldcup, "--worldcup");
   if (raw.intervalMs) parsed.intervalMs = numberArg(raw.intervalMs, "--interval-ms");
   if (raw.maxIterations) parsed.maxIterations = numberArg(raw.maxIterations, "--max-iterations");
+  if (raw.liveAuditFile) parsed.liveAuditFile = raw.liveAuditFile;
   if (raw.maxEntryPrice) parsed.maxEntryPrice = numberArg(raw.maxEntryPrice, "--max-entry-price");
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
   if (raw.minimumNotional) parsed.minimumNotional = numberArg(raw.minimumNotional, "--minimum-notional");

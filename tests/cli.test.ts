@@ -307,18 +307,8 @@ describe("CLI", () => {
   });
 
   test("worldcup watch discovers live event slugs before identifying a trade", async () => {
-    const result = await runCli([
-      "--mode", "paper",
-      "--watch", "true",
-      "--worldcup", "true",
-      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
-      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
-      "--interval-ms", "0",
-      "--max-iterations", "1",
-      "--stake", "97"
-    ], {}, {
-      fetchWorldCupEventSlugs: async () => ["fifwc-esp-ksa-2026-06-21"],
-      fetchMatchState: async () => ({
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
@@ -330,7 +320,21 @@ describe("CLI", () => {
         stoppageMinutes: 5,
         expectedEndMinute: 95,
         remainingMinutes: 2
-      })
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--interval-ms", "0",
+      "--max-iterations", "1",
+      "--stake", "97"
+    ], {}, {
+      fetchWorldCupEventSlugs: async () => ["fifwc-esp-ksa-2026-06-21"],
+      watchSportsUpdates: async () => updates()
     });
 
     expect(result.exitCode).toBe(0);
@@ -339,6 +343,50 @@ describe("CLI", () => {
       status: "filled",
       action: "BUY",
       eventSlug: "fifwc-esp-ksa-2026-06-21"
+    });
+  });
+
+  test("worldcup watch can use sports live updates instead of polling pages", async () => {
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        homeTeam: "Spain",
+        awayTeam: "Saudi Arabia",
+        homeGoals: 4,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventSlugs: async () => ["fifwc-esp-ksa-2026-06-21"],
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      fetchMatchState: async () => {
+        throw new Error("polling pages should not be used");
+      },
+      watchSportsUpdates: async () => updates()
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "filled",
+      action: "BUY",
+      decision: {
+        tailWindowSource: "conservative_90_plus"
+      }
     });
   });
 
