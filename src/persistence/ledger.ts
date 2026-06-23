@@ -5,7 +5,7 @@ import type { BuyTradeDecision, TailStrategy, TradeResult } from "../domain/type
 export interface LedgerTradeEntry {
   timestamp: string;
   mode: "paper" | "live";
-  status: "filled" | "posted" | "rejected";
+  status: TradeResult["status"];
   eventSlug: string;
   marketSlug: string;
   tokenId: string;
@@ -72,5 +72,11 @@ function isLedgerTradeEntry(value: unknown): value is LedgerTradeEntry {
   const record = value as Record<string, unknown>;
   return typeof record.eventSlug === "string"
     && typeof record.tokenId === "string"
-    && (record.status === "filled" || record.status === "posted" || record.status === "rejected");
+    && (
+      record.status === "filled"
+      || record.status === "partial"
+      || record.status === "posted"
+      || record.status === "rejected"
+      || record.status === "canceled"
+    );
 }
