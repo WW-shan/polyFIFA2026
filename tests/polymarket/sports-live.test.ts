@@ -6,7 +6,8 @@ import {
   appendSportsAudit,
   matchSportsUpdateToEvent,
   normalizeSportsUpdate,
-  parseElapsedSeconds
+  parseElapsedSeconds,
+  SportsLiveProvider
 } from "../../src/polymarket/sports-live.js";
 import type { WorldCupEventRef } from "../../src/polymarket/worldcup-events.js";
 
@@ -57,6 +58,29 @@ describe("sports live update helpers", () => {
 
   test("returns null for malformed scores", () => {
     expect(normalizeSportsUpdate({ gameId: 90086952, score: "bad", period: "2H", live: true }, refs)).toBeNull();
+  });
+
+  test("handles rejected update callbacks without rejecting message processing", async () => {
+    const failure = new Error("handler failed");
+    const errors: unknown[] = [];
+    const provider = new SportsLiveProvider({
+      events: refs,
+      onError: (error) => errors.push(error)
+    });
+    const message = JSON.stringify({
+      gameId: 90086952,
+      score: "3-1",
+      period: "2H",
+      elapsed: "90+3'",
+      live: true
+    });
+
+    await expect((provider as unknown as {
+      handleMessage(data: unknown, onUpdate: () => Promise<void>): Promise<void>;
+    }).handleMessage(message, async () => {
+      throw failure;
+    })).resolves.toBeUndefined();
+    expect(errors).toEqual([failure]);
   });
 
   test("writes audit records as ndjson", async () => {

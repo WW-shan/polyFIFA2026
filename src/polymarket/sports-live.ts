@@ -21,6 +21,7 @@ export interface SportsLiveProviderOptions {
   url?: string;
   auditFile?: string;
   proxyUrl?: string;
+  onError?: (error: unknown) => void;
 }
 
 export type SportsUpdateHandler = (update: SportsLiveUpdate) => Promise<void> | void;
@@ -111,24 +112,40 @@ export class SportsLiveProvider {
         socket.send("pong");
         return;
       }
-      void this.handleMessage(event.data, onUpdate);
+      void this.handleMessage(event.data, onUpdate).catch((error: unknown) => this.reportError(error));
     });
 
     return socket;
   }
 
   private async handleMessage(data: unknown, onUpdate: SportsUpdateHandler): Promise<void> {
-    const raw = parseJsonMessage(data);
-    if (raw === null) return;
-    const normalized = normalizeSportsUpdate(raw, this.options.events);
-    if (this.options.auditFile) {
-      await appendSportsAudit(this.options.auditFile, {
-        receivedAt: new Date().toISOString(),
-        raw,
-        normalized
-      });
+    try {
+      const raw = parseJsonMessage(data);
+      if (raw === null) return;
+      const normalized = normalizeSportsUpdate(raw, this.options.events);
+      if (this.options.auditFile) {
+        await appendSportsAudit(this.options.auditFile, {
+          receivedAt: new Date().toISOString(),
+          raw,
+          normalized
+        });
+      }
+      if (normalized) await onUpdate(normalized);
+    } catch (error) {
+      this.reportError(error);
     }
-    if (normalized) await onUpdate(normalized);
+  }
+
+  private reportError(error: unknown): void {
+    try {
+      if (this.options.onError) {
+        this.options.onError(error);
+        return;
+      }
+      console.error("Sports live provider message handling failed", error);
+    } catch {
+      // Keep WebSocket event callbacks from surfacing process-level failures.
+    }
   }
 }
 
