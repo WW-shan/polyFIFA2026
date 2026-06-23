@@ -2,10 +2,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { BuyTradeDecision, TailStrategy, TradeResult } from "../domain/types.js";
 
+export type LedgerStatus = "filled" | "partial" | "posted" | "rejected" | "canceled";
+
 export interface LedgerTradeEntry {
   timestamp: string;
   mode: "paper" | "live";
-  status: TradeResult["status"];
+  status: LedgerStatus;
   eventSlug: string;
   marketSlug: string;
   tokenId: string;
@@ -36,8 +38,13 @@ export class LiveLedger {
     return entries.some((entry) =>
       entry.eventSlug === eventSlug
       && entry.tokenId === tokenId
-      && (entry.status === "filled" || entry.status === "posted")
+      && isActiveLedgerStatus(entry.status)
     );
+  }
+
+  async hasActiveEventTrade(eventSlug: string): Promise<boolean> {
+    const entries = await this.readEntries();
+    return entries.some((entry) => entry.eventSlug === eventSlug && isActiveLedgerStatus(entry.status));
   }
 
   async recordTrade(entry: LedgerTradeEntry): Promise<void> {
@@ -67,16 +74,22 @@ export class LiveLedger {
   }
 }
 
+export function isActiveLedgerStatus(status: LedgerStatus): boolean {
+  return status === "filled" || status === "partial" || status === "posted";
+}
+
 function isLedgerTradeEntry(value: unknown): value is LedgerTradeEntry {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return typeof record.eventSlug === "string"
     && typeof record.tokenId === "string"
-    && (
-      record.status === "filled"
-      || record.status === "partial"
-      || record.status === "posted"
-      || record.status === "rejected"
-      || record.status === "canceled"
-    );
+    && isLedgerStatus(record.status);
+}
+
+function isLedgerStatus(value: unknown): value is LedgerStatus {
+  return value === "filled"
+    || value === "partial"
+    || value === "posted"
+    || value === "rejected"
+    || value === "canceled";
 }

@@ -7,7 +7,7 @@ import { capStakeToAvailableBalance, readPusdBalance } from "./execution/balance
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import type { LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
-import { LiveLedger } from "./persistence/ledger.js";
+import { LiveLedger, isActiveLedgerStatus } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
 import { SportsLiveProvider } from "./polymarket/sports-live.js";
@@ -106,12 +106,12 @@ async function runSinglePass(
     if (decision.action !== "BUY") {
       return ok(summary(args.mode, decision));
     }
-    if (ledger && await ledger.hasActiveTrade(decision.eventSlug, decision.tokenId)) {
+    if (ledger && await ledger.hasActiveEventTrade(decision.eventSlug)) {
       return ok(summary(args.mode, {
         action: "NO_TRADE",
         reason: "DUPLICATE_TRADE",
         eventSlug: decision.eventSlug,
-        details: "Ledger already has an active trade for this event/token"
+        details: "Ledger already has an active trade for this event"
       }));
     }
 
@@ -340,7 +340,7 @@ async function runStatus(
     ledger: {
       file: ledgerFile,
       entries: entries.length,
-      active: entries.filter((entry) => entry.status === "filled" || entry.status === "posted").length
+      active: entries.filter((entry) => isActiveLedgerStatus(entry.status)).length
     }
   };
 
@@ -435,6 +435,7 @@ function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Reco
       action: decision.action,
       reason: decision.reason,
       eventSlug: decision.eventSlug,
+      details: decision.details,
       decision
     };
   }

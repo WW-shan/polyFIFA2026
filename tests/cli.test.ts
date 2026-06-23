@@ -268,7 +268,46 @@ describe("CLI", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
       status: "no_trade",
-      reason: "DUPLICATE_TRADE"
+      reason: "DUPLICATE_TRADE",
+      details: "Ledger already has an active trade for this event"
+    });
+  });
+
+  test("skips a duplicate event trade even when the existing token differs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-ledger-event-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([
+      {
+        timestamp: "2026-06-23T10:00:00.000Z",
+        mode: "paper",
+        status: "filled",
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-1pt5",
+        tokenId: "token-spain-1p5",
+        conditionId: "cond-spain-1p5",
+        outcome: "Spain",
+        orderId: "order-1",
+        price: 0.97,
+        shares: 100,
+        notional: 97
+      }
+    ]));
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "no_trade",
+      reason: "DUPLICATE_TRADE",
+      details: "Ledger already has an active trade for this event"
     });
   });
 
