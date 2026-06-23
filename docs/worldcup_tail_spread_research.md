@@ -346,3 +346,7 @@ curl -x http://127.0.0.1:10808 \
 如果下一个 agent 只看一段话，看这里：
 
 > 用户要做的是 Polymarket 世界杯单场 Spreads 尾盘自动识别。机会不是 futures，也不是 moneyline，而是比赛末段领先方已经覆盖 `-1.5/-2.5/-3.5` 等 spread，但 CLOB 价格还停在 `0.97~0.99`。回测显示，最终结果层 19/19 净胜 2+ 都命中；但真实最后 60 秒可成交的 2-3% 机会并不是每场都有。更可靠的触发窗口应从 82-88 分钟开始，重点监控“最高仍覆盖盘口”的 best ask 和 depth，而不是严格只等最后一分钟。手续费公式已验证，0.97 约等于 3% 净收益，0.98 约等于 2% 净收益。使用代理 `http://127.0.0.1:10808` 可访问 Gamma/CLOB/Data API。已有数据文件在 `data/`，核心研究文档就是本文件。
+
+## 12. 2026-06-23 实时数据源补充
+
+详细调查与测试计划见：`docs/polymarket_live_sports_data.md`。重点结论：Polymarket 页面确实使用官方 `wss://sports-api.polymarket.com/ws` 实时体育 WebSocket；可以拿到 `score / period / elapsed / live / ended`，但目前没有确认存在 `remainingMinutes / stoppageTime / addedTime` 字段，所以“最后 3 分钟”需要在真实足球 live capture 后再精确定义，不能写死第 87 分钟。

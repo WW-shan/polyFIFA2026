@@ -82,6 +82,41 @@ describe("selectLossRequiresCandidates", () => {
     }));
   });
 
+  test("two-goal deficit makes loser No require a three-goal comeback to lose", () => {
+    const twoGoalDeficit = { ...match, homeGoals: 2, awayGoals: 0 };
+    const candidates = selectLossRequiresCandidates(twoGoalDeficit, [
+      market({
+        question: "Will Weak win on 2026-06-23?",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["weak-yes", "weak-no"]
+      })
+    ]);
+
+    expect(candidates).toContainEqual(expect.objectContaining({
+      strategy: "loser_no",
+      outcome: "No",
+      tokenId: "weak-no",
+      lossRequiresGoals: 3
+    }));
+  });
+
+  test("one-goal lead does not buy leader Yes or draw No because one adverse goal can lose", () => {
+    const candidates = selectLossRequiresCandidates(match, [
+      market({
+        question: "Will Strong win on 2026-06-23?",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["strong-yes", "strong-no"]
+      }),
+      market({
+        question: "Will Strong vs. Weak end in a draw?",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["draw-yes", "draw-no"]
+      })
+    ]);
+
+    expect(candidates).toEqual([]);
+  });
+
   test("does not impose a fixed strategy priority before pricing is known", () => {
     const candidates = selectLossRequiresCandidates(match, [
       market({
@@ -132,6 +167,33 @@ describe("selectLossRequiresCandidates", () => {
     }));
   });
 
+  test("three-goal lead keeps leader Yes and draw No distinct with three required adverse goals", () => {
+    const threeGoalLead = { ...match, homeGoals: 3, awayGoals: 0 };
+    const candidates = selectLossRequiresCandidates(threeGoalLead, [
+      market({
+        question: "Will Strong win on 2026-06-23?",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["strong-yes", "strong-no"]
+      }),
+      market({
+        question: "Will Strong vs. Weak end in a draw?",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["draw-yes", "draw-no"]
+      })
+    ]);
+
+    expect(candidates).toContainEqual(expect.objectContaining({
+      strategy: "leader_yes_lead_ge2",
+      tokenId: "strong-yes",
+      lossRequiresGoals: 3
+    }));
+    expect(candidates).toContainEqual(expect.objectContaining({
+      strategy: "draw_no_lead_ge2",
+      tokenId: "draw-no",
+      lossRequiresGoals: 3
+    }));
+  });
+
   test("total and team total under are selected when two more goals are required to lose", () => {
     const candidates = selectLossRequiresCandidates(match, [
       market({
@@ -178,6 +240,34 @@ describe("selectLossRequiresCandidates", () => {
       strategy: "spread_tight_loss_ge2",
       outcome: "Weak",
       tokenId: "weak-plus-1p5",
+      lossRequiresGoals: 2,
+      spreadSide: "other_side"
+    }));
+  });
+
+  test("spread other side uses the line-specific goal cushion instead of team win probability", () => {
+    const candidates = selectLossRequiresCandidates(match, [
+      market({
+        question: "Spread: Strong (-1.5)",
+        outcomes: ["Strong", "Weak"],
+        clobTokenIds: ["strong-minus-1p5", "weak-plus-1p5"],
+        line: -1.5
+      }),
+      market({
+        question: "Spread: Strong (-2.5)",
+        outcomes: ["Strong", "Weak"],
+        clobTokenIds: ["strong-minus-2p5", "weak-plus-2p5"],
+        line: -2.5
+      })
+    ]);
+
+    expect(candidates).not.toContainEqual(expect.objectContaining({
+      tokenId: "weak-plus-1p5"
+    }));
+    expect(candidates).toContainEqual(expect.objectContaining({
+      strategy: "spread_tight_loss_ge2",
+      outcome: "Weak",
+      tokenId: "weak-plus-2p5",
       lossRequiresGoals: 2,
       spreadSide: "other_side"
     }));

@@ -20,6 +20,10 @@ export function buildTradeDecision(
     return noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, "Match is not inside the configured remaining-time entry window");
   }
 
+  if (selected.lossRequiresGoals < 2) {
+    return noTrade("NO_ELIGIBLE_STRATEGY", match.eventSlug, `Candidate only requires ${selected.lossRequiresGoals} adverse goal(s) to lose`);
+  }
+
   if (orderbook.tokenId !== selected.tokenId) {
     return noTrade("ORDERBOOK_UNAVAILABLE", match.eventSlug, "Orderbook token does not match selected spread token");
   }

@@ -81,4 +81,36 @@ describe("loss-requires decision flow", () => {
       bestAsk: 0.97
     });
   });
+
+  test("does not prefer higher lossRequiresGoals over a larger tradable edge", () => {
+    const twoGoalLead = { ...match, homeGoals: 2, awayGoals: 0 };
+    const decision = runDecisionFlow({
+      match: twoGoalLead,
+      markets: [
+        markets[0]!,
+        {
+          eventSlug: match.eventSlug,
+          marketSlug: "match-total-3p5",
+          question: "Strong vs. Weak: O/U 3.5",
+          conditionId: "cond-total-3p5",
+          outcomes: ["Over", "Under"],
+          clobTokenIds: ["total3-over", "total3-under"],
+          line: 3.5
+        }
+      ],
+      orderbooks: [
+        book("weak-no", 0.99, 100),
+        book("total3-under", 0.98, 100)
+      ],
+      stake: 10
+    });
+
+    expect(decision).toMatchObject({
+      action: "BUY",
+      strategy: "total_under_loss_ge2",
+      tokenId: "total3-under",
+      bestAsk: 0.98,
+      lossRequiresGoals: 2
+    });
+  });
 });
