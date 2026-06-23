@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { LiveExecutionError, LiveExecutor, liveConfigFromEnv, normalizeLiveOrderResult } from "../../src/execution/live-executor.js";
+import { LiveExecutionError, LiveExecutor, liveConfigFromEnv, normalizeConfirmedLiveOrderResult, normalizeLiveOrderResult } from "../../src/execution/live-executor.js";
 import type { LiveOrderRequest } from "../../src/execution/live-executor.js";
 import type { BuyTradeDecision, TradeResult } from "../../src/domain/types.js";
 
@@ -182,5 +182,79 @@ describe("LiveExecutor", () => {
 
     expect(result.notional).toBe(1);
     expect(result.estimatedProfit).toBeCloseTo(order.size - order.notional - order.estimatedFee);
+  });
+
+  test("normalizes confirmed partial fills from matching trades", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "0.5",
+          price: "0.97",
+          fee_rate_bps: "0",
+          status: "CONFIRMED"
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "partial",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      price: 0.97,
+      shares: 0.5,
+      notional: 0.485
+    });
+    expect(result.fee).toBeCloseTo(0.0004365);
+    expect(result.estimatedPayout).toBe(0.5);
+    expect(result.estimatedProfit).toBeCloseTo(0.0145635);
+  });
+
+  test("rejects matched FOK post responses when no trade or open order confirms a fill", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "rejected",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      price: liveOrder.price,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
+
+  test("reports posted when a matching open order remains without confirmed trades", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "unmatched" },
+      trades: [],
+      openOrders: [{ id: "order-1", asset_id: liveOrder.tokenId }]
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      price: liveOrder.price,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
   });
 });
