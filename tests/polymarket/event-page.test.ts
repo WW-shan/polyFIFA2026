@@ -163,6 +163,29 @@ describe("event page initial state parsing", () => {
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "btts", marketType: "btts" }));
   });
 
+  test("classifies draw questions as draw even when the raw sports type is moneyline", () => {
+    const markets = findStrategyMarkets({
+      markets: [
+        {
+          eventSlug: "fifwc-eng-gha-2026-06-23",
+          slug: "fifwc-eng-gha-2026-06-23-draw",
+          question: "Will England vs. Ghana end in a draw?",
+          conditionId: "cond-draw",
+          clobTokenIds: "[\"draw-yes\",\"draw-no\"]",
+          outcomes: "[\"Yes\",\"No\"]",
+          sportsMarketType: "moneyline"
+        }
+      ]
+    }, "fifwc-eng-gha-2026-06-23");
+
+    expect(markets).toEqual([
+      expect.objectContaining({
+        marketSlug: "fifwc-eng-gha-2026-06-23-draw",
+        marketType: "draw"
+      })
+    ]);
+  });
+
   test("does not treat corners/cards prop markets as goal-total strategy markets", () => {
     const markets = findStrategyMarkets({
       markets: [

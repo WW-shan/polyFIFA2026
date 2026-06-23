@@ -200,6 +200,8 @@ export function parseSpreadLine(text: string): number | null {
 
 function inferMarketType(value: Record<string, unknown>, question: string): StrategyMarketType {
   if (isUnsupportedStrategyQuestion(question)) return "unknown";
+  if (/\bend in a draw\b/i.test(question)) return "draw";
+  if (/both teams to score/i.test(question)) return "btts";
 
   const rawType = stringValue(value.sportsMarketType ?? value.sports_market_type ?? value.marketType)?.toLowerCase();
   if (rawType === "spreads") return "spread";
@@ -207,8 +209,6 @@ function inferMarketType(value: Record<string, unknown>, question: string): Stra
   if (rawType === "moneyline") return "moneyline";
 
   if (/^spread:/i.test(question)) return "spread";
-  if (/both teams to score/i.test(question)) return "btts";
-  if (/\bend in a draw\b/i.test(question)) return "draw";
   if (/\bo\/u\b/i.test(question)) return parseTeamTotalTeam(question) ? "team_total" : "total";
   if (/^will .+ win\b/i.test(question)) return "moneyline";
   return "unknown";
