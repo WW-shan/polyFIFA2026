@@ -12,8 +12,10 @@ describe("World Cup event refs", () => {
         slug: "fifwc-prt-uzb-2026-06-23",
         title: "Portugal vs. Uzbekistan",
         startTime: "2026-06-23T17:00:00Z",
-        gameId: 90086952,
-        eventMetadata: { sportradarGameId: "sr:sport_event:66457034" },
+        eventMetadata: {
+          gameId: 90086952,
+          sportradarGameId: "sr:sport_event:66457034"
+        },
         closed: false,
         archived: false,
         active: true

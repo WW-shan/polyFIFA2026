@@ -44,7 +44,7 @@ export function normalizeWorldCupEventRefs(records: readonly GammaEventRecord[])
     seen.add(eventSlug);
 
     const ref: WorldCupEventRef = { eventSlug };
-    const gameId = numberValue(event.gameId);
+    const gameId = numberValue(event.gameId ?? getNested(event, ["eventMetadata", "gameId"]));
     if (gameId !== undefined) ref.gameId = gameId;
     const sportradarGameId = stringValue(getNested(event, ["eventMetadata", "sportradarGameId"]) ?? event.sportradarGameId);
     if (sportradarGameId) ref.sportradarGameId = sportradarGameId;
