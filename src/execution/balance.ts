@@ -19,7 +19,7 @@ export type BalanceStakeDecision =
   | { action: "NO_TRADE"; reason: Extract<NoTradeReason, "INSUFFICIENT_BALANCE">; details: string };
 
 export function capStakeToAvailableBalance(
-  requestedStake: number,
+  requestedStake: number | undefined,
   balance: number,
   options: { minimumNotional: number; buffer?: number }
 ): BalanceStakeDecision {
@@ -33,7 +33,7 @@ export function capStakeToAvailableBalance(
     };
   }
 
-  return { action: "USE_STAKE", stake: Math.min(requestedStake, available) };
+  return { action: "USE_STAKE", stake: requestedStake === undefined ? available : Math.min(requestedStake, available) };
 }
 
 export async function readPusdBalance(

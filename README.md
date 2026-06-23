@@ -76,7 +76,6 @@ For live page state, `--event-slug` can replace `--match-file`:
 npm run cli -- \
   --mode live \
   --event-slug fifwc-fra-irq-2026-06-22 \
-  --stake 5 \
   --order-type FOK
 ```
 
@@ -95,14 +94,15 @@ npm run cli -- \
   --mode live \
   --watch true \
   --event-slug fifwc-fra-irq-2026-06-22 \
-  --entry-window-minutes 3 \
-  --stake 5
+  --entry-window-minutes 3
 
 # Discover open World Cup single-match events from Gamma, then watch all of them.
-npm run live:watch:worldcup -- --stake 5 --entry-window-minutes 3
+npm run live:watch:worldcup -- --entry-window-minutes 3
 ```
 
 Watch mode stops as soon as one order is filled/posted/rejected or a live error occurs. If no trade is available it sleeps `--interval-ms` milliseconds and retries; `--max-iterations` is mainly for tests/dry runs.
+
+Live capital allocation is all-in by default: if `--stake` is omitted, the bot selects the best executable positive-edge candidate, then uses `pUSD balance - POLY_BALANCE_BUFFER` as the order notional. Passing `--stake N` changes this to `min(N, pUSD balance - POLY_BALANCE_BUFFER)`.
 
 ## Live Smoke Guard
 
@@ -126,7 +126,7 @@ Optional live env vars:
 - `POLY_FUNDER_ADDRESS`
 - `POLY_DEPOSIT_WALLET_ADDRESS` for CLOB v2 deposit-wallet accounts; this overrides `POLY_FUNDER_ADDRESS` and forces `POLY_SIGNATURE_TYPE=3`
 - `POLY_LEDGER_FILE` defaults to `data/live-ledger.json` in live mode; filled/posted orders are recorded and duplicate event/token buys are skipped
-- `POLY_USE_LIVE_BALANCE=true` to cap live stake to pUSD balance; this is automatic when a funder/deposit wallet is configured unless explicitly disabled
+- `POLY_USE_LIVE_BALANCE=true` to size live orders from pUSD balance; this is automatic when a funder/deposit wallet is configured unless explicitly disabled
 - `POLY_BALANCE_BUFFER` defaults to `0.02` pUSD so stake sizing leaves a small balance cushion
 - `POLY_SIGNATURE_TYPE` defaults to `1` unless `POLY_DEPOSIT_WALLET_ADDRESS` is set
 - `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order

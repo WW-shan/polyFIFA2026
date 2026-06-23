@@ -27,7 +27,7 @@ interface ParsedArgs {
   eventSlug?: string;
   marketsFile?: string;
   orderbookFile?: string;
-  stake: number;
+  stake?: number;
   maxEntryPrice?: number;
   minimumNetReturn?: number;
   minimumNotional?: number;
@@ -46,6 +46,7 @@ export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
   readPusdBalance?: (walletAddress: string, rpcUrl?: string) => Promise<number>;
   fetchWorldCupEventSlugs?: () => Promise<string[]>;
+  executeLive?: (decision: Extract<TradeDecision, { action: "BUY" }>, options: { orderType: LiveOrderType }) => Promise<TradeResult>;
 }
 
 export async function runCli(
@@ -107,7 +108,9 @@ async function runSinglePass(
 
     const trade = args.mode === "paper"
       ? await new PaperExecutor().execute(decision)
-      : await new LiveExecutor(liveConfig).execute(decision, { orderType: args.orderType });
+      : await (deps.executeLive
+        ? deps.executeLive(decision, { orderType: args.orderType })
+        : new LiveExecutor(liveConfig).execute(decision, { orderType: args.orderType }));
     if (ledger) await ledger.recordResult(decision, trade);
 
     return ok(summary(args.mode, decision, trade));
@@ -200,11 +203,15 @@ async function resolveStake(
   deps: CliDependencies
 ): Promise<{ action: "USE_STAKE"; stake: number } | { action: "NO_TRADE"; decision: NoTradeDecision }> {
   if (args.mode !== "live" || !liveConfig || !shouldUseLiveBalance(args, env, liveConfig)) {
-    return { action: "USE_STAKE", stake: args.stake };
+    if (args.stake !== undefined) return { action: "USE_STAKE", stake: args.stake };
+    throw new Error("--stake is required unless live balance sizing is enabled");
   }
 
   const walletAddress = liveConfig.depositWalletAddress ?? liveConfig.funderAddress;
-  if (!walletAddress) return { action: "USE_STAKE", stake: args.stake };
+  if (!walletAddress) {
+    if (args.stake !== undefined) return { action: "USE_STAKE", stake: args.stake };
+    throw new Error("--stake is required unless POLY_DEPOSIT_WALLET_ADDRESS or POLY_FUNDER_ADDRESS is configured");
+  }
 
   const balance = await (deps.readPusdBalance ?? readPusdBalance)(walletAddress, liveConfig.rpcUrl);
   const stakeDecision = capStakeToAvailableBalance(args.stake, balance, {
@@ -312,9 +319,13 @@ function parseArgs(argv: string[]): ParsedArgs {
 
   const parsed: ParsedArgs = {
     mode,
-    stake: numberArg(raw.stake ?? "97", "--stake"),
     orderType
   };
+  if (raw.stake) {
+    parsed.stake = numberArg(raw.stake, "--stake");
+  } else if (mode === "paper") {
+    parsed.stake = 97;
+  }
   if (raw.matchFile) parsed.matchFile = raw.matchFile;
   if (raw.eventSlug) parsed.eventSlug = raw.eventSlug;
   if (raw.marketsFile) parsed.marketsFile = raw.marketsFile;

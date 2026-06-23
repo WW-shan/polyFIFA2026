@@ -230,6 +230,45 @@ describe("CLI", () => {
     });
   });
 
+  test("live mode defaults to all available pUSD when --stake is omitted", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-all-in-"));
+    const ledgerFile = join(dir, "ledger.json");
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--balance-buffer", "0.05"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001",
+      POLY_LEDGER_FILE: ledgerFile
+    }, {
+      readPusdBalance: async () => 2.34,
+      executeLive: async (decision) => ({
+        mode: "live",
+        status: "filled",
+        orderId: "live-order-1",
+        tokenId: decision.tokenId,
+        price: decision.bestAsk,
+        shares: decision.shares,
+        notional: decision.notional,
+        fee: decision.estimatedFee,
+        estimatedPayout: decision.shares,
+        estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "filled",
+      notional: 2.29,
+      trade: {
+        notional: 2.29
+      }
+    });
+  });
+
   test("watch mode uses remaining time and trades when the refetched match enters the final window", async () => {
     let calls = 0;
     const result = await runCli([

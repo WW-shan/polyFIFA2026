@@ -13,6 +13,13 @@ describe("live pUSD balance helpers", () => {
     });
   });
 
+  test("uses the full buffered balance when requested stake is omitted", () => {
+    expect(capStakeToAvailableBalance(undefined, 2.34, { minimumNotional: 1, buffer: 0.05 })).toEqual({
+      action: "USE_STAKE",
+      stake: 2.29
+    });
+  });
+
   test("does not trade when buffered balance is below minimum notional", () => {
     expect(capStakeToAvailableBalance(97, 1.02, { minimumNotional: 1, buffer: 0.05 })).toMatchObject({
       action: "NO_TRADE",
