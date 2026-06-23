@@ -256,8 +256,9 @@ function parseBooleanEnv(value: string): boolean {
 export function normalizeLiveOrderResult(order: LiveOrderRequest, raw: unknown): TradeResult {
   if (raw && typeof raw === "object") {
     const record = raw as Record<string, unknown>;
-    if (record.success === false || typeof record.error === "string" || typeof record.errorMsg === "string") {
-      throw new LiveExecutionError("LIVE_ORDER_REJECTED", String(record.errorMsg ?? record.error ?? "Polymarket rejected live order"), { raw });
+    const errorMessage = nonEmptyString(record.errorMsg) ?? nonEmptyString(record.error);
+    if (record.success === false || errorMessage) {
+      throw new LiveExecutionError("LIVE_ORDER_REJECTED", errorMessage ?? "Polymarket rejected live order", { raw });
     }
   }
 
@@ -284,4 +285,8 @@ function stringField(value: unknown, field: string): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const fieldValue = (value as Record<string, unknown>)[field];
   return typeof fieldValue === "string" ? fieldValue : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }

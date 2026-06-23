@@ -147,4 +147,20 @@ describe("LiveExecutor", () => {
       estimatedProfit: buyDecision.shares - buyDecision.notional - buyDecision.estimatedFee
     });
   });
+
+  test("accepts matched CLOB responses with an empty errorMsg", () => {
+    const result = normalizeLiveOrderResult(liveOrder, {
+      success: true,
+      errorMsg: "",
+      orderID: "order-1",
+      status: "matched",
+      transactionsHashes: ["0xtx"]
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      orderId: "order-1"
+    });
+  });
 });
