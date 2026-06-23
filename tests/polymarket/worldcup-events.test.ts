@@ -1,8 +1,46 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { fetchOpenWorldCupEventSlugs } from "../../src/polymarket/worldcup-events.js";
+import { fetchOpenWorldCupEventSlugs, normalizeWorldCupEventRefs } from "../../src/polymarket/worldcup-events.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("World Cup event refs", () => {
+  test("keeps tradable fifwc slug and rich ids", () => {
+    const refs = normalizeWorldCupEventRefs([
+      {
+        slug: "fifwc-prt-uzb-2026-06-23",
+        title: "Portugal vs. Uzbekistan",
+        startTime: "2026-06-23T17:00:00Z",
+        gameId: 90086952,
+        eventMetadata: { sportradarGameId: "sr:sport_event:66457034" },
+        closed: false,
+        archived: false,
+        active: true
+      }
+    ]);
+
+    expect(refs).toEqual([
+      {
+        eventSlug: "fifwc-prt-uzb-2026-06-23",
+        gameId: 90086952,
+        sportradarGameId: "sr:sport_event:66457034",
+        homeTeam: "Portugal",
+        awayTeam: "Uzbekistan",
+        startTime: "2026-06-23T17:00:00Z"
+      }
+    ]);
+  });
+
+  test("dedupes by event slug and rejects non-single-match slugs", () => {
+    const refs = normalizeWorldCupEventRefs([
+      { slug: "fifwc-prt-uzb-2026-06-23", title: "Portugal vs. Uzbekistan" },
+      { slug: "fifwc-prt-uzb-2026-06-23", title: "Portugal vs. Uzbekistan" },
+      { slug: "fifwc-more-goals-2026", title: "Most goals" }
+    ]);
+
+    expect(refs.map((ref) => ref.eventSlug)).toEqual(["fifwc-prt-uzb-2026-06-23"]);
+  });
 });
 
 describe("World Cup event discovery", () => {
