@@ -40,8 +40,8 @@ export function normalizeSportsUpdate(
   const period = parseSportsPeriod(stringValue(raw.period));
   const elapsed = stringValue(raw.elapsed) ?? "";
   const elapsedSeconds = parseElapsedSeconds(elapsed);
-  const remainingSeconds = numberValue(raw.remainingSeconds ?? raw.remaining_seconds ?? raw.secondsRemaining ?? raw.seconds_remaining);
-  const remainingMinutes = numberValue(raw.remainingMinutes ?? raw.remaining_minutes ?? raw.minutesRemaining ?? raw.minutes_remaining ?? raw.remainingTime ?? raw.remaining_time);
+  const remainingSeconds = firstNumberValue(raw.remainingSeconds, raw.remaining_seconds, raw.secondsRemaining, raw.seconds_remaining);
+  const remainingMinutes = firstNumberValue(raw.remainingMinutes, raw.remaining_minutes, raw.minutesRemaining, raw.minutes_remaining, raw.remainingTime, raw.remaining_time);
   const live = typeof raw.live === "boolean" ? raw.live : raw.gameState === "live" || raw.gameState === "in-progress";
   const ended = raw.ended === true || period === "FT";
 
@@ -183,6 +183,15 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function numberValue(value: unknown): number | undefined {
-  const parsed = typeof value === "string" ? Number(value) : value;
+  if (typeof value === "string" && value.trim().length === 0) return undefined;
+  const parsed = typeof value === "string" ? Number(value.trim()) : value;
   return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function firstNumberValue(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = numberValue(value);
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
 }

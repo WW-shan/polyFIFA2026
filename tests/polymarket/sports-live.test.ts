@@ -69,6 +69,23 @@ describe("sports live update helpers", () => {
     });
   });
 
+  test("uses remainingSeconds fallback when primary field is blank", () => {
+    const update = normalizeSportsUpdate({
+      gameId: 90086952,
+      score: "3-1",
+      period: "2H",
+      elapsed: "90:00",
+      remainingSeconds: "",
+      remaining_seconds: "240",
+      live: true
+    }, refs, new Date("2026-06-23T19:00:00.000Z"));
+
+    expect(update).toMatchObject({
+      elapsedSeconds: 5400,
+      remainingSeconds: 240
+    });
+  });
+
   test("preserves remainingMinutes from sports updates", () => {
     const update = normalizeSportsUpdate({
       gameId: 90086952,
@@ -82,6 +99,49 @@ describe("sports live update helpers", () => {
     expect(update).toMatchObject({
       elapsedSeconds: 5400,
       remainingMinutes: 4
+    });
+  });
+
+  test("blank remainingSeconds does not activate strict remaining-time entry", () => {
+    const update = normalizeSportsUpdate({
+      gameId: 90086952,
+      score: "4-0",
+      period: "2H",
+      elapsed: "89:30",
+      remainingSeconds: "   ",
+      live: true
+    }, refs, new Date("2026-06-23T19:00:00.000Z"));
+    expect(update).not.toBeNull();
+    expect(update).not.toHaveProperty("remainingSeconds");
+
+    const markets: StrategyMarket[] = [
+      {
+        eventSlug: refs[0]!.eventSlug,
+        marketSlug: "uzbekistan-moneyline",
+        question: "Will Uzbekistan win on 2026-06-23?",
+        conditionId: "cond-uzb-win",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["uzb-yes", "uzb-no"]
+      }
+    ];
+    const orderbook: OrderbookSnapshot = {
+      tokenId: "uzb-no",
+      bids: [],
+      asks: [{ price: 0.97, size: 100 }]
+    };
+
+    const decision = runDecisionFlow({
+      match: update!,
+      markets,
+      orderbooks: [orderbook],
+      stake: 10,
+      thresholds: { entryWindowMinutes: 3 }
+    });
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "MATCH_NOT_LATE_ENOUGH",
+      details: "elapsedSeconds=5370 threshold=5400"
     });
   });
 
