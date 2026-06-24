@@ -1,4 +1,5 @@
 import { netReturnRate, sportsTakerFeePerShare } from "./fees.js";
+import { classifyTailWindow, type TailWindowMode } from "./time-window.js";
 import type {
   BuyTradeDecision,
   DecisionThresholds,
@@ -14,10 +15,15 @@ export function buildTradeDecision(
   match: MatchState,
   selected: SelectedStrategyMarket,
   orderbook: OrderbookSnapshot,
-  thresholds: DecisionThresholds
+  thresholds: DecisionThresholds,
+  tailWindowMode?: TailWindowMode
 ): TradeDecision {
-  if (!isWithinEntryWindow(match, thresholds.entryWindowMinutes)) {
-    return noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, "Match is not inside the configured remaining-time entry window");
+  const tailWindow = classifyTailWindow(match, {
+    entryWindowMinutes: thresholds.entryWindowMinutes,
+    ...(tailWindowMode ? { mode: tailWindowMode } : {})
+  });
+  if (!tailWindow.eligible) {
+    return noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, tailWindow.details);
   }
 
   if (selected.lossRequiresGoals < 2) {
@@ -80,7 +86,9 @@ export function buildTradeDecision(
     estimatedFee,
     estimatedNetReturn,
     strategy: selected.strategy,
-    lossRequiresGoals: selected.lossRequiresGoals
+    lossRequiresGoals: selected.lossRequiresGoals,
+    tailWindowSource: tailWindow.source,
+    tailWindowDetails: tailWindow.details
   };
 
   if (selected.line !== undefined) decision.line = selected.line;
@@ -89,14 +97,6 @@ export function buildTradeDecision(
   if (selected.negRisk !== undefined) decision.negRisk = selected.negRisk;
 
   return decision;
-}
-
-function isWithinEntryWindow(match: MatchState, entryWindowMinutes: number): boolean {
-  return match.period === "2H"
-    && match.isLive
-    && match.remainingMinutes !== undefined
-    && match.remainingMinutes >= 0
-    && match.remainingMinutes <= entryWindowMinutes;
 }
 
 function sortedPositiveAsks(asks: readonly PriceLevel[]): PriceLevel[] {

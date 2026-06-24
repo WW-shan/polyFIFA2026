@@ -1,9 +1,88 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchCandidateOrderbooks, runCli } from "../src/cli.js";
 import type { MatchState, OrderbookSnapshot, StrategyMarket } from "../src/domain/types.js";
+
+const sportsLiveMock = vi.hoisted(() => {
+  type Listener = (event?: unknown) => void;
+  type ProviderOptions = {
+    events: readonly { eventSlug: string }[];
+    auditFile?: string;
+    proxyUrl?: string;
+    onError?: (error: unknown) => void;
+  };
+  type UpdateHandler = (update: MatchState) => Promise<void> | void;
+
+  class FakeSocket {
+    readonly listeners = new Map<string, Listener[]>();
+    closed = false;
+    closeCalls = 0;
+
+    addEventListener(type: string, listener: Listener): void {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    emit(type: string, event?: unknown): void {
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+
+    close(): void {
+      this.closed = true;
+      this.closeCalls += 1;
+    }
+  }
+
+  class FakeSportsLiveProvider {
+    handler?: UpdateHandler;
+    socket?: FakeSocket;
+
+    constructor(readonly options: ProviderOptions) {
+      instances.push(this);
+    }
+
+    connect(handler: UpdateHandler): FakeSocket {
+      this.handler = handler;
+      this.socket = new FakeSocket();
+      return this.socket;
+    }
+
+    async emitUpdate(update: MatchState): Promise<void> {
+      await this.handler?.(update);
+    }
+  }
+
+  const instances: FakeSportsLiveProvider[] = [];
+
+  return {
+    FakeSportsLiveProvider,
+    instances,
+    reset: () => {
+      instances.length = 0;
+    }
+  };
+});
+
+const eventPageMock = vi.hoisted(() => ({
+  fetchEventMatchState: vi.fn(async () => {
+    throw new Error("match page polling should not be used");
+  }),
+  fetchEventStrategyMarkets: vi.fn(async () => {
+    throw new Error("market polling should not be used");
+  })
+}));
+
+vi.mock("../src/polymarket/sports-live.js", () => ({
+  SportsLiveProvider: sportsLiveMock.FakeSportsLiveProvider
+}));
+
+vi.mock("../src/polymarket/event-page.js", () => ({
+  fetchEventMatchState: eventPageMock.fetchEventMatchState,
+  fetchEventStrategyMarkets: eventPageMock.fetchEventStrategyMarkets
+}));
 
 const liveMatch: MatchState = {
   eventSlug: "fifwc-strong-weak-2026-06-23",
@@ -38,6 +117,25 @@ const liveMarkets: StrategyMarket[] = [
     line: 2.5
   }
 ];
+
+afterEach(() => {
+  sportsLiveMock.reset();
+  eventPageMock.fetchEventMatchState.mockClear();
+  eventPageMock.fetchEventStrategyMarkets.mockClear();
+});
+
+function latestSportsProvider(): InstanceType<typeof sportsLiveMock.FakeSportsLiveProvider> {
+  const provider = sportsLiveMock.instances.at(-1);
+  expect(provider).toBeDefined();
+  return provider!;
+}
+
+async function waitForDefaultSportsProvider(): Promise<InstanceType<typeof sportsLiveMock.FakeSportsLiveProvider>> {
+  await vi.waitFor(() => {
+    expect(sportsLiveMock.instances.length).toBeGreaterThan(0);
+  });
+  return latestSportsProvider();
+}
 
 describe("CLI", () => {
   test("paper mode prints a filled JSON trade result", async () => {
@@ -186,7 +284,46 @@ describe("CLI", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
       status: "no_trade",
-      reason: "DUPLICATE_TRADE"
+      reason: "DUPLICATE_TRADE",
+      details: "Ledger already has an active trade for this event"
+    });
+  });
+
+  test("skips a duplicate event trade even when the existing token differs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-ledger-event-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([
+      {
+        timestamp: "2026-06-23T10:00:00.000Z",
+        mode: "paper",
+        status: "filled",
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-1pt5",
+        tokenId: "token-spain-1p5",
+        conditionId: "cond-spain-1p5",
+        outcome: "Spain",
+        orderId: "order-1",
+        price: 0.97,
+        shares: 100,
+        notional: 97
+      }
+    ]));
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "no_trade",
+      reason: "DUPLICATE_TRADE",
+      details: "Ledger already has an active trade for this event"
     });
   });
 
@@ -307,18 +444,8 @@ describe("CLI", () => {
   });
 
   test("worldcup watch discovers live event slugs before identifying a trade", async () => {
-    const result = await runCli([
-      "--mode", "paper",
-      "--watch", "true",
-      "--worldcup", "true",
-      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
-      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
-      "--interval-ms", "0",
-      "--max-iterations", "1",
-      "--stake", "97"
-    ], {}, {
-      fetchWorldCupEventSlugs: async () => ["fifwc-esp-ksa-2026-06-21"],
-      fetchMatchState: async () => ({
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
@@ -330,7 +457,21 @@ describe("CLI", () => {
         stoppageMinutes: 5,
         expectedEndMinute: 95,
         remainingMinutes: 2
-      })
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--interval-ms", "0",
+      "--max-iterations", "1",
+      "--stake", "97"
+    ], {}, {
+      fetchWorldCupEventSlugs: async () => ["fifwc-esp-ksa-2026-06-21"],
+      watchSportsUpdates: async () => updates()
     });
 
     expect(result.exitCode).toBe(0);
@@ -340,6 +481,334 @@ describe("CLI", () => {
       action: "BUY",
       eventSlug: "fifwc-esp-ksa-2026-06-21"
     });
+  });
+
+  test("worldcup watch can use sports live updates instead of polling pages", async () => {
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        homeTeam: "Spain",
+        awayTeam: "Saudi Arabia",
+        homeGoals: 4,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventSlugs: async () => ["fifwc-esp-ksa-2026-06-21"],
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      fetchMatchState: async () => {
+        throw new Error("polling pages should not be used");
+      },
+      watchSportsUpdates: async () => updates()
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "filled",
+      action: "BUY",
+      decision: {
+        tailWindowSource: "conservative_90_plus"
+      }
+    });
+  });
+
+  test("worldcup live watch skips balance and market fetches before the tail window", async () => {
+    const readPusdBalance = vi.fn(async () => {
+      throw new Error("balance should not be read before the tail window");
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-early-tail-2026-06-21",
+        homeTeam: "Early",
+        awayTeam: "Tail",
+        homeGoals: 2,
+        awayGoals: 0,
+        minute: 75,
+        period: "2H",
+        isLive: true,
+        remainingMinutes: 18
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-early-tail-2026-06-21", homeTeam: "Early", awayTeam: "Tail" }],
+      watchSportsUpdates: async () => updates(),
+      readPusdBalance
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(readPusdBalance).not.toHaveBeenCalled();
+    expect(eventPageMock.fetchEventStrategyMarkets).not.toHaveBeenCalled();
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        mode: "live",
+        status: "no_trade",
+        reason: "MATCH_NOT_LATE_ENOUGH",
+        eventSlug: "fifwc-early-tail-2026-06-21",
+        details: expect.stringContaining("remainingMinutes=18")
+      }
+    });
+  });
+
+  test("worldcup watch completes without opening default sports provider when no events are discovered", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => []
+    });
+
+    const result = await Promise.race([
+      resultPromise,
+      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 50))
+    ]);
+
+    if (result === "timed_out") throw new Error("worldcup watch did not return when no events were discovered");
+    expect(sportsLiveMock.instances).toHaveLength(0);
+    expect(result).toMatchObject({
+      exitCode: 0,
+      stderr: ""
+    });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 0,
+      last: {
+        status: "no_events",
+        reason: "NO_WORLD_CUP_EVENTS"
+      }
+    });
+  });
+
+  test("worldcup watch reports default sports socket errors", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+    });
+
+    const provider = await waitForDefaultSportsProvider();
+    provider.socket?.emit("error", { error: new Error("sports socket unavailable") });
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("sports socket unavailable");
+    expect(provider.socket?.closed).toBe(true);
+  });
+
+  test("worldcup watch reports default sports clean remote socket close before completion", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+    });
+
+    const provider = await waitForDefaultSportsProvider();
+    provider.socket?.emit("close", { wasClean: true, code: 1000, reason: "normal close" });
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Sports live WebSocket closed unexpectedly");
+    expect(provider.socket?.closed).toBe(true);
+  });
+
+  test("worldcup watch reports sports provider message handling errors", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+    });
+
+    const provider = await waitForDefaultSportsProvider();
+    if (!provider.options.onError) {
+      provider.socket?.emit("close", { wasClean: true, code: 1000, reason: "normal close" });
+      await resultPromise;
+    }
+
+    expect(provider.options.onError).toEqual(expect.any(Function));
+    provider.options.onError?.(new Error("audit write failed"));
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("audit write failed");
+    expect(provider.socket?.closed).toBe(true);
+  });
+
+  test("worldcup watch cleans up the default sports socket after a trade", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+    });
+
+    const provider = await waitForDefaultSportsProvider();
+    await provider.emitUpdate({
+      eventSlug: "fifwc-esp-ksa-2026-06-21",
+      homeTeam: "Spain",
+      awayTeam: "Saudi Arabia",
+      homeGoals: 4,
+      awayGoals: 0,
+      minute: 90,
+      period: "2H",
+      isLive: true,
+      elapsedSeconds: 90 * 60
+    });
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "filled",
+      action: "BUY"
+    });
+    expect(provider.socket?.closed).toBe(true);
+  });
+
+  test("worldcup watch cleans up the default sports socket after max iterations", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+    });
+
+    const provider = await waitForDefaultSportsProvider();
+    await provider.emitUpdate({
+      eventSlug: "fifwc-esp-ksa-2026-06-21",
+      homeTeam: "Spain",
+      awayTeam: "Saudi Arabia",
+      homeGoals: 4,
+      awayGoals: 0,
+      minute: 89,
+      period: "2H",
+      isLive: true,
+      elapsedSeconds: 89 * 60
+    });
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "no_trade"
+      }
+    });
+    expect(provider.socket?.closed).toBe(true);
+  });
+
+  test("worldcup watch passes audit and proxy options to the default sports provider", async () => {
+    const eventRef = { eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" };
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "1",
+      "--live-audit-file", "cli-audit.json"
+    ], {
+      POLY_LIVE_AUDIT_FILE: "env-audit.json",
+      HTTPS_PROXY: "https://proxy.example",
+      HTTP_PROXY: "http://proxy.example",
+      https_proxy: "https://lower-proxy.example",
+      http_proxy: "http://lower-proxy.example"
+    }, {
+      fetchWorldCupEventRefs: async () => [eventRef]
+    });
+
+    const provider = await waitForDefaultSportsProvider();
+    expect(provider.options).toMatchObject({
+      events: [eventRef],
+      auditFile: "cli-audit.json",
+      proxyUrl: "https://proxy.example"
+    });
+
+    await provider.emitUpdate({
+      eventSlug: "fifwc-esp-ksa-2026-06-21",
+      homeTeam: "Spain",
+      awayTeam: "Saudi Arabia",
+      homeGoals: 4,
+      awayGoals: 0,
+      minute: 89,
+      period: "2H",
+      isLive: true,
+      elapsedSeconds: 89 * 60
+    });
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "no_trade"
+      }
+    });
+    expect(provider.socket?.closed).toBe(true);
   });
 
   test("fetchCandidateOrderbooks keeps usable books when one candidate fetch fails", async () => {

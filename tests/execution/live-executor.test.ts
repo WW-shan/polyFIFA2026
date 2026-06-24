@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { LiveExecutionError, LiveExecutor, liveConfigFromEnv, normalizeLiveOrderResult } from "../../src/execution/live-executor.js";
+import { LiveExecutionError, LiveExecutor, liveConfigFromEnv, normalizeConfirmedLiveOrderResult, normalizeLiveOrderResult } from "../../src/execution/live-executor.js";
 import type { LiveOrderRequest } from "../../src/execution/live-executor.js";
 import type { BuyTradeDecision, TradeResult } from "../../src/domain/types.js";
 
@@ -145,12 +145,15 @@ describe("LiveExecutor", () => {
       mode: "live",
       status: "posted",
       orderId: "order-1",
-      fee: buyDecision.estimatedFee,
-      estimatedProfit: buyDecision.shares - buyDecision.notional - buyDecision.estimatedFee
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
     });
   });
 
-  test("accepts matched CLOB responses with an empty errorMsg", () => {
+  test("legacy normalization does not fabricate fills from matched post responses", () => {
     const result = normalizeLiveOrderResult(liveOrder, {
       success: true,
       errorMsg: "",
@@ -161,12 +164,17 @@ describe("LiveExecutor", () => {
 
     expect(result).toMatchObject({
       mode: "live",
-      status: "filled",
-      orderId: "order-1"
+      status: "posted",
+      orderId: "order-1",
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
     });
   });
 
-  test("normalizes live results with the decision notional instead of recomputing floating math", () => {
+  test("legacy normalization does not fabricate decision notional from matched post responses", () => {
     const order: LiveOrderRequest = {
       ...liveOrder,
       price: 0.91,
@@ -180,7 +188,419 @@ describe("LiveExecutor", () => {
       status: "matched"
     });
 
-    expect(result.notional).toBe(1);
-    expect(result.estimatedProfit).toBeCloseTo(order.size - order.notional - order.estimatedFee);
+    expect(result.shares).toBe(0);
+    expect(result.notional).toBe(0);
+    expect(result.estimatedProfit).toBe(0);
+  });
+
+  test("normalizes confirmed partial fills from matching trades", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "0.5",
+          price: "0.97",
+          fee_rate_bps: "0",
+          status: "CONFIRMED"
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "partial",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      price: 0.97,
+      shares: 0.5,
+      notional: 0.485
+    });
+    expect(result.fee).toBeCloseTo(0.0004365);
+    expect(result.estimatedPayout).toBe(0.5);
+    expect(result.estimatedProfit).toBeCloseTo(0.0145635);
+  });
+
+  test("counts TRADE_STATUS_CONFIRMED as a confirmed fill", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "0.5",
+          price: "0.97",
+          status: "TRADE_STATUS_CONFIRMED"
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "partial",
+      orderId: "order-1",
+      shares: 0.5,
+      notional: 0.485
+    });
+  });
+
+  test("returns posted when confirmation reads fail after a successful post", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      confirmationErrors: [
+        { source: "getTrades", error: "timeout" },
+        { source: "getOpenOrders", error: new Error("temporarily unavailable") }
+      ]
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0,
+      raw: {
+        postResponse: { success: true, orderID: "order-1", status: "matched" },
+        confirmationErrors: [
+          { source: "getTrades", error: "timeout" },
+          { source: "getOpenOrders", error: expect.any(Error) }
+        ]
+      }
+    });
+  });
+
+  test.each([
+    ["failed status", { status: "FAILED" }],
+    ["TRADE_STATUS_FAILED", { status: "TRADE_STATUS_FAILED" }],
+    ["errored payload", { status: "CONFIRMED", err_msg: "execution reverted" }]
+  ])("ignores matching trades with %s", (_caseName, tradePatch) => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "0.5",
+          price: "0.97",
+          ...tradePatch
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "rejected",
+      orderId: "order-1",
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
+
+  test.each([
+    "TRADE_STATUS_MATCHED",
+    "TRADE_STATUS_MINED",
+    "TRADE_STATUS_RETRYING"
+  ])("reports posted for matching pending %s trades", (status) => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "0.5",
+          price: "0.97",
+          status
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
+
+  test("keeps matched FOK post responses active when confirmations are temporarily empty", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      price: liveOrder.price,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
+
+  test("reports posted when order lookup fails and no fill or open order confirms the post", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      orderError: new Error("order lookup 404"),
+      trades: [],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+    expect(result.raw).toMatchObject({
+      orderError: expect.any(Error)
+    });
+  });
+
+  test("normalizes confirmed fills when order lookup fails", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      orderError: new Error("order lookup timeout"),
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "100",
+          price: "0.97",
+          status: "TRADE_STATUS_CONFIRMED"
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      orderId: "order-1",
+      shares: 100,
+      notional: 97
+    });
+    expect(result.raw).toMatchObject({
+      orderError: expect.any(Error)
+    });
+  });
+
+  test("reports posted when a matching open order remains without confirmed trades", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "unmatched" },
+      trades: [],
+      openOrders: [{ id: "order-1", asset_id: liveOrder.tokenId }]
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      price: liveOrder.price,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
+
+  test("does not let ORDER_STATUS_MATCHED order state keep a fully confirmed fill partial", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_MATCHED" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "100",
+          price: "0.97",
+          status: "TRADE_STATUS_CONFIRMED"
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      orderId: "order-1",
+      shares: 100,
+      notional: 97
+    });
+  });
+
+  test("keeps ORDER_STATUS_LIVE order state active without getOpenOrders evidence", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "unmatched" },
+      order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_LIVE" },
+      trades: [],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      shares: 0,
+      notional: 0
+    });
+  });
+
+  test("does not let stale ORDER_STATUS_LIVE order state keep a fully confirmed fill partial", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_LIVE" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "100",
+          price: "0.97",
+          status: "TRADE_STATUS_CONFIRMED"
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      orderId: "order-1",
+      shares: 100,
+      notional: 97
+    });
+  });
+
+  test("reports canceled for terminal ORDER_STATUS_CANCELED order state with no fills", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "unmatched" },
+      order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_CANCELED" },
+      trades: [],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "canceled",
+      orderId: "order-1",
+      shares: 0,
+      notional: 0
+    });
+  });
+
+  test("keeps posted status when cancel response does not confirm cancellation", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "unmatched" },
+      trades: [],
+      openOrders: [{ id: "order-1", asset_id: liveOrder.tokenId }],
+      cancelResponse: { success: false, errorMsg: "order was not canceled" }
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
+
+  test("reports canceled only when cancel response confirms cancellation", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "unmatched" },
+      trades: [],
+      openOrders: [{ id: "order-1", asset_id: liveOrder.tokenId }],
+      cancelResponse: { canceled: ["order-1"], not_canceled: {} }
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "canceled",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
+
+  test("keeps posted status when a pending trade exists after canceling open residual", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "0.5",
+          price: "0.97",
+          status: "TRADE_STATUS_MATCHED"
+        }
+      ],
+      openOrders: [{ id: "order-1", asset_id: liveOrder.tokenId }],
+      cancelResponse: { canceled: ["order-1"], not_canceled: {} }
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
   });
 });

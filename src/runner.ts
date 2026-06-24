@@ -1,5 +1,6 @@
 import { buildTradeDecision } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
+import { classifyTailWindow, type TailWindowMode } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutor, type LiveExecuteOptions, type LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
@@ -18,6 +19,7 @@ export interface FlowInput {
   orderbooks?: OrderbookSnapshot[];
   stake: number;
   thresholds?: Partial<Omit<DecisionThresholds, "maxNotional">>;
+  tailWindowMode?: TailWindowMode;
 }
 
 export interface FlowResult {
@@ -43,7 +45,25 @@ export function buildThresholds(stake: number, overrides: Partial<Omit<DecisionT
 
 export function runDecisionFlow(input: FlowInput): TradeDecision {
   const thresholds = buildThresholds(input.stake, input.thresholds);
-  const candidates = selectLossRequiresCandidates(input.match, input.markets, { entryWindowMinutes: thresholds.entryWindowMinutes });
+  const tailWindowOptions = {
+    entryWindowMinutes: thresholds.entryWindowMinutes,
+    ...(input.tailWindowMode ? { mode: input.tailWindowMode } : {})
+  };
+  const tailWindow = classifyTailWindow(input.match, tailWindowOptions);
+  if (!tailWindow.eligible) {
+    return {
+      action: "NO_TRADE",
+      reason: "MATCH_NOT_LATE_ENOUGH",
+      eventSlug: input.match.eventSlug,
+      details: tailWindow.details
+    };
+  }
+
+  const strategyOptions = {
+    entryWindowMinutes: thresholds.entryWindowMinutes,
+    ...(input.tailWindowMode ? { tailWindowMode: input.tailWindowMode } : {})
+  };
+  const candidates = selectLossRequiresCandidates(input.match, input.markets, strategyOptions);
 
   if (candidates.length === 0) {
     return { action: "NO_TRADE", reason: "NO_ELIGIBLE_STRATEGY", eventSlug: input.match.eventSlug };
@@ -57,7 +77,7 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
   const decisions = candidates.flatMap((candidate) => {
     const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
     if (!orderbook) return [];
-    return [buildTradeDecision(input.match, candidate, orderbook, thresholds)];
+    return [buildTradeDecision(input.match, candidate, orderbook, thresholds, input.tailWindowMode)];
   });
 
   const buys = decisions

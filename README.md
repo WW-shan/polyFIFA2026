@@ -81,7 +81,7 @@ npm run cli -- \
 
 If `--event-slug` is used, the CLI fetches the Polymarket sports page, extracts the current `score`, `period`, `elapsed`, and remaining-time fields, then extracts strategy markets from the same event. If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then picks the highest estimated net-return BUY.
 
-The default entry window is the final 3 minutes of expected match time, not a fixed 87th minute. The selector requires a live 2H match with `remainingMinutes <= --entry-window-minutes`. `remainingMinutes` is parsed from Polymarket when present, or derived from `expectedEndMinute` / stoppage-time fields.
+The tail-entry window is controlled by `--entry-window-minutes` and the live timing mode described below.
 
 Live automation modes:
 
@@ -100,7 +100,17 @@ npm run cli -- \
 npm run live:watch:worldcup -- --entry-window-minutes 3
 ```
 
-Watch mode stops as soon as one order is filled/posted/rejected or a live error occurs. If no trade is available it sleeps `--interval-ms` milliseconds and retries; `--max-iterations` is mainly for tests/dry runs.
+### Live sports timing
+
+Single-event watch mode (`--watch true --event-slug ...`) polls the Polymarket sports page for that match. If no trade is available, it sleeps `--interval-ms` milliseconds before retrying. `--max-iterations` limits page-poll iterations and is mainly for tests/dry runs.
+
+World Cup watch mode (`--watch --worldcup true`) discovers open World Cup events and uses Polymarket Sports WebSocket updates as the primary live score source. Incoming updates are matched to events by `slug`, `gameId`, and `sportradarGameId`. If no trade is available for an update, it waits for the next matched Sports WebSocket update instead of sleeping; `--interval-ms` does not apply. `--max-iterations` counts matched Sports WebSocket updates.
+
+The default `POLY_TAIL_TIME_MODE=conservative90` keeps the entry window as the final 3 minutes by true remaining time when `remainingSeconds` or `remainingMinutes` is available. If true remaining time is unavailable, it enters only for live `2H` updates with `elapsed >= 90:00`; this is intentionally conservative and is not a fixed minute-87 rule. Set `POLY_TAIL_TIME_MODE=remaining` to require `remainingSeconds` or `remainingMinutes` from the data source.
+
+Set `POLY_LIVE_AUDIT_FILE=data/live-sports-audit.ndjson` to append raw Sports WebSocket updates and normalized match-update audit records as NDJSON for replay/debugging.
+
+Watch mode stops as soon as one order is filled/partial/posted/rejected or a live error occurs.
 
 Live capital allocation is all-in by default: if `--stake` is omitted, the bot selects the best executable positive-edge candidate, then uses `pUSD balance - POLY_BALANCE_BUFFER` as the order notional. Passing `--stake N` changes this to `min(N, pUSD balance - POLY_BALANCE_BUFFER)`.
 
@@ -125,11 +135,13 @@ Optional live env vars:
 
 - `POLY_FUNDER_ADDRESS`
 - `POLY_DEPOSIT_WALLET_ADDRESS` for CLOB v2 deposit-wallet accounts; this overrides `POLY_FUNDER_ADDRESS` and forces `POLY_SIGNATURE_TYPE=3`
-- `POLY_LEDGER_FILE` defaults to `data/live-ledger.json` in live mode; filled/posted orders are recorded and duplicate event/token buys are skipped
+- `POLY_LEDGER_FILE` defaults to `data/live-ledger.json` in live mode; filled/partial/posted orders are recorded as active ledger entries, and any active same-event trade is skipped
 - `POLY_USE_LIVE_BALANCE=true` to size live orders from pUSD balance; this is automatic when a funder/deposit wallet is configured unless explicitly disabled
 - `POLY_BALANCE_BUFFER` defaults to `0.02` pUSD so stake sizing leaves a small balance cushion
 - `POLY_SIGNATURE_TYPE` defaults to `1` unless `POLY_DEPOSIT_WALLET_ADDRESS` is set
 - `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order
+- `POLY_LIVE_AUDIT_FILE` writes raw Sports WebSocket updates and normalized match-update audit records as NDJSON
+- `POLY_TAIL_TIME_MODE` defaults to `conservative90`; set to `remaining` to require remaining-time fields
 - `POLY_RPC_URL` for viem wallet transport
 - `POLY_CHAIN_ID` defaults to `137`
 - `POLY_CLOB_HOST` defaults to `https://clob.polymarket.com`

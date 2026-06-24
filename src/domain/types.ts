@@ -1,4 +1,11 @@
-export type MatchPeriod = "1H" | "2H" | "ET" | "FT" | "UNKNOWN";
+export type MatchPeriod = "NS" | "1H" | "HT" | "2H" | "ET" | "FT" | "UNKNOWN";
+
+export type TailWindowSource =
+  | "remaining_seconds"
+  | "remaining_minutes"
+  | "conservative_90_plus"
+  | "not_enough_time_data"
+  | "not_live_second_half";
 
 export interface MatchState {
   eventSlug: string;
@@ -9,9 +16,17 @@ export interface MatchState {
   minute: number;
   period: MatchPeriod;
   isLive: boolean;
+  ended?: boolean;
+  elapsed?: string;
+  elapsedSeconds?: number;
   stoppageMinutes?: number;
   expectedEndMinute?: number;
+  remainingSeconds?: number;
   remainingMinutes?: number;
+  gameId?: number;
+  sportradarGameId?: string;
+  tailWindowSource?: TailWindowSource;
+  tailWindowDetails?: string;
 }
 
 export interface SpreadMarket {
@@ -132,6 +147,8 @@ export interface BuyTradeDecision {
   estimatedNetReturn: number;
   tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
   negRisk?: boolean;
+  tailWindowSource?: TailWindowSource;
+  tailWindowDetails?: string;
 }
 
 export interface NoTradeDecision {
@@ -145,7 +162,7 @@ export type TradeDecision = BuyTradeDecision | NoTradeDecision;
 
 export interface TradeResult {
   mode: "paper" | "live";
-  status: "filled" | "posted" | "rejected";
+  status: "filled" | "partial" | "posted" | "rejected" | "canceled";
   orderId: string;
   tokenId: string;
   price: number;

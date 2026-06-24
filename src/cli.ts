@@ -1,15 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
+import { classifyTailWindow, type TailWindowMode } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, readPusdBalance } from "./execution/balance.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import type { LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
-import { LiveLedger } from "./persistence/ledger.js";
+import { LiveLedger, isActiveLedgerStatus } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
-import { fetchOpenWorldCupEventSlugs } from "./polymarket/worldcup-events.js";
+import { SportsLiveProvider } from "./polymarket/sports-live.js";
+import { fetchOpenWorldCupEventRefs, type WorldCupEventRef } from "./polymarket/worldcup-events.js";
 import { buildThresholds, DEFAULT_THRESHOLDS, runDecisionFlow } from "./runner.js";
 import { LiveExecutor } from "./execution/live-executor.js";
 
@@ -39,13 +41,17 @@ interface ParsedArgs {
   worldcup?: boolean;
   intervalMs?: number;
   maxIterations?: number;
+  liveAuditFile?: string;
   orderType: LiveOrderType;
+  tailTimeMode?: TailWindowMode;
 }
 
 export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
   readPusdBalance?: (walletAddress: string, rpcUrl?: string) => Promise<number>;
   fetchWorldCupEventSlugs?: () => Promise<string[]>;
+  fetchWorldCupEventRefs?: () => Promise<WorldCupEventRef[]>;
+  watchSportsUpdates?: (events: readonly WorldCupEventRef[], options: { auditFile?: string; proxyUrl?: string }) => Promise<AsyncIterable<MatchState>>;
   executeLive?: (decision: Extract<TradeDecision, { action: "BUY" }>, options: { orderType: LiveOrderType }) => Promise<TradeResult>;
 }
 
@@ -57,7 +63,7 @@ export async function runCli(
   try {
     const args = parseArgs(argv);
     if (args.mode === "status") return await runStatus(args, env, deps);
-    if (args.watch) return await runWatch(args, env, deps);
+    if (args.watch) return args.worldcup ? await runSportsWatch(args, env, deps) : await runWatch(args, env, deps);
     return await runSinglePass(args, env, deps);
   } catch (error) {
     if (error instanceof LiveExecutionError) {
@@ -75,6 +81,20 @@ async function runSinglePass(
     const match = args.matchFile
       ? await readJsonFile<MatchState>(args.matchFile)
       : await (deps.fetchMatchState ?? fetchEventMatchState)(required(args.eventSlug, "--event-slug"));
+    const tailWindowMode = args.tailTimeMode ?? tailWindowModeFromEnv(env);
+    const tailWindow = classifyTailWindow(match, {
+      entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes,
+      ...(tailWindowMode ? { mode: tailWindowMode } : {})
+    });
+    if (!tailWindow.eligible) {
+      return ok(summary(args.mode, {
+        action: "NO_TRADE",
+        reason: "MATCH_NOT_LATE_ENOUGH",
+        eventSlug: match.eventSlug,
+        details: `${tailWindow.source}: ${tailWindow.details}`
+      }));
+    }
+
     const liveConfig = args.mode === "live" ? liveConfigFromEnv(env) : undefined;
     const liveStake = await resolveStake(args, match, env, liveConfig, deps);
     if (liveStake.action === "NO_TRADE") return ok(summary(args.mode, liveStake.decision));
@@ -83,26 +103,28 @@ async function runSinglePass(
     const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
     const orderbooks = args.orderbookFile
       ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
-      : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes);
+      : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes, tailWindowMode);
     const ledgerFile = resolveLedgerFile(args, env);
     const ledger = ledgerFile ? new LiveLedger(ledgerFile) : undefined;
 
-    const decision = runDecisionFlow({
+    const flowInput = {
       match,
       markets,
       orderbooks,
       stake: liveStake.stake,
-      thresholds: thresholdOverridesFromArgs(args)
-    });
+      thresholds: thresholdOverridesFromArgs(args),
+      ...(tailWindowMode ? { tailWindowMode } : {})
+    };
+    const decision = runDecisionFlow(flowInput);
     if (decision.action !== "BUY") {
       return ok(summary(args.mode, decision));
     }
-    if (ledger && await ledger.hasActiveTrade(decision.eventSlug, decision.tokenId)) {
+    if (ledger && await ledger.hasActiveEventTrade(decision.eventSlug)) {
       return ok(summary(args.mode, {
         action: "NO_TRADE",
         reason: "DUPLICATE_TRADE",
         eventSlug: decision.eventSlug,
-        details: "Ledger already has an active trade for this event/token"
+        details: "Ledger already has an active trade for this event"
       }));
     }
 
@@ -127,9 +149,7 @@ async function runWatch(
   let last: Record<string, unknown> | undefined;
   const maxIterations = args.maxIterations ?? Number.POSITIVE_INFINITY;
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-    const eventSlugs = args.worldcup
-      ? await (deps.fetchWorldCupEventSlugs ?? fetchOpenWorldCupEventSlugs)()
-      : [required(args.eventSlug, "--event-slug")];
+    const eventSlugs = [required(args.eventSlug, "--event-slug")];
     for (const eventSlug of eventSlugs) {
       const result = await runSinglePass({ ...args, eventSlug }, env, deps);
       if (result.exitCode !== 0) return result;
@@ -148,6 +168,188 @@ async function runWatch(
   });
 }
 
+async function runSportsWatch(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies
+): Promise<CliResult> {
+  if (args.matchFile) throw new Error("--watch cannot be used with a static --match-file");
+
+  let last: Record<string, unknown> | undefined;
+  let iterations = 0;
+  const maxIterations = args.maxIterations ?? Number.POSITIVE_INFINITY;
+  if (maxIterations <= 0) {
+    return ok({
+      mode: args.mode,
+      status: "watch_complete",
+      iterations,
+      last
+    });
+  }
+
+  const events = await fetchWorldCupEventRefs(deps);
+  if (events.length === 0) {
+    return ok({
+      mode: args.mode,
+      status: "watch_complete",
+      iterations,
+      last: {
+        status: "no_events",
+        reason: "NO_WORLD_CUP_EVENTS",
+        details: "No World Cup events were discovered for live sports watch"
+      }
+    });
+  }
+
+  const updateOptions = sportsUpdateOptions(args, env);
+  const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
+
+  for await (const match of updates) {
+    iterations += 1;
+    const result = await runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
+      ...deps,
+      fetchMatchState: async () => match
+    });
+    if (result.exitCode !== 0) return result;
+
+    last = JSON.parse(result.stdout) as Record<string, unknown>;
+    if (last.status !== "no_trade") return result;
+    if (iterations >= maxIterations) break;
+  }
+
+  return ok({
+    mode: args.mode,
+    status: "watch_complete",
+    iterations,
+    last
+  });
+}
+
+async function fetchWorldCupEventRefs(deps: CliDependencies): Promise<WorldCupEventRef[]> {
+  if (deps.fetchWorldCupEventRefs) return deps.fetchWorldCupEventRefs();
+  if (deps.fetchWorldCupEventSlugs) {
+    return (await deps.fetchWorldCupEventSlugs()).map((eventSlug) => ({ eventSlug }));
+  }
+  return fetchOpenWorldCupEventRefs();
+}
+
+function sportsUpdateOptions(args: ParsedArgs, env: Record<string, string | undefined>): { auditFile?: string; proxyUrl?: string } {
+  const options: { auditFile?: string; proxyUrl?: string } = {};
+  const auditFile = args.liveAuditFile ?? env.POLY_LIVE_AUDIT_FILE;
+  const proxyUrl = proxyFromEnv(env);
+  if (auditFile) options.auditFile = auditFile;
+  if (proxyUrl) options.proxyUrl = proxyUrl;
+  return options;
+}
+
+async function defaultSportsUpdates(
+  events: readonly WorldCupEventRef[],
+  options: { auditFile?: string; proxyUrl?: string }
+): Promise<AsyncIterable<MatchState>> {
+  const queue: MatchState[] = [];
+  let failure: Error | undefined;
+  let closed = false;
+  let socketClosed = false;
+  let localCloseRequested = false;
+  let pending: (() => void) | undefined;
+  let socket: ReturnType<SportsLiveProvider["connect"]> | undefined;
+
+  const wake = (): void => {
+    pending?.();
+    pending = undefined;
+  };
+  const closeSocket = (): void => {
+    if (socketClosed) return;
+    localCloseRequested = true;
+    socketClosed = true;
+    try {
+      socket?.close();
+    } catch {
+      // The socket may already be closed by the remote endpoint.
+    }
+  };
+  const fail = (error: unknown): void => {
+    failure ??= toError(error, "Sports live provider failed");
+    closed = true;
+    closeSocket();
+    wake();
+  };
+
+  const providerOptions = {
+    events,
+    onError: fail,
+    ...(options.auditFile !== undefined ? { auditFile: options.auditFile } : {}),
+    ...(options.proxyUrl !== undefined ? { proxyUrl: options.proxyUrl } : {})
+  };
+  socket = new SportsLiveProvider(providerOptions).connect((update) => {
+    queue.push(update);
+    wake();
+  });
+
+  socket.addEventListener("close", (event) => {
+    if (!localCloseRequested) failure ??= remoteCloseError(event);
+    closed = true;
+    closeSocket();
+    wake();
+  });
+  socket.addEventListener("error", fail);
+
+  async function* stream(): AsyncIterable<MatchState> {
+    try {
+      while (true) {
+        if (failure) throw failure;
+        const next = queue.shift();
+        if (next) {
+          yield next;
+          continue;
+        }
+        if (failure) throw failure;
+        if (closed) return;
+        await new Promise<void>((resolve) => {
+          pending = resolve;
+        });
+      }
+    } finally {
+      closeSocket();
+    }
+  }
+
+  return stream();
+}
+
+function toError(error: unknown, fallback: string): Error {
+  if (error instanceof Error) return error;
+  if (isRecord(error) && error.error instanceof Error) return error.error;
+  const message = isRecord(error) && typeof error.error === "string"
+    ? error.error
+    : typeof error === "string"
+      ? error
+      : fallback;
+  return new Error(message);
+}
+
+function remoteCloseError(event: unknown): Error {
+  if (!isRecord(event)) return new Error("Sports live WebSocket closed unexpectedly");
+  const code = typeof event.code === "number" ? event.code : undefined;
+  const reason = typeof event.reason === "string" ? event.reason : "";
+  const details = [
+    code !== undefined ? `code=${code}` : undefined,
+    reason ? `reason=${reason}` : undefined
+  ].filter((part): part is string => part !== undefined);
+  return new Error(`Sports live WebSocket closed unexpectedly${details.length ? ` (${details.join(" ")})` : ""}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function proxyFromEnv(env: Record<string, string | undefined>): string | undefined {
+  for (const value of [env.HTTPS_PROXY, env.HTTP_PROXY, env.https_proxy, env.http_proxy]) {
+    if (value) return value;
+  }
+  return undefined;
+}
+
 async function runStatus(
   args: ParsedArgs,
   env: Record<string, string | undefined>,
@@ -163,7 +365,7 @@ async function runStatus(
     ledger: {
       file: ledgerFile,
       entries: entries.length,
-      active: entries.filter((entry) => entry.status === "filled" || entry.status === "posted").length
+      active: entries.filter((entry) => isActiveLedgerStatus(entry.status)).length
     }
   };
 
@@ -187,11 +389,17 @@ export async function fetchCandidateOrderbooks(
   match: MatchState,
   markets: readonly StrategyMarket[],
   entryWindowMinutes: number,
+  tailWindowModeOrFetcher?: TailWindowMode | ((tokenId: string) => Promise<OrderbookSnapshot>),
   fetcher: (tokenId: string) => Promise<OrderbookSnapshot> = fetchOrderbook
 ): Promise<OrderbookSnapshot[]> {
-  const candidates = selectLossRequiresCandidates(match, markets, { entryWindowMinutes });
+  const tailWindowMode = typeof tailWindowModeOrFetcher === "string" ? tailWindowModeOrFetcher : undefined;
+  const orderbookFetcher = typeof tailWindowModeOrFetcher === "function" ? tailWindowModeOrFetcher : fetcher;
+  const candidates = selectLossRequiresCandidates(match, markets, {
+    entryWindowMinutes,
+    ...(tailWindowMode ? { tailWindowMode } : {})
+  });
   const tokenIds = [...new Set(candidates.map((candidate) => candidate.tokenId))];
-  const results = await Promise.allSettled(tokenIds.map((tokenId) => fetcher(tokenId)));
+  const results = await Promise.allSettled(tokenIds.map((tokenId) => orderbookFetcher(tokenId)));
   return results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 }
 
@@ -252,6 +460,7 @@ function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Reco
       action: decision.action,
       reason: decision.reason,
       eventSlug: decision.eventSlug,
+      details: decision.details,
       decision
     };
   }
@@ -274,6 +483,8 @@ function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Reco
     shares: decision.shares,
     notional: decision.notional,
     estimatedNetReturn: decision.estimatedNetReturn,
+    tailWindowSource: decision.tailWindowSource,
+    tailWindowDetails: decision.tailWindowDetails,
     decision,
     trade
   };
@@ -337,10 +548,12 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.worldcup) parsed.worldcup = booleanArg(raw.worldcup, "--worldcup");
   if (raw.intervalMs) parsed.intervalMs = numberArg(raw.intervalMs, "--interval-ms");
   if (raw.maxIterations) parsed.maxIterations = numberArg(raw.maxIterations, "--max-iterations");
+  if (raw.liveAuditFile) parsed.liveAuditFile = raw.liveAuditFile;
   if (raw.maxEntryPrice) parsed.maxEntryPrice = numberArg(raw.maxEntryPrice, "--max-entry-price");
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
   if (raw.minimumNotional) parsed.minimumNotional = numberArg(raw.minimumNotional, "--minimum-notional");
   if (raw.entryWindowMinutes) parsed.entryWindowMinutes = numberArg(raw.entryWindowMinutes, "--entry-window-minutes");
+  if (raw.tailTimeMode) parsed.tailTimeMode = parseTailWindowMode(raw.tailTimeMode);
   return parsed;
 }
 
@@ -352,6 +565,15 @@ function parseMode(value: string): Mode {
 function parseOrderType(value: string): LiveOrderType {
   if (value === "FOK" || value === "FAK") return value;
   throw new Error("--order-type must be FOK or FAK");
+}
+
+function tailWindowModeFromEnv(env: Record<string, string | undefined>): TailWindowMode | undefined {
+  return env.POLY_TAIL_TIME_MODE ? parseTailWindowMode(env.POLY_TAIL_TIME_MODE) : undefined;
+}
+
+function parseTailWindowMode(value: string): TailWindowMode {
+  if (value === "remaining" || value === "conservative90") return value;
+  throw new Error("--tail-time-mode/POLY_TAIL_TIME_MODE must be remaining or conservative90");
 }
 
 function numberArg(value: string, flag: string): number {
