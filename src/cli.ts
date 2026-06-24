@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
-import type { TailWindowMode } from "./domain/time-window.js";
+import { classifyTailWindow, type TailWindowMode } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, readPusdBalance } from "./execution/balance.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
@@ -81,13 +81,26 @@ async function runSinglePass(
     const match = args.matchFile
       ? await readJsonFile<MatchState>(args.matchFile)
       : await (deps.fetchMatchState ?? fetchEventMatchState)(required(args.eventSlug, "--event-slug"));
+    const tailWindowMode = args.tailTimeMode ?? tailWindowModeFromEnv(env);
+    const tailWindow = classifyTailWindow(match, {
+      entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes,
+      ...(tailWindowMode ? { mode: tailWindowMode } : {})
+    });
+    if (!tailWindow.eligible) {
+      return ok(summary(args.mode, {
+        action: "NO_TRADE",
+        reason: "MATCH_NOT_LATE_ENOUGH",
+        eventSlug: match.eventSlug,
+        details: `${tailWindow.source}: ${tailWindow.details}`
+      }));
+    }
+
     const liveConfig = args.mode === "live" ? liveConfigFromEnv(env) : undefined;
     const liveStake = await resolveStake(args, match, env, liveConfig, deps);
     if (liveStake.action === "NO_TRADE") return ok(summary(args.mode, liveStake.decision));
 
     const markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : await fetchEventStrategyMarkets(match.eventSlug);
     const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
-    const tailWindowMode = args.tailTimeMode ?? tailWindowModeFromEnv(env);
     const orderbooks = args.orderbookFile
       ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
       : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes, tailWindowMode);

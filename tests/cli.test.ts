@@ -66,8 +66,22 @@ const sportsLiveMock = vi.hoisted(() => {
   };
 });
 
+const eventPageMock = vi.hoisted(() => ({
+  fetchEventMatchState: vi.fn(async () => {
+    throw new Error("match page polling should not be used");
+  }),
+  fetchEventStrategyMarkets: vi.fn(async () => {
+    throw new Error("market polling should not be used");
+  })
+}));
+
 vi.mock("../src/polymarket/sports-live.js", () => ({
   SportsLiveProvider: sportsLiveMock.FakeSportsLiveProvider
+}));
+
+vi.mock("../src/polymarket/event-page.js", () => ({
+  fetchEventMatchState: eventPageMock.fetchEventMatchState,
+  fetchEventStrategyMarkets: eventPageMock.fetchEventStrategyMarkets
 }));
 
 const liveMatch: MatchState = {
@@ -106,6 +120,8 @@ const liveMarkets: StrategyMarket[] = [
 
 afterEach(() => {
   sportsLiveMock.reset();
+  eventPageMock.fetchEventMatchState.mockClear();
+  eventPageMock.fetchEventStrategyMarkets.mockClear();
 });
 
 function latestSportsProvider(): InstanceType<typeof sportsLiveMock.FakeSportsLiveProvider> {
@@ -507,6 +523,55 @@ describe("CLI", () => {
       action: "BUY",
       decision: {
         tailWindowSource: "conservative_90_plus"
+      }
+    });
+  });
+
+  test("worldcup live watch skips balance and market fetches before the tail window", async () => {
+    const readPusdBalance = vi.fn(async () => {
+      throw new Error("balance should not be read before the tail window");
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-early-tail-2026-06-21",
+        homeTeam: "Early",
+        awayTeam: "Tail",
+        homeGoals: 2,
+        awayGoals: 0,
+        minute: 75,
+        period: "2H",
+        isLive: true,
+        remainingMinutes: 18
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-early-tail-2026-06-21", homeTeam: "Early", awayTeam: "Tail" }],
+      watchSportsUpdates: async () => updates(),
+      readPusdBalance
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(readPusdBalance).not.toHaveBeenCalled();
+    expect(eventPageMock.fetchEventStrategyMarkets).not.toHaveBeenCalled();
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        mode: "live",
+        status: "no_trade",
+        reason: "MATCH_NOT_LATE_ENOUGH",
+        eventSlug: "fifwc-early-tail-2026-06-21",
+        details: expect.stringContaining("remainingMinutes=18")
       }
     });
   });

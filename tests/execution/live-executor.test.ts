@@ -251,13 +251,33 @@ describe("LiveExecutor", () => {
     });
   });
 
-  test("throws confirmation failure when trades or open orders are unavailable", () => {
-    expect(() =>
-      normalizeConfirmedLiveOrderResult(liveOrder, {
+  test("returns posted when confirmation reads fail after a successful post", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      confirmationErrors: [
+        { source: "getTrades", error: "timeout" },
+        { source: "getOpenOrders", error: new Error("temporarily unavailable") }
+      ]
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0,
+      raw: {
         postResponse: { success: true, orderID: "order-1", status: "matched" },
-        confirmationErrors: [{ source: "getTrades", error: "timeout" }]
-      })
-    ).toThrow(expect.objectContaining({ code: "LIVE_ORDER_CONFIRMATION_FAILED" }));
+        confirmationErrors: [
+          { source: "getTrades", error: "timeout" },
+          { source: "getOpenOrders", error: expect.any(Error) }
+        ]
+      }
+    });
   });
 
   test.each([
@@ -327,7 +347,7 @@ describe("LiveExecutor", () => {
     });
   });
 
-  test("rejects matched FOK post responses when no trade or open order confirms a fill", () => {
+  test("keeps matched FOK post responses active when confirmations are temporarily empty", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "matched" },
       trades: [],
@@ -336,7 +356,7 @@ describe("LiveExecutor", () => {
 
     expect(result).toMatchObject({
       mode: "live",
-      status: "rejected",
+      status: "posted",
       orderId: "order-1",
       tokenId: liveOrder.tokenId,
       price: liveOrder.price,
@@ -348,7 +368,7 @@ describe("LiveExecutor", () => {
     });
   });
 
-  test("reports rejected when order lookup fails and no fill or open order confirms the post", () => {
+  test("reports posted when order lookup fails and no fill or open order confirms the post", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "matched" },
       orderError: new Error("order lookup 404"),
@@ -358,7 +378,7 @@ describe("LiveExecutor", () => {
 
     expect(result).toMatchObject({
       mode: "live",
-      status: "rejected",
+      status: "posted",
       orderId: "order-1",
       tokenId: liveOrder.tokenId,
       shares: 0,
@@ -450,7 +470,7 @@ describe("LiveExecutor", () => {
     });
   });
 
-  test("does not treat ORDER_STATUS_LIVE order state as open without getOpenOrders evidence", () => {
+  test("keeps ORDER_STATUS_LIVE order state active without getOpenOrders evidence", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "unmatched" },
       order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_LIVE" },
@@ -460,7 +480,7 @@ describe("LiveExecutor", () => {
 
     expect(result).toMatchObject({
       mode: "live",
-      status: "rejected",
+      status: "posted",
       orderId: "order-1",
       shares: 0,
       notional: 0
@@ -494,7 +514,7 @@ describe("LiveExecutor", () => {
     });
   });
 
-  test("does not report posted for ORDER_STATUS_CANCELED order state with no fills", () => {
+  test("reports canceled for terminal ORDER_STATUS_CANCELED order state with no fills", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "unmatched" },
       order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_CANCELED" },
@@ -504,7 +524,7 @@ describe("LiveExecutor", () => {
 
     expect(result).toMatchObject({
       mode: "live",
-      status: "rejected",
+      status: "canceled",
       orderId: "order-1",
       shares: 0,
       notional: 0
