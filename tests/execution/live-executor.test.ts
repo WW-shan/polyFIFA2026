@@ -450,7 +450,7 @@ describe("LiveExecutor", () => {
     });
   });
 
-  test("treats ORDER_STATUS_LIVE order state as open", () => {
+  test("does not treat ORDER_STATUS_LIVE order state as open without getOpenOrders evidence", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "unmatched" },
       order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_LIVE" },
@@ -460,10 +460,37 @@ describe("LiveExecutor", () => {
 
     expect(result).toMatchObject({
       mode: "live",
-      status: "posted",
+      status: "rejected",
       orderId: "order-1",
       shares: 0,
       notional: 0
+    });
+  });
+
+  test("does not let stale ORDER_STATUS_LIVE order state keep a fully confirmed fill partial", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      order: { id: "order-1", asset_id: liveOrder.tokenId, status: "ORDER_STATUS_LIVE" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "100",
+          price: "0.97",
+          status: "TRADE_STATUS_CONFIRMED"
+        }
+      ],
+      openOrders: []
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      orderId: "order-1",
+      shares: 100,
+      notional: 97
     });
   });
 

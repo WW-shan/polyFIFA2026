@@ -175,6 +175,19 @@ async function runSportsWatch(
   }
 
   const events = await fetchWorldCupEventRefs(deps);
+  if (events.length === 0) {
+    return ok({
+      mode: args.mode,
+      status: "watch_complete",
+      iterations,
+      last: {
+        status: "no_events",
+        reason: "NO_WORLD_CUP_EVENTS",
+        details: "No World Cup events were discovered for live sports watch"
+      }
+    });
+  }
+
   const updateOptions = sportsUpdateOptions(args, env);
   const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
 

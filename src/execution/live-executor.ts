@@ -216,7 +216,7 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
         const orderLookup = orderId ? await getOrderSoft(confirmationClient, orderId) : {};
         const trades = await getTradesOrThrow(confirmationClient, order.tokenId);
         const openOrders = await getOpenOrdersOrThrow(confirmationClient, order.tokenId);
-        const hasOpenOrder = orderId ? hasMatchingOpenOrder(order, orderId, orderLookup.order, openOrders) : false;
+        const hasOpenOrder = orderId ? hasMatchingOpenOrder(order, orderId, openOrders) : false;
         const cancelAttempt = hasOpenOrder && orderId ? await safeCancelOrder(confirmationClient, orderId) : { type: "none" as const };
         const confirmation: LiveOrderConfirmation = { postResponse, trades, openOrders };
         if (orderLookup.order !== undefined) confirmation.order = orderLookup.order;
@@ -318,7 +318,7 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
 
   const orderId = extractLiveOrderId(confirmation.postResponse) ?? extractLiveOrderId(confirmation.order) ?? "live-order-unknown";
   const fills = confirmedTradeFills(order, orderId, confirmation.trades);
-  const openOrder = hasMatchingOpenOrder(order, orderId, confirmation.order, confirmation.openOrders);
+  const openOrder = hasMatchingOpenOrder(order, orderId, confirmation.openOrders);
   const pendingTrade = hasPendingMatchingTrade(order, orderId, confirmation.trades);
   const canceled = isCancelConfirmed(orderId, confirmation.cancelResponse);
 
@@ -512,10 +512,9 @@ function fillsRequestedSize(filledShares: number, requestedShares: number): bool
   return filledShares >= requestedShares || Math.abs(filledShares - requestedShares) <= 1e-9;
 }
 
-function hasMatchingOpenOrder(order: LiveOrderRequest, orderId: string, orderState: unknown, openOrders: unknown[]): boolean {
+function hasMatchingOpenOrder(order: LiveOrderRequest, orderId: string, openOrders: unknown[]): boolean {
   if (!isKnownOrderId(orderId)) return false;
-  const candidates = orderState === undefined ? openOrders : [orderState, ...openOrders];
-  return candidates.some((candidate) => isMatchingOpenOrder(order, orderId, candidate));
+  return openOrders.some((candidate) => isMatchingOpenOrder(order, orderId, candidate));
 }
 
 function isMatchingOpenOrder(order: LiveOrderRequest, orderId: string, candidate: unknown): boolean {

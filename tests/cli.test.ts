@@ -511,6 +511,41 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch completes without opening default sports provider when no events are discovered", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => []
+    });
+
+    const result = await Promise.race([
+      resultPromise,
+      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 50))
+    ]);
+
+    if (result === "timed_out") throw new Error("worldcup watch did not return when no events were discovered");
+    expect(sportsLiveMock.instances).toHaveLength(0);
+    expect(result).toMatchObject({
+      exitCode: 0,
+      stderr: ""
+    });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 0,
+      last: {
+        status: "no_events",
+        reason: "NO_WORLD_CUP_EVENTS"
+      }
+    });
+  });
+
   test("worldcup watch reports default sports socket errors", async () => {
     const resultPromise = runCli([
       "--mode", "paper",
