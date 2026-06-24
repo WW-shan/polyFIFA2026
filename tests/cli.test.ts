@@ -533,6 +533,28 @@ describe("CLI", () => {
     expect(provider.socket?.closed).toBe(true);
   });
 
+  test("worldcup watch reports default sports clean remote socket close before completion", async () => {
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+    });
+
+    const provider = await waitForDefaultSportsProvider();
+    provider.socket?.emit("close", { wasClean: true, code: 1000, reason: "normal close" });
+
+    const result = await resultPromise;
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Sports live WebSocket closed unexpectedly");
+    expect(provider.socket?.closed).toBe(true);
+  });
+
   test("worldcup watch reports sports provider message handling errors", async () => {
     const resultPromise = runCli([
       "--mode", "paper",
@@ -664,14 +686,29 @@ describe("CLI", () => {
       proxyUrl: "https://proxy.example"
     });
 
-    provider.socket?.emit("close", { wasClean: true, code: 1000, reason: "normal close" });
+    await provider.emitUpdate({
+      eventSlug: "fifwc-esp-ksa-2026-06-21",
+      homeTeam: "Spain",
+      awayTeam: "Saudi Arabia",
+      homeGoals: 4,
+      awayGoals: 0,
+      minute: 89,
+      period: "2H",
+      isLive: true,
+      elapsedSeconds: 89 * 60
+    });
 
     const result = await resultPromise;
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
-      status: "watch_complete"
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "no_trade"
+      }
     });
+    expect(provider.socket?.closed).toBe(true);
   });
 
   test("fetchCandidateOrderbooks keeps usable books when one candidate fetch fails", async () => {

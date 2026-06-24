@@ -46,6 +46,7 @@ export interface LiveClobClient {
 export interface LiveOrderConfirmation {
   postResponse: unknown;
   order?: unknown;
+  orderError?: unknown;
   trades?: unknown[];
   openOrders?: unknown[];
   cancelResponse?: unknown;
@@ -212,13 +213,14 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
 
         const confirmationClient = client as unknown as LiveClobConfirmationClient;
         const orderId = extractLiveOrderId(postResponse);
-        const orderState = orderId ? await getOrderOrThrow(confirmationClient, orderId) : undefined;
+        const orderLookup = orderId ? await getOrderSoft(confirmationClient, orderId) : {};
         const trades = await getTradesOrThrow(confirmationClient, order.tokenId);
         const openOrders = await getOpenOrdersOrThrow(confirmationClient, order.tokenId);
-        const hasOpenOrder = orderId ? hasMatchingOpenOrder(order, orderId, orderState, openOrders) : false;
+        const hasOpenOrder = orderId ? hasMatchingOpenOrder(order, orderId, orderLookup.order, openOrders) : false;
         const cancelAttempt = hasOpenOrder && orderId ? await safeCancelOrder(confirmationClient, orderId) : { type: "none" as const };
         const confirmation: LiveOrderConfirmation = { postResponse, trades, openOrders };
-        if (orderState !== undefined) confirmation.order = orderState;
+        if (orderLookup.order !== undefined) confirmation.order = orderLookup.order;
+        if (orderLookup.error !== undefined) confirmation.orderError = orderLookup.error;
         if (cancelAttempt.type === "response") confirmation.cancelResponse = cancelAttempt.response;
         if (cancelAttempt.type === "error") confirmation.cancelError = cancelAttempt.error;
         return normalizeConfirmedLiveOrderResult(order, confirmation);
@@ -317,6 +319,8 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
   const orderId = extractLiveOrderId(confirmation.postResponse) ?? extractLiveOrderId(confirmation.order) ?? "live-order-unknown";
   const fills = confirmedTradeFills(order, orderId, confirmation.trades);
   const openOrder = hasMatchingOpenOrder(order, orderId, confirmation.order, confirmation.openOrders);
+  const pendingTrade = hasPendingMatchingTrade(order, orderId, confirmation.trades);
+  const softOrderError = hasSoftOrderError(confirmation);
   const canceled = isCancelConfirmed(orderId, confirmation.cancelResponse);
 
   const shares = fills.reduce((total, fill) => total + fill.shares, 0);
@@ -339,7 +343,7 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
     };
   }
 
-  if (openOrder || canceled) {
+  if (openOrder || canceled || pendingTrade || softOrderError) {
     return emptyConfirmedLiveResult(order, orderId, canceled ? "canceled" : "posted", confirmation);
   }
 
@@ -356,8 +360,9 @@ function assertNoPostError(raw: unknown): void {
 }
 
 function assertConfirmationAvailable(confirmation: LiveOrderConfirmation): asserts confirmation is LiveOrderConfirmation & { trades: unknown[]; openOrders: unknown[] } {
-  if (confirmation.confirmationErrors && confirmation.confirmationErrors.length > 0) {
-    const sources = confirmation.confirmationErrors.map((error) => error.source).join(", ");
+  const blockingErrors = confirmation.confirmationErrors?.filter((error) => error.source !== "getOrder") ?? [];
+  if (blockingErrors.length > 0) {
+    const sources = blockingErrors.map((error) => error.source).join(", ");
     throw new LiveExecutionError("LIVE_ORDER_CONFIRMATION_FAILED", `Unable to confirm live order result from CLOB state: ${sources}`, { raw: confirmation });
   }
 
@@ -397,6 +402,21 @@ function confirmedTradeFills(order: LiveOrderRequest, orderId: string, trades: u
   return fills;
 }
 
+function hasPendingMatchingTrade(order: LiveOrderRequest, orderId: string, trades: unknown[]): boolean {
+  if (!isKnownOrderId(orderId)) return false;
+
+  for (const trade of trades) {
+    if (topLevelPendingTrade(order, orderId, trade)) return true;
+
+    if (!isRecord(trade) || !Array.isArray(trade.maker_orders)) continue;
+    for (const makerOrder of trade.maker_orders) {
+      if (makerOrderPendingTrade(order, orderId, makerOrder, trade)) return true;
+    }
+  }
+
+  return false;
+}
+
 function topLevelTradeFill(order: LiveOrderRequest, orderId: string, trade: unknown): ConfirmedFill | undefined {
   if (!isRecord(trade)) return undefined;
   if (!isFillConfirmingTrade(trade)) return undefined;
@@ -406,6 +426,13 @@ function topLevelTradeFill(order: LiveOrderRequest, orderId: string, trade: unkn
   const shares = numberField(trade, "size");
   const price = numberField(trade, "price");
   return validFill(shares, price);
+}
+
+function topLevelPendingTrade(order: LiveOrderRequest, orderId: string, trade: unknown): boolean {
+  if (!isRecord(trade)) return false;
+  if (!isPendingTradeEvidence(trade)) return false;
+  if (!matchesAnyField(trade, ["taker_order_id", "maker_order_id", "order_id"], orderId)) return false;
+  return matchesAnyField(trade, ["asset_id", "assetId"], order.tokenId);
 }
 
 function makerOrderTradeFill(order: LiveOrderRequest, orderId: string, makerOrder: unknown, parentTrade: Record<string, unknown>): ConfirmedFill | undefined {
@@ -419,9 +446,28 @@ function makerOrderTradeFill(order: LiveOrderRequest, orderId: string, makerOrde
   return validFill(shares, price);
 }
 
+function makerOrderPendingTrade(order: LiveOrderRequest, orderId: string, makerOrder: unknown, parentTrade: Record<string, unknown>): boolean {
+  if (!isRecord(makerOrder)) return false;
+  if (hasTradeError(parentTrade) || hasTradeError(makerOrder)) return false;
+  const makerStatus = tradeStatus(makerOrder);
+  const parentStatus = tradeStatus(parentTrade);
+  if (!isPendingTradeStatus(makerStatus ?? parentStatus)) return false;
+  if (!matchesAnyField(makerOrder, ["order_id", "orderID", "orderId", "id", "maker_order_id"], orderId)) return false;
+  return matchesAnyField(makerOrder, ["asset_id", "assetId"], order.tokenId) || matchesAnyField(parentTrade, ["asset_id", "assetId"], order.tokenId);
+}
+
 function isFillConfirmingTrade(trade: Record<string, unknown>): boolean {
   if (hasTradeError(trade)) return false;
   return tradeStatus(trade) === "confirmed";
+}
+
+function isPendingTradeEvidence(trade: Record<string, unknown>): boolean {
+  if (hasTradeError(trade)) return false;
+  return isPendingTradeStatus(tradeStatus(trade));
+}
+
+function isPendingTradeStatus(status: string | undefined): boolean {
+  return status === "matched" || status === "mined" || status === "retrying";
 }
 
 function hasNonConfirmingStatus(record: Record<string, unknown>): boolean {
@@ -498,15 +544,20 @@ function emptyConfirmedLiveResult(order: LiveOrderRequest, orderId: string, stat
   };
 }
 
-async function getOrderOrThrow(client: LiveClobConfirmationClient, orderId: string): Promise<unknown | undefined> {
-  if (!client.getOrder) throwConfirmationFailed("getOrder", new Error("CLOB client does not expose getOrder"));
+function hasSoftOrderError(confirmation: LiveOrderConfirmation): boolean {
+  return confirmation.orderError !== undefined || confirmation.confirmationErrors?.some((error) => error.source === "getOrder") === true;
+}
+
+type SoftOrderLookup = { order?: unknown; error?: unknown };
+
+async function getOrderSoft(client: LiveClobConfirmationClient, orderId: string): Promise<SoftOrderLookup> {
+  if (!client.getOrder) return { error: new Error("CLOB client does not expose getOrder") };
   try {
     const response = await client.getOrder(orderId);
     assertNoConfirmationResponseError("getOrder", response);
-    return response;
+    return { order: response };
   } catch (error) {
-    if (error instanceof LiveExecutionError) throw error;
-    throwConfirmationFailed("getOrder", error);
+    return { error };
   }
 }
 

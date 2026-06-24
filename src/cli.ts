@@ -224,6 +224,7 @@ async function defaultSportsUpdates(
   let failure: Error | undefined;
   let closed = false;
   let socketClosed = false;
+  let localCloseRequested = false;
   let pending: (() => void) | undefined;
   let socket: ReturnType<SportsLiveProvider["connect"]> | undefined;
 
@@ -233,6 +234,7 @@ async function defaultSportsUpdates(
   };
   const closeSocket = (): void => {
     if (socketClosed) return;
+    localCloseRequested = true;
     socketClosed = true;
     try {
       socket?.close();
@@ -259,9 +261,9 @@ async function defaultSportsUpdates(
   });
 
   socket.addEventListener("close", (event) => {
-    socketClosed = true;
-    failure ??= abnormalCloseError(event);
+    if (!localCloseRequested) failure ??= remoteCloseError(event);
     closed = true;
+    closeSocket();
     wake();
   });
   socket.addEventListener("error", fail);
@@ -300,13 +302,10 @@ function toError(error: unknown, fallback: string): Error {
   return new Error(message);
 }
 
-function abnormalCloseError(event: unknown): Error | undefined {
-  if (!isRecord(event)) return undefined;
+function remoteCloseError(event: unknown): Error {
+  if (!isRecord(event)) return new Error("Sports live WebSocket closed unexpectedly");
   const code = typeof event.code === "number" ? event.code : undefined;
   const reason = typeof event.reason === "string" ? event.reason : "";
-  const wasClean = typeof event.wasClean === "boolean" ? event.wasClean : undefined;
-  if (wasClean !== false && (code === undefined || code === 1000 || code === 1001)) return undefined;
-
   const details = [
     code !== undefined ? `code=${code}` : undefined,
     reason ? `reason=${reason}` : undefined
