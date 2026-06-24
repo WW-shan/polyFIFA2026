@@ -552,4 +552,35 @@ describe("LiveExecutor", () => {
       estimatedProfit: 0
     });
   });
+
+  test("keeps posted status when a pending trade exists after canceling open residual", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          asset_id: liveOrder.tokenId,
+          side: "BUY",
+          size: "0.5",
+          price: "0.97",
+          status: "TRADE_STATUS_MATCHED"
+        }
+      ],
+      openOrders: [{ id: "order-1", asset_id: liveOrder.tokenId }],
+      cancelResponse: { canceled: ["order-1"], not_canceled: {} }
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "posted",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0
+    });
+  });
 });

@@ -342,9 +342,9 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
     };
   }
 
-  if (openOrder || canceled || pendingTrade) {
-    return emptyConfirmedLiveResult(order, orderId, canceled ? "canceled" : "posted", confirmation);
-  }
+  if (pendingTrade) return emptyConfirmedLiveResult(order, orderId, "posted", confirmation);
+  if (canceled) return emptyConfirmedLiveResult(order, orderId, "canceled", confirmation);
+  if (openOrder) return emptyConfirmedLiveResult(order, orderId, "posted", confirmation);
 
   return emptyConfirmedLiveResult(order, orderId, "rejected", confirmation);
 }

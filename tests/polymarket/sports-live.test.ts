@@ -187,6 +187,51 @@ describe("sports live update helpers", () => {
     });
   });
 
+  test("clock-like remaining_time prevents conservative elapsed 90 trade", () => {
+    const update = normalizeSportsUpdate({
+      gameId: 90086952,
+      score: "4-0",
+      period: "2H",
+      elapsed: "90:00",
+      remaining_time: "04:00",
+      live: true
+    }, refs, new Date("2026-06-23T19:00:00.000Z"));
+    expect(update).toMatchObject({
+      elapsedSeconds: 5400,
+      remainingSeconds: 240
+    });
+
+    const markets: StrategyMarket[] = [
+      {
+        eventSlug: refs[0]!.eventSlug,
+        marketSlug: "uzbekistan-moneyline",
+        question: "Will Uzbekistan win on 2026-06-23?",
+        conditionId: "cond-uzb-win",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["uzb-yes", "uzb-no"]
+      }
+    ];
+    const orderbook: OrderbookSnapshot = {
+      tokenId: "uzb-no",
+      bids: [],
+      asks: [{ price: 0.97, size: 100 }]
+    };
+
+    const decision = runDecisionFlow({
+      match: update!,
+      markets,
+      orderbooks: [orderbook],
+      stake: 10,
+      thresholds: { entryWindowMinutes: 3 }
+    });
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "MATCH_NOT_LATE_ENOUGH",
+      details: "remainingSeconds=240 threshold=180"
+    });
+  });
+
   test("matches by sportradarGameId", () => {
     expect(matchSportsUpdateToEvent({ sportradarGameId: "sr:sport_event:66457034" }, refs)?.eventSlug)
       .toBe("fifwc-prt-uzb-2026-06-23");
