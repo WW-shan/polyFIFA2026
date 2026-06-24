@@ -1,6 +1,6 @@
 # Polymarket 实时 Sports 数据源调查与测试计划
 
-更新时间：2026-06-23 21:40 Asia/Shanghai  
+更新时间：2026-06-24 05:30 Asia/Shanghai
 项目目录：`/Users/ww/Project/polyFIFA2026`
 
 ## 1. 一句话结论
@@ -13,7 +13,7 @@ wss://sports-api.polymarket.com/ws
 
 这个 WebSocket 无需鉴权，服务端推送所有 active sports events 的比分和比赛状态。它可以作为本项目“世界杯尾盘策略”的主实时数据源，用来获得 `score`、`period`、`elapsed`、`live`、`ended` 等字段。
 
-需要注意：目前没有在官方 schema、页面初始状态或前端 bundle 中发现明确的 `remainingMinutes` / `stoppageTime` / `addedTime` 字段。所以“最后 3 分钟”不能再写死第 87 分钟；后续需要在真实足球比赛直播时确认 `elapsed` 在 90 分钟及补时时如何表现。
+需要注意：已在真实 World Cup 足球比赛进行中验证，Sports WebSocket / Gateway / 页面初始状态都能给出 `score`、`period`、`elapsed`、`live`、`ended`，但仍没有发现明确的 `remainingMinutes` / `stoppageTime` / `addedTime` 字段。所以“最后 3 分钟”不能再写死第 87 分钟；后续还需要在 90 分钟后确认 `elapsed` 在补时时如何表现。
 
 ## 2. 官方数据源
 
@@ -266,14 +266,125 @@ npx tsx tmp/probe-match-state.ts fifwc-prt-uzb-2026-06-23
 
 说明：项目当前页面解析层已经能从页面拿到完整盘口，但 `findMatchState` 还没有正确把 `NS` 映射成 not-started，也还没有接入 WebSocket 动态更新；后续要新增 live provider。
 
+### 5.4 开赛后 live 字段验证
+
+验证时间：2026-06-24 05:21-05:30 Asia/Shanghai
+比赛：England vs. Ghana，全球页面 slug `fifwc-eng-gha-2026-06-23`，Gateway slug `fwc-eng-gha-2026-06-23`
+
+Gateway snapshot：
+
+```bash
+curl --compressed \
+  'https://gateway.polymarket.us/v2/sports/soccer/events?limit=100'
+```
+
+关键字段：
+
+```json
+{
+  "slug": "fwc-eng-gha-2026-06-23",
+  "title": "England vs. Ghana",
+  "startTime": "2026-06-23T20:00:00Z",
+  "score": "0-0",
+  "elapsed": "64'",
+  "period": "2H",
+  "live": true,
+  "ended": false,
+  "gameId": 90086953,
+  "sportradarGameId": "sr:sport_event:66457046",
+  "eventStateKeys": [
+    "id",
+    "gameId",
+    "sportradarGameId",
+    "type",
+    "createdAt",
+    "updatedAt",
+    "score",
+    "elapsed",
+    "period",
+    "live",
+    "ended",
+    "mainSpreadLine",
+    "mainTotalLine",
+    "marketGroupStats"
+  ],
+  "latestGameUpdate": {
+    "type": "corner_kick",
+    "clock": "61'"
+  }
+}
+```
+
+Sports WebSocket capture：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:10808 \
+HTTP_PROXY=http://127.0.0.1:10808 \
+MAX_MS=240000 \
+WANT='90086953|fifwc|eng|gha|England|Ghana' \
+node tmp/probe-polymarket-sports-ws-undici.mjs
+```
+
+关键字段：
+
+```json
+{
+  "gameId": 90086953,
+  "leagueAbbreviation": "fifwc",
+  "homeTeam": "England",
+  "awayTeam": "Ghana",
+  "status": "InProgress",
+  "eventState": {
+    "type": "soccer",
+    "createdAt": "2026-06-23T21:29:14.742061847Z",
+    "updatedAt": "2026-06-23T21:29:14.742061847Z",
+    "score": "0-0",
+    "elapsed": "66",
+    "period": "2H",
+    "live": true,
+    "ended": false
+  },
+  "score": "0-0",
+  "elapsed": "66",
+  "period": "2H",
+  "live": true,
+  "ended": false
+}
+```
+
+页面初始状态 live sample：
+
+```json
+{
+  "event": "fifwc-eng-gha-2026-06-23",
+  "gameState": "live",
+  "timestamp": "2026-06-23T20:00:00.000Z",
+  "live": true,
+  "ended": false,
+  "score": "0-0",
+  "period": "2H",
+  "elapsed": "62",
+  "delayed": false
+}
+```
+
+结论：
+
+- 必需的基础 live 字段存在：`score`、`period`、`elapsed`、`live`、`ended`、`gameId`。
+- WebSocket 当前没有推送 `slug`，但有 `gameId = 90086953`，所以 `gameId` 映射是必须的。
+- WebSocket 的 `elapsed` 是纯数字字符串，例如 `"66"`；Gateway 会带撇号，例如 `"64'"`；页面初始状态可能比 WebSocket/Gateway 更滞后。
+- Gateway 的 `metadata.latestGameUpdate.clock` 是最近事件的发生时间，例如角球 `"61'"`，不是当前比赛剩余时间。
+- 本次 live 样本仍没有发现 `remainingMinutes`、`remainingTime`、`stoppageTime`、`addedTime`、`injuryTime`、`expectedEndMinute`、`endMinute` 等字段。
+
 ## 6. 目前没有确认的字段
 
 我在以下位置都搜索过这些字段：
 
 - 官方 Sports WebSocket docs / AsyncAPI schema
 - 官方 Sports Gateway docs
-- 当前 World Cup 页面 HTML 初始状态
+- 当前 World Cup 页面 HTML 初始状态，包括 2026-06-24 05:29 Asia/Shanghai 的 England vs. Ghana live 页面样本
 - 下载后的 Polymarket 前端 JS chunks 和 worker
+- 真实 World Cup live WebSocket 样本
 
 未发现：
 
@@ -297,7 +408,10 @@ live
 ended
 gameState
 finishedTimestamp
+metadata.latestGameUpdate.clock
 ```
+
+其中 `metadata.latestGameUpdate.clock` 只表示最近事件的时钟，不是剩余时间字段，不能直接用于尾盘入场判断。
 
 这意味着：
 
@@ -449,6 +563,10 @@ tmp/research/polymarket-live/gateway-soccer-events-now.json
 tmp/research/polymarket-live/polymarket-fifwc-prt-uzb-page.html
 tmp/research/polymarket-live/sports-ws-probe-20s-now.json
 tmp/research/polymarket-live/global-page-fifwc-prt-uzb-state-hits.json
+tmp/research/polymarket-live/gateway-soccer-events-live-eng-gha-2026-06-24.json
+tmp/research/polymarket-live/gateway-live-eng-gha-field-check-2026-06-24.json
+tmp/research/polymarket-live/sports-ws-live-eng-gha-2026-06-24.json
+tmp/research/polymarket-live/page-state-live-eng-gha-field-check-2026-06-24.json
 ```
 
 `tmp/` 通常不进 git；如果要长期保留，需要把精简后的样本复制到 `data/fixtures/` 或 `tests/fixtures/`。
