@@ -2,6 +2,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { runDecisionFlow } from "../../src/runner.js";
 import {
   appendSportsAudit,
   matchSportsUpdateToEvent,
@@ -9,6 +10,7 @@ import {
   parseElapsedSeconds,
   SportsLiveProvider
 } from "../../src/polymarket/sports-live.js";
+import type { OrderbookSnapshot, StrategyMarket } from "../../src/domain/types.js";
 import type { WorldCupEventRef } from "../../src/polymarket/worldcup-events.js";
 
 const refs: WorldCupEventRef[] = [
@@ -48,6 +50,80 @@ describe("sports live update helpers", () => {
       elapsedSeconds: 5580,
       isLive: true,
       ended: false
+    });
+  });
+
+  test("preserves remainingSeconds from sports updates", () => {
+    const update = normalizeSportsUpdate({
+      gameId: 90086952,
+      score: "3-1",
+      period: "2H",
+      elapsed: "90:00",
+      remaining_seconds: "240",
+      live: true
+    }, refs, new Date("2026-06-23T19:00:00.000Z"));
+
+    expect(update).toMatchObject({
+      elapsedSeconds: 5400,
+      remainingSeconds: 240
+    });
+  });
+
+  test("preserves remainingMinutes from sports updates", () => {
+    const update = normalizeSportsUpdate({
+      gameId: 90086952,
+      score: "3-1",
+      period: "2H",
+      elapsed: "90:00",
+      remainingMinutes: "4",
+      live: true
+    }, refs, new Date("2026-06-23T19:00:00.000Z"));
+
+    expect(update).toMatchObject({
+      elapsedSeconds: 5400,
+      remainingMinutes: 4
+    });
+  });
+
+  test("normalized remainingSeconds prevents conservative elapsed 90 trade", () => {
+    const update = normalizeSportsUpdate({
+      gameId: 90086952,
+      score: "4-0",
+      period: "2H",
+      elapsed: "90:00",
+      remainingSeconds: "240",
+      live: true
+    }, refs, new Date("2026-06-23T19:00:00.000Z"));
+    expect(update).not.toBeNull();
+
+    const markets: StrategyMarket[] = [
+      {
+        eventSlug: refs[0]!.eventSlug,
+        marketSlug: "uzbekistan-moneyline",
+        question: "Will Uzbekistan win on 2026-06-23?",
+        conditionId: "cond-uzb-win",
+        outcomes: ["Yes", "No"],
+        clobTokenIds: ["uzb-yes", "uzb-no"]
+      }
+    ];
+    const orderbook: OrderbookSnapshot = {
+      tokenId: "uzb-no",
+      bids: [],
+      asks: [{ price: 0.97, size: 100 }]
+    };
+
+    const decision = runDecisionFlow({
+      match: update!,
+      markets,
+      orderbooks: [orderbook],
+      stake: 10,
+      thresholds: { entryWindowMinutes: 3 }
+    });
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "MATCH_NOT_LATE_ENOUGH",
+      details: "remainingSeconds=240 threshold=180"
     });
   });
 

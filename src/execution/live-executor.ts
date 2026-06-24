@@ -320,7 +320,6 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
   const fills = confirmedTradeFills(order, orderId, confirmation.trades);
   const openOrder = hasMatchingOpenOrder(order, orderId, confirmation.order, confirmation.openOrders);
   const pendingTrade = hasPendingMatchingTrade(order, orderId, confirmation.trades);
-  const softOrderError = hasSoftOrderError(confirmation);
   const canceled = isCancelConfirmed(orderId, confirmation.cancelResponse);
 
   const shares = fills.reduce((total, fill) => total + fill.shares, 0);
@@ -343,7 +342,7 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
     };
   }
 
-  if (openOrder || canceled || pendingTrade || softOrderError) {
+  if (openOrder || canceled || pendingTrade) {
     return emptyConfirmedLiveResult(order, orderId, canceled ? "canceled" : "posted", confirmation);
   }
 
@@ -542,10 +541,6 @@ function emptyConfirmedLiveResult(order: LiveOrderRequest, orderId: string, stat
     estimatedProfit: 0,
     raw
   };
-}
-
-function hasSoftOrderError(confirmation: LiveOrderConfirmation): boolean {
-  return confirmation.orderError !== undefined || confirmation.confirmationErrors?.some((error) => error.source === "getOrder") === true;
 }
 
 type SoftOrderLookup = { order?: unknown; error?: unknown };

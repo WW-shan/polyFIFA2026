@@ -40,6 +40,8 @@ export function normalizeSportsUpdate(
   const period = parseSportsPeriod(stringValue(raw.period));
   const elapsed = stringValue(raw.elapsed) ?? "";
   const elapsedSeconds = parseElapsedSeconds(elapsed);
+  const remainingSeconds = numberValue(raw.remainingSeconds ?? raw.remaining_seconds ?? raw.secondsRemaining ?? raw.seconds_remaining);
+  const remainingMinutes = numberValue(raw.remainingMinutes ?? raw.remaining_minutes ?? raw.minutesRemaining ?? raw.minutes_remaining ?? raw.remainingTime ?? raw.remaining_time);
   const live = typeof raw.live === "boolean" ? raw.live : raw.gameState === "live" || raw.gameState === "in-progress";
   const ended = raw.ended === true || period === "FT";
 
@@ -61,6 +63,8 @@ export function normalizeSportsUpdate(
   if (event.gameId !== undefined) update.gameId = event.gameId;
   if (event.sportradarGameId) update.sportradarGameId = event.sportradarGameId;
   if (elapsedSeconds !== undefined) update.elapsedSeconds = elapsedSeconds;
+  if (remainingSeconds !== undefined) update.remainingSeconds = remainingSeconds;
+  if (remainingMinutes !== undefined) update.remainingMinutes = remainingMinutes;
   return update;
 }
 

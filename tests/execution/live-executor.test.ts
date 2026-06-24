@@ -348,7 +348,7 @@ describe("LiveExecutor", () => {
     });
   });
 
-  test("reports posted when order lookup fails and no fill or open order confirms the post", () => {
+  test("reports rejected when order lookup fails and no fill or open order confirms the post", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "matched" },
       orderError: new Error("order lookup 404"),
@@ -358,7 +358,7 @@ describe("LiveExecutor", () => {
 
     expect(result).toMatchObject({
       mode: "live",
-      status: "posted",
+      status: "rejected",
       orderId: "order-1",
       tokenId: liveOrder.tokenId,
       shares: 0,
