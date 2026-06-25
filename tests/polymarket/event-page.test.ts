@@ -228,7 +228,7 @@ describe("event page initial state parsing", () => {
     expect(markets).toEqual([]);
   });
 
-  test("extracts live match state from sports page games payload", () => {
+  test("extracts live match state but does not derive tail remaining time from page fields", () => {
     const state = {
       games: {
         "fifwc-fra-irq-2026-06-22": {
@@ -257,10 +257,7 @@ describe("event page initial state parsing", () => {
       awayGoals: 1,
       minute: 93,
       period: "2H",
-      isLive: true,
-      stoppageMinutes: 5,
-      expectedEndMinute: 95,
-      remainingMinutes: 2
+      isLive: true
     });
   });
 
@@ -304,10 +301,9 @@ describe("event page initial state parsing", () => {
       }
     };
 
-    expect(findMatchState(state, "fifwc-fra-irq-2026-06-22")).toMatchObject({
-      minute: 93,
-      expectedEndMinute: 95,
-      remainingMinutes: 2
-    });
+    const match = findMatchState(state, "fifwc-fra-irq-2026-06-22");
+    expect(match).toMatchObject({ minute: 93 });
+    expect(match).not.toHaveProperty("expectedEndMinute");
+    expect(match).not.toHaveProperty("remainingMinutes");
   });
 });

@@ -53,7 +53,7 @@ describe("sports live update helpers", () => {
     });
   });
 
-  test("preserves remainingSeconds from sports updates", () => {
+  test("does not trust generic remainingSeconds from sports updates for tail entry", () => {
     const update = normalizeSportsUpdate({
       gameId: 90086952,
       score: "3-1",
@@ -64,12 +64,12 @@ describe("sports live update helpers", () => {
     }, refs, new Date("2026-06-23T19:00:00.000Z"));
 
     expect(update).toMatchObject({
-      elapsedSeconds: 5400,
-      remainingSeconds: 240
+      elapsedSeconds: 5400
     });
+    expect(update).not.toHaveProperty("remainingSeconds");
   });
 
-  test("uses remainingSeconds fallback when primary field is blank", () => {
+  test("does not trust generic remainingSeconds fallback fields", () => {
     const update = normalizeSportsUpdate({
       gameId: 90086952,
       score: "3-1",
@@ -81,12 +81,12 @@ describe("sports live update helpers", () => {
     }, refs, new Date("2026-06-23T19:00:00.000Z"));
 
     expect(update).toMatchObject({
-      elapsedSeconds: 5400,
-      remainingSeconds: 240
+      elapsedSeconds: 5400
     });
+    expect(update).not.toHaveProperty("remainingSeconds");
   });
 
-  test("preserves remainingMinutes from sports updates", () => {
+  test("does not trust generic remainingMinutes from sports updates", () => {
     const update = normalizeSportsUpdate({
       gameId: 90086952,
       score: "3-1",
@@ -97,9 +97,9 @@ describe("sports live update helpers", () => {
     }, refs, new Date("2026-06-23T19:00:00.000Z"));
 
     expect(update).toMatchObject({
-      elapsedSeconds: 5400,
-      remainingMinutes: 4
+      elapsedSeconds: 5400
     });
+    expect(update).not.toHaveProperty("remainingMinutes");
   });
 
   test("blank remainingSeconds does not activate strict remaining-time entry", () => {
@@ -141,11 +141,11 @@ describe("sports live update helpers", () => {
     expect(decision).toMatchObject({
       action: "NO_TRADE",
       reason: "MATCH_NOT_LATE_ENOUGH",
-      details: "elapsedSeconds=5370 threshold=5400"
+      details: expect.stringContaining("No verified remainingSeconds")
     });
   });
 
-  test("normalized remainingSeconds prevents conservative elapsed 90 trade", () => {
+  test("elapsed 90 without verified 365 clock does not trade", () => {
     const update = normalizeSportsUpdate({
       gameId: 90086952,
       score: "4-0",
@@ -183,11 +183,11 @@ describe("sports live update helpers", () => {
     expect(decision).toMatchObject({
       action: "NO_TRADE",
       reason: "MATCH_NOT_LATE_ENOUGH",
-      details: "remainingSeconds=240 threshold=180"
+      details: expect.stringContaining("No verified remainingSeconds")
     });
   });
 
-  test("clock-like remaining_time prevents conservative elapsed 90 trade", () => {
+  test("clock-like generic remaining_time is ignored and does not trade", () => {
     const update = normalizeSportsUpdate({
       gameId: 90086952,
       score: "4-0",
@@ -197,9 +197,9 @@ describe("sports live update helpers", () => {
       live: true
     }, refs, new Date("2026-06-23T19:00:00.000Z"));
     expect(update).toMatchObject({
-      elapsedSeconds: 5400,
-      remainingSeconds: 240
+      elapsedSeconds: 5400
     });
+    expect(update).not.toHaveProperty("remainingSeconds");
 
     const markets: StrategyMarket[] = [
       {
@@ -228,7 +228,7 @@ describe("sports live update helpers", () => {
     expect(decision).toMatchObject({
       action: "NO_TRADE",
       reason: "MATCH_NOT_LATE_ENOUGH",
-      details: "remainingSeconds=240 threshold=180"
+      details: expect.stringContaining("No verified remainingSeconds")
     });
   });
 

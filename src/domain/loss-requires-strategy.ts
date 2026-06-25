@@ -1,11 +1,10 @@
 import { getLeader, isWorldCupMatch } from "./spread-selector.js";
-import { classifyTailWindow, type TailWindowMode } from "./time-window.js";
+import { classifyTailWindow } from "./time-window.js";
 import type { MatchState, SelectedStrategyMarket, StrategyMarket, TailStrategy } from "./types.js";
 
 export interface LossRequiresStrategyOptions {
   entryWindowMinutes?: number;
   includeLocked?: boolean;
-  tailWindowMode?: TailWindowMode;
 }
 
 interface TeamScore {
@@ -21,7 +20,7 @@ export function selectLossRequiresCandidates(
   const entryWindowMinutes = options.entryWindowMinutes ?? 3;
   const includeLocked = options.includeLocked ?? true;
 
-  if (!isWorldCupMatch(match) || !isInEntryWindow(match, entryWindowMinutes, options.tailWindowMode)) return [];
+  if (!isWorldCupMatch(match) || !isInEntryWindow(match, entryWindowMinutes)) return [];
 
   const candidates = markets
     .filter((market) => market.eventSlug === match.eventSlug)
@@ -30,10 +29,9 @@ export function selectLossRequiresCandidates(
   return dedupeCandidates(candidates);
 }
 
-function isInEntryWindow(match: MatchState, entryWindowMinutes: number, tailWindowMode?: TailWindowMode): boolean {
+function isInEntryWindow(match: MatchState, entryWindowMinutes: number): boolean {
   return classifyTailWindow(match, {
-    entryWindowMinutes,
-    ...(tailWindowMode ? { mode: tailWindowMode } : {})
+    entryWindowMinutes
   }).eligible;
 }
 

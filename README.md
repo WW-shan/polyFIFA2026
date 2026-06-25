@@ -86,6 +86,9 @@ The tail-entry window is controlled by `--entry-window-minutes` and the live tim
 Live automation modes:
 
 ```bash
+# Load local credentials/proxy for this shell before live commands.
+set -a; source .env.local; set +a
+
 # Check deposit-wallet pUSD balance and ledger state without placing orders.
 npm run live:status
 
@@ -106,7 +109,7 @@ Single-event watch mode (`--watch true --event-slug ...`) polls the Polymarket s
 
 World Cup watch mode (`--watch --worldcup true`) discovers open World Cup events and uses Polymarket Sports WebSocket updates as the primary live score source. Incoming updates are matched to events by `slug`, `gameId`, and `sportradarGameId`. If no trade is available for an update, it waits for the next matched Sports WebSocket update instead of sleeping; `--interval-ms` does not apply. `--max-iterations` counts matched Sports WebSocket updates.
 
-The default `POLY_TAIL_TIME_MODE=conservative90` keeps the entry window as the final 3 minutes by true remaining time when `remainingSeconds` or `remainingMinutes` is available. If true remaining time is unavailable, it enters only for live `2H` updates with `elapsed >= 90:00`; this is intentionally conservative and is not a fixed minute-87 rule. Set `POLY_TAIL_TIME_MODE=remaining` to require `remainingSeconds` or `remainingMinutes` from the data source.
+The entry window is strict: World Cup watch mode overlays Polymarket Sports updates with the 365Scores public single-game clock, then opens only when `2nd Half + addedTime + preciseGameTime` computes verified `remainingSeconds <= 180`. There is no `87'` or `90:00+` fallback. If 365Scores does not provide the required clock fields, the bot returns `MATCH_NOT_LATE_ENOUGH` and does not fetch balances, orderbooks, or place orders.
 
 Set `POLY_LIVE_AUDIT_FILE=data/live-sports-audit.ndjson` to append raw Sports WebSocket updates and normalized match-update audit records as NDJSON for replay/debugging.
 
@@ -141,7 +144,7 @@ Optional live env vars:
 - `POLY_SIGNATURE_TYPE` defaults to `1` unless `POLY_DEPOSIT_WALLET_ADDRESS` is set
 - `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order
 - `POLY_LIVE_AUDIT_FILE` writes raw Sports WebSocket updates and normalized match-update audit records as NDJSON
-- `POLY_TAIL_TIME_MODE` defaults to `conservative90`; set to `remaining` to require remaining-time fields
+- `POLY_365SCORES_TIMEZONE` defaults to `Asia/Shanghai`; it is used only for 365Scores discovery/date parameters
 - `POLY_RPC_URL` for viem wallet transport
 - `POLY_CHAIN_ID` defaults to `137`
 - `POLY_CLOB_HOST` defaults to `https://clob.polymarket.com`

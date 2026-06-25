@@ -40,10 +40,6 @@ export function normalizeSportsUpdate(
   const period = parseSportsPeriod(stringValue(raw.period));
   const elapsed = stringValue(raw.elapsed) ?? "";
   const elapsedSeconds = parseElapsedSeconds(elapsed);
-  const remainingSecondFields = [raw.remainingSeconds, raw.remaining_seconds, raw.secondsRemaining, raw.seconds_remaining];
-  const remainingTimeFields = [raw.remainingTime, raw.remaining_time];
-  const remainingSeconds = firstNumberValue(...remainingSecondFields) ?? firstClockDurationSeconds(...remainingSecondFields, ...remainingTimeFields);
-  const remainingMinutes = firstNumberValue(raw.remainingMinutes, raw.remaining_minutes, raw.minutesRemaining, raw.minutes_remaining, ...remainingTimeFields);
   const live = typeof raw.live === "boolean" ? raw.live : raw.gameState === "live" || raw.gameState === "in-progress";
   const ended = raw.ended === true || period === "FT";
 
@@ -64,9 +60,8 @@ export function normalizeSportsUpdate(
   };
   if (event.gameId !== undefined) update.gameId = event.gameId;
   if (event.sportradarGameId) update.sportradarGameId = event.sportradarGameId;
+  if (event.startTime) update.startTime = event.startTime;
   if (elapsedSeconds !== undefined) update.elapsedSeconds = elapsedSeconds;
-  if (remainingSeconds !== undefined) update.remainingSeconds = remainingSeconds;
-  if (remainingMinutes !== undefined) update.remainingMinutes = remainingMinutes;
   return update;
 }
 
@@ -188,45 +183,4 @@ function numberValue(value: unknown): number | undefined {
   if (typeof value === "string" && value.trim().length === 0) return undefined;
   const parsed = typeof value === "string" ? Number(value.trim()) : value;
   return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function firstNumberValue(...values: unknown[]): number | undefined {
-  for (const value of values) {
-    const parsed = numberValue(value);
-    if (parsed !== undefined) return parsed;
-  }
-  return undefined;
-}
-
-function firstClockDurationSeconds(...values: unknown[]): number | undefined {
-  for (const value of values) {
-    const parsed = parseClockDurationSeconds(value);
-    if (parsed !== undefined) return parsed;
-  }
-  return undefined;
-}
-
-function parseClockDurationSeconds(value: unknown): number | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-
-  const hms = trimmed.match(/^(\d+):(\d{1,2}):(\d{1,2})$/);
-  if (hms?.[1] && hms[2] && hms[3]) {
-    const hours = Number(hms[1]);
-    const minutes = Number(hms[2]);
-    const seconds = Number(hms[3]);
-    if (minutes >= 60 || seconds >= 60) return undefined;
-    return hours * 3600 + minutes * 60 + seconds;
-  }
-
-  const ms = trimmed.match(/^(\d+):(\d{1,2})$/);
-  if (ms?.[1] && ms[2]) {
-    const minutes = Number(ms[1]);
-    const seconds = Number(ms[2]);
-    if (seconds >= 60) return undefined;
-    return minutes * 60 + seconds;
-  }
-
-  return undefined;
 }

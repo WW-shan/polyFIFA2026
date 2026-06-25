@@ -14,41 +14,43 @@ const baseMatch: MatchState = {
 };
 
 describe("tail-window classifier", () => {
-  test("uses strict remainingSeconds when available", () => {
-    expect(classifyTailWindow({ ...baseMatch, remainingSeconds: 180 })).toMatchObject({
+  test("uses only verified 365Scores remainingSeconds", () => {
+    expect(classifyTailWindow({
+      ...baseMatch,
+      remainingSeconds: 180,
+      remainingSecondsSource: "365scores_added_time_precise_game_time"
+    })).toMatchObject({
       eligible: true,
       source: "remaining_seconds"
     });
-    expect(classifyTailWindow({ ...baseMatch, remainingSeconds: 181 })).toMatchObject({
+    expect(classifyTailWindow({
+      ...baseMatch,
+      remainingSeconds: 181,
+      remainingSecondsSource: "365scores_added_time_precise_game_time"
+    })).toMatchObject({
       eligible: false,
       source: "remaining_seconds"
     });
   });
 
-  test("uses strict remainingMinutes when available", () => {
-    expect(classifyTailWindow({ ...baseMatch, remainingMinutes: 3 })).toMatchObject({
-      eligible: true,
-      source: "remaining_minutes"
-    });
-    expect(classifyTailWindow({ ...baseMatch, remainingMinutes: 4 })).toMatchObject({
+  test("refuses unverified remainingSeconds", () => {
+    expect(classifyTailWindow({ ...baseMatch, remainingSeconds: 120 })).toMatchObject({
       eligible: false,
-      source: "remaining_minutes"
+      source: "not_enough_time_data",
+      details: expect.stringContaining("unverified")
     });
   });
 
-  test("conservative mode enters only at 90:00 or later without remaining time", () => {
-    expect(classifyTailWindow({ ...baseMatch, elapsedSeconds: 89 * 60 + 30 })).toMatchObject({
+  test("refuses remainingMinutes because minute-level data is not exact enough", () => {
+    const minuteLevelMatch = { ...baseMatch, remainingMinutes: 2 } as MatchState;
+    expect(classifyTailWindow(minuteLevelMatch)).toMatchObject({
       eligible: false,
-      source: "conservative_90_plus"
-    });
-    expect(classifyTailWindow({ ...baseMatch, elapsedSeconds: 90 * 60 })).toMatchObject({
-      eligible: true,
-      source: "conservative_90_plus"
+      source: "not_enough_time_data"
     });
   });
 
-  test("remaining-only mode refuses matches without remaining time", () => {
-    expect(classifyTailWindow({ ...baseMatch, elapsedSeconds: 91 * 60 }, { mode: "remaining" })).toMatchObject({
+  test("does not use 90-plus elapsed time as a fallback", () => {
+    expect(classifyTailWindow({ ...baseMatch, elapsedSeconds: 95 * 60 })).toMatchObject({
       eligible: false,
       source: "not_enough_time_data"
     });

@@ -11,9 +11,8 @@ const match: MatchState = {
   minute: 90,
   period: "2H",
   isLive: true,
-  stoppageMinutes: 3,
-  expectedEndMinute: 93,
-  remainingMinutes: 2
+  remainingSeconds: 120,
+  remainingSecondsSource: "365scores_added_time_precise_game_time"
 };
 
 const selected: SelectedStrategyMarket = {

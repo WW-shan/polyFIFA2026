@@ -95,9 +95,6 @@ export function findMatchState(state: unknown, eventSlug: string): MatchState | 
 
   const period = parsePeriod(stringValue(game.period));
   const minute = parseElapsedMinute(game.elapsed ?? game.minute);
-  const stoppageMinutes = parseStoppageMinutes(game.stoppageTime ?? game.stoppage_time ?? game.addedTime ?? game.added_time ?? game.injuryTime ?? game.injury_time);
-  const expectedEndMinute = parseExpectedEndMinute(game.expectedEndMinute ?? game.expected_end_minute ?? game.endMinute ?? game.end_minute, period, stoppageMinutes);
-  const remainingMinutes = parseRemainingMinutes(game.remainingMinutes ?? game.remaining_minutes ?? game.remainingTime ?? game.remaining_time, minute, expectedEndMinute);
   const live = typeof game.live === "boolean" ? game.live : game.gameState === "live" || game.gameState === "in-progress";
   const ended = game.ended === true || period === "FT";
 
@@ -111,9 +108,12 @@ export function findMatchState(state: unknown, eventSlug: string): MatchState | 
     period,
     isLive: live && !ended
   };
-  if (stoppageMinutes !== undefined) matchState.stoppageMinutes = stoppageMinutes;
-  if (expectedEndMinute !== undefined) matchState.expectedEndMinute = expectedEndMinute;
-  if (remainingMinutes !== undefined) matchState.remainingMinutes = remainingMinutes;
+  const startTime = stringValue(game.timestamp ?? game.startTime ?? game.start_time ?? findEventStartTime(state, eventSlug));
+  if (startTime) matchState.startTime = startTime;
+  const gameId = numberValue(game.gameId ?? game.game_id ?? findEventGameId(state, eventSlug));
+  if (gameId !== null) matchState.gameId = gameId;
+  const sportradarGameId = stringValue(game.sportradarGameId ?? game.sportradar_game_id ?? findEventSportradarGameId(state, eventSlug));
+  if (sportradarGameId) matchState.sportradarGameId = sportradarGameId;
   return matchState;
 }
 
@@ -278,6 +278,37 @@ function findEventTitle(state: unknown, eventSlug: string): string | null {
   return title;
 }
 
+function findEventStartTime(state: unknown, eventSlug: string): string | null {
+  const event = findEventRecord(state, eventSlug);
+  return event ? stringValue(event.startTime ?? event.startDate ?? event.timestamp) ?? null : null;
+}
+
+function findEventGameId(state: unknown, eventSlug: string): unknown {
+  const event = findEventRecord(state, eventSlug);
+  return event?.gameId ?? getPath(event, ["eventMetadata", "gameId"]);
+}
+
+function findEventSportradarGameId(state: unknown, eventSlug: string): unknown {
+  const event = findEventRecord(state, eventSlug);
+  return event?.sportradarGameId ?? getPath(event, ["eventMetadata", "sportradarGameId"]);
+}
+
+function findEventRecord(state: unknown, eventSlug: string): Record<string, unknown> | null {
+  let record: Record<string, unknown> | null = null;
+  walk(state, (value) => {
+    if (record || !isRecord(value)) return;
+    const events = value.events;
+    if (isRecord(events) && isRecord(events[eventSlug])) {
+      record = events[eventSlug];
+      return;
+    }
+    if (value.slug === eventSlug || value.ticker === eventSlug) {
+      record = value;
+    }
+  });
+  return record;
+}
+
 function findTeamsFromMarkets(state: unknown, eventSlug: string): { homeTeam: string; awayTeam: string } | null {
   let teams: { homeTeam: string; awayTeam: string } | null = null;
   walk(state, (value) => {
@@ -321,43 +352,6 @@ function parseElapsedMinute(value: unknown): number {
   if (typeof value !== "string") return 0;
   const match = value.trim().match(/^(\d+)(?:\s*\+\s*(\d+))?/);
   if (!match?.[1]) return 0;
-  return Number(match[1]) + (match[2] ? Number(match[2]) : 0);
-}
-
-function parseStoppageMinutes(value: unknown): number | undefined {
-  const parsed = parseLooseMinute(value);
-  return parsed !== null ? parsed : undefined;
-}
-
-function parseExpectedEndMinute(value: unknown, period: MatchPeriod, stoppageMinutes: number | undefined): number | undefined {
-  const parsed = parseAbsoluteMinute(value);
-  if (parsed !== null) return parsed;
-  if (period === "2H" && stoppageMinutes !== undefined) return 90 + stoppageMinutes;
-  if (period === "ET" && stoppageMinutes !== undefined) return 120 + stoppageMinutes;
-  return undefined;
-}
-
-function parseRemainingMinutes(value: unknown, minute: number, expectedEndMinute: number | undefined): number | undefined {
-  const parsed = parseLooseMinute(value);
-  if (parsed !== null) return Math.max(0, parsed);
-  if (expectedEndMinute !== undefined) return Math.max(0, expectedEndMinute - minute);
-  return undefined;
-}
-
-function parseLooseMinute(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
-  if (typeof value !== "string") return null;
-  const plus = value.match(/\+\s*(\d+)/);
-  if (plus?.[1]) return Number(plus[1]);
-  const match = value.match(/(\d+)/);
-  return match?.[1] ? Number(match[1]) : null;
-}
-
-function parseAbsoluteMinute(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
-  if (typeof value !== "string") return null;
-  const match = value.trim().match(/^(\d+)(?:\s*\+\s*(\d+))?/);
-  if (!match?.[1]) return null;
   return Number(match[1]) + (match[2] ? Number(match[2]) : 0);
 }
 

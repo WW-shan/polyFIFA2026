@@ -1,0 +1,44 @@
+{
+  "source": "365Scores public web single-game endpoint",
+  "endpoint": "https://webws.365scores.com/web/game/?appTypeId=5&langId=1&timezoneName=Asia%2FShanghai&userCountryId=2&gameId=4627855",
+  "match": "Switzerland vs Canada",
+  "gameId": 4627855,
+  "capturedEvidenceFile": "data/live-clock/365scores_swiss_canada_final3_evidence_20260625.ndjson",
+  "capturedRawFile": "data/live-clock/365scores_swiss_canada_final3_raw_20260625.json",
+  "formula": "remaining_seconds = (90 + addedTime) * 60 - (preciseGameTime.minutes * 60 + preciseGameTime.seconds)",
+  "firstAddedTimeObservation": {
+    "captured_at": "2026-06-24T20:49:51.598840+00:00",
+    "id": 4627855,
+    "statusText": "2nd Half",
+    "gameTime": 91.0,
+    "gameTimeDisplay": "90+1'",
+    "addedTime": 6.0,
+    "preciseGameTime": {
+      "minutes": 90,
+      "seconds": 2,
+      "autoProgress": true,
+      "clockDirection": 1
+    },
+    "remain": 358,
+    "homeScore": 2.0,
+    "awayScore": 1.0
+  },
+  "final3Observation": {
+    "captured_at": "2026-06-24T20:52:58.311370+00:00",
+    "id": 4627855,
+    "statusText": "2nd Half",
+    "gameTime": 94.0,
+    "gameTimeDisplay": "90+4'",
+    "addedTime": 6.0,
+    "preciseGameTime": {
+      "minutes": 93,
+      "seconds": 9,
+      "autoProgress": true,
+      "clockDirection": 1
+    },
+    "remain": 171,
+    "homeScore": 2.0,
+    "awayScore": 1.0
+  },
+  "strictFinal3Confirmed": true
+}

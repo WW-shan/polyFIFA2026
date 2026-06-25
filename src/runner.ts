@@ -1,6 +1,6 @@
 import { buildTradeDecision } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
-import { classifyTailWindow, type TailWindowMode } from "./domain/time-window.js";
+import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutor, type LiveExecuteOptions, type LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
@@ -19,7 +19,6 @@ export interface FlowInput {
   orderbooks?: OrderbookSnapshot[];
   stake: number;
   thresholds?: Partial<Omit<DecisionThresholds, "maxNotional">>;
-  tailWindowMode?: TailWindowMode;
 }
 
 export interface FlowResult {
@@ -46,8 +45,7 @@ export function buildThresholds(stake: number, overrides: Partial<Omit<DecisionT
 export function runDecisionFlow(input: FlowInput): TradeDecision {
   const thresholds = buildThresholds(input.stake, input.thresholds);
   const tailWindowOptions = {
-    entryWindowMinutes: thresholds.entryWindowMinutes,
-    ...(input.tailWindowMode ? { mode: input.tailWindowMode } : {})
+    entryWindowMinutes: thresholds.entryWindowMinutes
   };
   const tailWindow = classifyTailWindow(input.match, tailWindowOptions);
   if (!tailWindow.eligible) {
@@ -60,8 +58,7 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
   }
 
   const strategyOptions = {
-    entryWindowMinutes: thresholds.entryWindowMinutes,
-    ...(input.tailWindowMode ? { tailWindowMode: input.tailWindowMode } : {})
+    entryWindowMinutes: thresholds.entryWindowMinutes
   };
   const candidates = selectLossRequiresCandidates(input.match, input.markets, strategyOptions);
 
@@ -77,7 +74,7 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
   const decisions = candidates.flatMap((candidate) => {
     const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
     if (!orderbook) return [];
-    return [buildTradeDecision(input.match, candidate, orderbook, thresholds, input.tailWindowMode)];
+    return [buildTradeDecision(input.match, candidate, orderbook, thresholds)];
   });
 
   const buys = decisions

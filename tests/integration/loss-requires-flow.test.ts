@@ -11,9 +11,8 @@ const match: MatchState = {
   minute: 88,
   period: "2H",
   isLive: true,
-  stoppageMinutes: 5,
-  expectedEndMinute: 95,
-  remainingMinutes: 2
+  remainingSeconds: 120,
+  remainingSecondsSource: "365scores_added_time_precise_game_time"
 };
 
 const markets: StrategyMarket[] = [
@@ -114,11 +113,15 @@ describe("loss-requires decision flow", () => {
     });
   });
 
-  test("uses conservative 90-plus tail window when remaining time is unavailable", () => {
-    const { remainingMinutes: _remainingMinutes, ...matchWithoutRemainingMinutes } = match;
+  test("does not use 90-plus elapsed time when verified 365Scores time is unavailable", () => {
+    const {
+      remainingSeconds: _remainingSeconds,
+      remainingSecondsSource: _remainingSecondsSource,
+      ...matchWithoutRemainingSeconds
+    } = match;
     const ninetyPlusMatch = {
-      ...matchWithoutRemainingMinutes,
-      elapsedSeconds: 90 * 60
+      ...matchWithoutRemainingSeconds,
+      elapsedSeconds: 95 * 60
     };
 
     const decision = runDecisionFlow({
@@ -130,14 +133,17 @@ describe("loss-requires decision flow", () => {
     });
 
     expect(decision).toMatchObject({
-      action: "BUY",
-      strategy: "loser_no",
-      tailWindowSource: "conservative_90_plus"
+      action: "NO_TRADE",
+      reason: "MATCH_NOT_LATE_ENOUGH"
     });
   });
 
   test("does not trade at 89:30 without remaining time", () => {
-    const { remainingMinutes: _remainingMinutes, ...matchWithoutRemainingMinutes } = match;
+    const {
+      remainingSeconds: _remainingSeconds,
+      remainingSecondsSource: _remainingSecondsSource,
+      ...matchWithoutRemainingMinutes
+    } = match;
     const earlyMatch = {
       ...matchWithoutRemainingMinutes,
       elapsedSeconds: 89 * 60 + 30

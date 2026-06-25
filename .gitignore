@@ -21,6 +21,7 @@ coverage/
 /tmp/
 *.log
 data/live-ledger.json
+data/live-sports-audit.ndjson
 
 # local git worktrees
 .worktrees/

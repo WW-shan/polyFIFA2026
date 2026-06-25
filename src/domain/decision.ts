@@ -1,5 +1,5 @@
 import { netReturnRate, sportsTakerFeePerShare } from "./fees.js";
-import { classifyTailWindow, type TailWindowMode } from "./time-window.js";
+import { classifyTailWindow } from "./time-window.js";
 import type {
   BuyTradeDecision,
   DecisionThresholds,
@@ -15,12 +15,10 @@ export function buildTradeDecision(
   match: MatchState,
   selected: SelectedStrategyMarket,
   orderbook: OrderbookSnapshot,
-  thresholds: DecisionThresholds,
-  tailWindowMode?: TailWindowMode
+  thresholds: DecisionThresholds
 ): TradeDecision {
   const tailWindow = classifyTailWindow(match, {
-    entryWindowMinutes: thresholds.entryWindowMinutes,
-    ...(tailWindowMode ? { mode: tailWindowMode } : {})
+    entryWindowMinutes: thresholds.entryWindowMinutes
   });
   if (!tailWindow.eligible) {
     return noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, tailWindow.details);

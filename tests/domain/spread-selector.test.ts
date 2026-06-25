@@ -11,9 +11,8 @@ const baseMatch: MatchState = {
   minute: 90,
   period: "2H",
   isLive: true,
-  stoppageMinutes: 3,
-  expectedEndMinute: 93,
-  remainingMinutes: 2
+  remainingSeconds: 120,
+  remainingSecondsSource: "365scores_added_time_precise_game_time"
 };
 
 function market(outcome: string, line: number, eventSlug = baseMatch.eventSlug): SpreadMarket {
@@ -73,21 +72,26 @@ describe("selectCoveredSpread", () => {
     expect(result).toMatchObject({ action: "NO_TRADE", reason: "NO_COVERED_SPREAD" });
   });
 
-  test("uses remaining time instead of a fixed minute threshold", () => {
-    const earlyClockWithLongStoppage = {
+  test("uses verified 365Scores remaining seconds instead of a fixed minute threshold", () => {
+    const verifiedFinalWindow = {
       ...baseMatch,
-      minute: 80,
-      expectedEndMinute: 83,
-      remainingMinutes: 3
+      minute: 93,
+      elapsedSeconds: 93 * 60,
+      remainingSeconds: 180,
+      remainingSecondsSource: "365scores_added_time_precise_game_time" as const
     };
 
-    const result = selectCoveredSpread(earlyClockWithLongStoppage, [market("Spain", -2.5)]);
+    const result = selectCoveredSpread(verifiedFinalWindow, [market("Spain", -2.5)]);
 
     expect(result.action).toBe("SELECTED");
   });
 
   test("does not select when remaining time is unknown", () => {
-    const { remainingMinutes: _remainingMinutes, ...unknownRemaining } = baseMatch;
+    const {
+      remainingSeconds: _remainingSeconds,
+      remainingSecondsSource: _remainingSecondsSource,
+      ...unknownRemaining
+    } = baseMatch;
 
     const result = selectCoveredSpread(unknownRemaining, [market("Spain", -2.5)]);
 

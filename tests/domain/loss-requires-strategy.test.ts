@@ -11,9 +11,8 @@ const match: MatchState = {
   minute: 88,
   period: "2H",
   isLive: true,
-  stoppageMinutes: 5,
-  expectedEndMinute: 95,
-  remainingMinutes: 2
+  remainingSeconds: 120,
+  remainingSecondsSource: "365scores_added_time_precise_game_time"
 };
 
 function market(overrides: Partial<StrategyMarket> & Pick<StrategyMarket, "question" | "outcomes" | "clobTokenIds">): StrategyMarket {
@@ -30,8 +29,13 @@ function market(overrides: Partial<StrategyMarket> & Pick<StrategyMarket, "quest
 }
 
 describe("selectLossRequiresCandidates", () => {
-  test("uses remaining time instead of a fixed 87th-minute trigger", () => {
-    const tooEarlyDespiteMinute88 = { ...match, minute: 88, stoppageMinutes: 8, expectedEndMinute: 98, remainingMinutes: 10 };
+  test("ignores fixed minute and unverified minute-level remaining time", () => {
+    const {
+      remainingSeconds: _remainingSeconds,
+      remainingSecondsSource: _remainingSecondsSource,
+      ...matchWithoutVerifiedClock
+    } = match;
+    const tooEarlyDespiteMinute88 = { ...matchWithoutVerifiedClock, minute: 88 };
     const candidates = selectLossRequiresCandidates(tooEarlyDespiteMinute88, [
       market({
         question: "Will Weak win on 2026-06-23?",

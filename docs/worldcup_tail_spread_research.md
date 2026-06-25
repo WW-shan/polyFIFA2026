@@ -349,4 +349,4 @@ curl -x http://127.0.0.1:10808 \
 
 ## 12. 2026-06-23 实时数据源补充
 
-详细调查与测试计划见：`docs/polymarket_live_sports_data.md`。重点结论：Polymarket 页面确实使用官方 `wss://sports-api.polymarket.com/ws` 实时体育 WebSocket；可以拿到 `score / period / elapsed / live / ended`，但目前没有确认存在 `remainingMinutes / stoppageTime / addedTime` 字段，所以“最后 3 分钟”需要在真实足球 live capture 后再精确定义，不能写死第 87 分钟。
+详细调查与测试计划见：`docs/polymarket_live_sports_data.md`。重点结论：Polymarket 页面确实使用官方 `wss://sports-api.polymarket.com/ws` 实时体育 WebSocket；可以拿到 `score / period / elapsed / live / ended`，但没有补时总分钟字段。2026-06-25 已确认 365Scores 公开网页单场接口能用 `addedTime + preciseGameTime` 严格计算最后 3 分钟；实盘逻辑应只在该严格时钟给出 `remainingSeconds <= 180` 时开单。

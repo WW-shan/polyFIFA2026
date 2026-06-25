@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
-import { classifyTailWindow, type TailWindowMode } from "./domain/time-window.js";
+import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, readPusdBalance } from "./execution/balance.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
@@ -10,6 +10,7 @@ import { PaperExecutor } from "./execution/paper-executor.js";
 import { LiveLedger, isActiveLedgerStatus } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
+import { Scores365ClockProvider } from "./polymarket/scores365-clock.js";
 import { SportsLiveProvider } from "./polymarket/sports-live.js";
 import { fetchOpenWorldCupEventRefs, type WorldCupEventRef } from "./polymarket/worldcup-events.js";
 import { buildThresholds, DEFAULT_THRESHOLDS, runDecisionFlow } from "./runner.js";
@@ -43,7 +44,6 @@ interface ParsedArgs {
   maxIterations?: number;
   liveAuditFile?: string;
   orderType: LiveOrderType;
-  tailTimeMode?: TailWindowMode;
 }
 
 export interface CliDependencies {
@@ -52,6 +52,7 @@ export interface CliDependencies {
   fetchWorldCupEventSlugs?: () => Promise<string[]>;
   fetchWorldCupEventRefs?: () => Promise<WorldCupEventRef[]>;
   watchSportsUpdates?: (events: readonly WorldCupEventRef[], options: { auditFile?: string; proxyUrl?: string }) => Promise<AsyncIterable<MatchState>>;
+  fetchVerifiedClock?: (match: MatchState, events: readonly WorldCupEventRef[], options: { proxyUrl?: string; timezoneName?: string }) => Promise<Partial<MatchState> | null>;
   executeLive?: (decision: Extract<TradeDecision, { action: "BUY" }>, options: { orderType: LiveOrderType }) => Promise<TradeResult>;
 }
 
@@ -78,13 +79,12 @@ async function runSinglePass(
   env: Record<string, string | undefined>,
   deps: CliDependencies
 ): Promise<CliResult> {
-    const match = args.matchFile
+    let match = args.matchFile
       ? await readJsonFile<MatchState>(args.matchFile)
       : await (deps.fetchMatchState ?? fetchEventMatchState)(required(args.eventSlug, "--event-slug"));
-    const tailWindowMode = args.tailTimeMode ?? tailWindowModeFromEnv(env);
+    match = await overlayVerifiedClockForSinglePass(match, args, env, deps);
     const tailWindow = classifyTailWindow(match, {
-      entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes,
-      ...(tailWindowMode ? { mode: tailWindowMode } : {})
+      entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes
     });
     if (!tailWindow.eligible) {
       return ok(summary(args.mode, {
@@ -103,7 +103,7 @@ async function runSinglePass(
     const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
     const orderbooks = args.orderbookFile
       ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
-      : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes, tailWindowMode);
+      : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes);
     const ledgerFile = resolveLedgerFile(args, env);
     const ledger = ledgerFile ? new LiveLedger(ledgerFile) : undefined;
 
@@ -112,8 +112,7 @@ async function runSinglePass(
       markets,
       orderbooks,
       stake: liveStake.stake,
-      thresholds: thresholdOverridesFromArgs(args),
-      ...(tailWindowMode ? { tailWindowMode } : {})
+      thresholds: thresholdOverridesFromArgs(args)
     };
     const decision = runDecisionFlow(flowInput);
     if (decision.action !== "BUY") {
@@ -202,13 +201,17 @@ async function runSportsWatch(
   }
 
   const updateOptions = sportsUpdateOptions(args, env);
+  const clockOptions = verifiedClockOptions(env);
   const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
+  const fetchVerifiedClock = deps.fetchVerifiedClock ?? defaultVerifiedClockFetcher(clockOptions);
 
   for await (const match of updates) {
     iterations += 1;
+    const clockPatch = await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
+    const timedMatch = clockPatch ? { ...match, ...clockPatch } : match;
     const result = await runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
       ...deps,
-      fetchMatchState: async () => match
+      fetchMatchState: async () => timedMatch
     });
     if (result.exitCode !== 0) return result;
 
@@ -240,6 +243,62 @@ function sportsUpdateOptions(args: ParsedArgs, env: Record<string, string | unde
   if (auditFile) options.auditFile = auditFile;
   if (proxyUrl) options.proxyUrl = proxyUrl;
   return options;
+}
+
+function verifiedClockOptions(env: Record<string, string | undefined>): { proxyUrl?: string; timezoneName?: string } {
+  const options: { proxyUrl?: string; timezoneName?: string } = {};
+  const proxyUrl = proxyFromEnv(env);
+  if (proxyUrl) options.proxyUrl = proxyUrl;
+  const timezoneName = env.POLY_365SCORES_TIMEZONE;
+  if (timezoneName) options.timezoneName = timezoneName;
+  return options;
+}
+
+function defaultVerifiedClockFetcher(options: { proxyUrl?: string; timezoneName?: string }) {
+  const provider = new Scores365ClockProvider(options);
+  return async (match: MatchState): Promise<Partial<MatchState> | null> => provider.fetchClock(match);
+}
+
+async function overlayVerifiedClockForSinglePass(
+  match: MatchState,
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies
+): Promise<MatchState> {
+  if (args.matchFile || match.remainingSecondsSource === "365scores_added_time_precise_game_time") return match;
+
+  const clockOptions = verifiedClockOptions(env);
+  const fetchVerifiedClock = deps.fetchVerifiedClock ?? (deps.fetchMatchState ? undefined : defaultVerifiedClockFetcher(clockOptions));
+  if (!fetchVerifiedClock) return match;
+
+  const clockPatch = await maybeFetchVerifiedClock(fetchVerifiedClock, match, [eventRefFromMatch(match)], clockOptions);
+  return clockPatch ? { ...match, ...clockPatch } : match;
+}
+
+function eventRefFromMatch(match: MatchState): WorldCupEventRef {
+  const ref: WorldCupEventRef = {
+    eventSlug: match.eventSlug,
+    homeTeam: match.homeTeam,
+    awayTeam: match.awayTeam
+  };
+  if (match.gameId !== undefined) ref.gameId = match.gameId;
+  if (match.sportradarGameId) ref.sportradarGameId = match.sportradarGameId;
+  if (match.startTime) ref.startTime = match.startTime;
+  return ref;
+}
+
+async function maybeFetchVerifiedClock(
+  fetchVerifiedClock: (match: MatchState, events: readonly WorldCupEventRef[], options: { proxyUrl?: string; timezoneName?: string }) => Promise<Partial<MatchState> | null>,
+  match: MatchState,
+  events: readonly WorldCupEventRef[],
+  options: { proxyUrl?: string; timezoneName?: string }
+): Promise<Partial<MatchState> | null> {
+  if (match.period !== "2H" || !match.isLive || match.ended === true) return null;
+  try {
+    return await fetchVerifiedClock(match, events, options);
+  } catch {
+    return null;
+  }
 }
 
 async function defaultSportsUpdates(
@@ -389,14 +448,12 @@ export async function fetchCandidateOrderbooks(
   match: MatchState,
   markets: readonly StrategyMarket[],
   entryWindowMinutes: number,
-  tailWindowModeOrFetcher?: TailWindowMode | ((tokenId: string) => Promise<OrderbookSnapshot>),
+  orderbookFetcherOverride?: ((tokenId: string) => Promise<OrderbookSnapshot>),
   fetcher: (tokenId: string) => Promise<OrderbookSnapshot> = fetchOrderbook
 ): Promise<OrderbookSnapshot[]> {
-  const tailWindowMode = typeof tailWindowModeOrFetcher === "string" ? tailWindowModeOrFetcher : undefined;
-  const orderbookFetcher = typeof tailWindowModeOrFetcher === "function" ? tailWindowModeOrFetcher : fetcher;
+  const orderbookFetcher = typeof orderbookFetcherOverride === "function" ? orderbookFetcherOverride : fetcher;
   const candidates = selectLossRequiresCandidates(match, markets, {
-    entryWindowMinutes,
-    ...(tailWindowMode ? { tailWindowMode } : {})
+    entryWindowMinutes
   });
   const tokenIds = [...new Set(candidates.map((candidate) => candidate.tokenId))];
   const results = await Promise.allSettled(tokenIds.map((tokenId) => orderbookFetcher(tokenId)));
@@ -553,7 +610,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
   if (raw.minimumNotional) parsed.minimumNotional = numberArg(raw.minimumNotional, "--minimum-notional");
   if (raw.entryWindowMinutes) parsed.entryWindowMinutes = numberArg(raw.entryWindowMinutes, "--entry-window-minutes");
-  if (raw.tailTimeMode) parsed.tailTimeMode = parseTailWindowMode(raw.tailTimeMode);
+  if (raw.tailTimeMode) throw new Error("--tail-time-mode was removed; live entry always requires verified 365Scores remainingSeconds");
   return parsed;
 }
 
@@ -565,15 +622,6 @@ function parseMode(value: string): Mode {
 function parseOrderType(value: string): LiveOrderType {
   if (value === "FOK" || value === "FAK") return value;
   throw new Error("--order-type must be FOK or FAK");
-}
-
-function tailWindowModeFromEnv(env: Record<string, string | undefined>): TailWindowMode | undefined {
-  return env.POLY_TAIL_TIME_MODE ? parseTailWindowMode(env.POLY_TAIL_TIME_MODE) : undefined;
-}
-
-function parseTailWindowMode(value: string): TailWindowMode {
-  if (value === "remaining" || value === "conservative90") return value;
-  throw new Error("--tail-time-mode/POLY_TAIL_TIME_MODE must be remaining or conservative90");
 }
 
 function numberArg(value: string, flag: string): number {

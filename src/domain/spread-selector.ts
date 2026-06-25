@@ -1,4 +1,5 @@
 import type { MatchState, SelectedSpread, SpreadMarket, SpreadSelection } from "./types.js";
+import { isTailWindowEligible } from "./time-window.js";
 
 export interface SpreadSelectorOptions {
   entryWindowMinutes?: number;
@@ -52,11 +53,7 @@ export function selectCoveredSpread(
 }
 
 function isInEntryWindow(match: MatchState, entryWindowMinutes: number): boolean {
-  return match.period === "2H"
-    && match.isLive
-    && match.remainingMinutes !== undefined
-    && match.remainingMinutes >= 0
-    && match.remainingMinutes <= entryWindowMinutes;
+  return isTailWindowEligible(match, { entryWindowMinutes });
 }
 
 function toSelectedSpread(market: SpreadMarket, winner: string, margin: number): SelectedSpread | null {

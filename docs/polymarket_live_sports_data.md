@@ -13,7 +13,7 @@ wss://sports-api.polymarket.com/ws
 
 这个 WebSocket 无需鉴权，服务端推送所有 active sports events 的比分和比赛状态。它可以作为本项目“世界杯尾盘策略”的主实时数据源，用来获得 `score`、`period`、`elapsed`、`live`、`ended` 等字段。
 
-需要注意：已在真实 World Cup 足球比赛进行中验证，Sports WebSocket / Gateway / 页面初始状态都能给出 `score`、`period`、`elapsed`、`live`、`ended`，但仍没有发现明确的 `remainingMinutes` / `stoppageTime` / `addedTime` 字段。所以“最后 3 分钟”不能再写死第 87 分钟；后续还需要在 90 分钟后确认 `elapsed` 在补时时如何表现。
+需要注意：已在真实 World Cup 足球比赛进行中验证，Sports WebSocket / Gateway / 页面初始状态都能给出 `score`、`period`、`elapsed`、`live`、`ended`，但仍没有发现明确的补时总分钟字段。2026-06-25 已确认 365Scores 公开网页单场接口能给出 `addedTime + preciseGameTime`，因此项目现在用 Polymarket Sports 负责比分/事件映射，用 365Scores 严格计算最后 3 分钟；没有 365Scores 严格时钟就不下单。
 
 ## 2. 官方数据源
 
@@ -521,37 +521,112 @@ node tmp/probe-polymarket-sports-ws-undici.mjs \
 - 是否出现 `finishedTimestamp` / `finished_timestamp`；
 - 最终比分与页面/Gamma/Gateway 一致。
 
-## 9. 对交易策略的影响
+## 9. 2026-06-25 新增结论：免费网页源可严格计算最后 3 分钟
 
-### 9.1 可以立即修正的点
+验证时间：2026-06-25 04:49-04:52 Asia/Shanghai
+验证比赛：Switzerland vs Canada，365Scores `gameId = 4627855`
+
+结论：Polymarket 自己的 Sports feed 仍没有确认给出下半场补时总分钟数，但 365Scores 的公开网页单场接口已经在真实 World Cup 比赛下半场补时阶段给出足够字段，可以严格计算“距离官方 90 分钟 + 补时结束还剩多少秒”。
+
+公开网页接口：
+
+```text
+https://webws.365scores.com/web/game/?appTypeId=5&langId=1&timezoneName=Asia%2FShanghai&userCountryId=2&gameId=4627855
+```
+
+关键字段：
+
+```json
+{
+  "statusText": "2nd Half",
+  "gameTimeDisplay": "90+4'",
+  "addedTime": 6.0,
+  "preciseGameTime": {
+    "minutes": 93,
+    "seconds": 9,
+    "autoProgress": true,
+    "clockDirection": 1
+  }
+}
+```
+
+严格计算公式：
+
+```text
+remaining_seconds = (90 + addedTime) * 60
+  - (preciseGameTime.minutes * 60 + preciseGameTime.seconds)
+```
+
+本次实测最后 3 分钟证据：
+
+```text
+captured_at UTC: 2026-06-24T20:52:58.311370+00:00
+captured_at Asia/Shanghai: 2026-06-25 04:52:58
+display: 90+4'
+addedTime: 6.0
+preciseGameTime: 93:09
+remaining_seconds: 171
+score: Switzerland 2 - 1 Canada
+```
+
+因此，当 `remaining_seconds <= 180` 时，可以认为已经进入“严格可计算的最后 3 分钟”。这不是默认第 87 分钟，也不是按开赛时间瞎推，而是由网页实时源公布的 `addedTime` 和精确走表字段计算出来。
+
+已保存证据：
+
+- `data/live-clock/365scores_swiss_canada_final3_summary_20260625.json`
+- `data/live-clock/365scores_swiss_canada_final3_evidence_20260625.ndjson`
+- `data/live-clock/365scores_swiss_canada_final3_raw_20260625.json`
+
+### 9.1 接入原则
+
+实盘交易的时间门禁应改成：
+
+1. 用 Polymarket 页面/Gamma/CLOB 识别市场和 token；
+2. 用 Polymarket Sports feed 或 365Scores 获取实时比分；
+3. 用 365Scores 单场接口获取 `addedTime + preciseGameTime`；
+4. 只有满足以下条件才允许“最后 3 分钟”交易：
+   - `statusText` 为 `2nd Half`；
+   - `addedTime` 是有效数字；
+   - `preciseGameTime.minutes/seconds` 是有效数字；
+   - `autoProgress = true`；
+   - `remaining_seconds <= 180`；
+   - 比分源和 Polymarket 事件能通过队名 + 开赛时间，或后续映射表，匹配到同一场比赛。
+
+如果 365Scores 没有给出 `addedTime`，或 `preciseGameTime` 缺失，应视为没有真实时间源：不下单。
+
+## 10. 对交易策略的影响
+
+### 10.1 可以立即修正的点
 
 - 实时比分来源改为 Sports WebSocket；
+- 最后 3 分钟门禁接入 365Scores `addedTime + preciseGameTime`；
 - 当前页面/Gamma 只负责发现 event、market、token；
 - CLOB 只负责价格和下单；
 - 事件匹配不要依赖 slug，必须支持 `gameId`。
 
-### 9.2 暂时不能做假的点
+### 10.2 仍然不能做假的点
 
 不能在没有数据支持时声称“已经知道真正最后 3 分钟”。
 
-目前可选的 conservative 方案：
+当前 strict 方案：
 
-- 只在 `period = 2H` 且 `elapsed >= 90:00` 后进入尾盘候选；
-- 或者等待 live capture 证明 Polymarket 会给出补时/剩余时间字段后，再实现严格的 `remainingSeconds <= 180`。
+- Polymarket Sports feed 只作为实时比分和事件匹配来源；
+- 365Scores 单场接口给出 `addedTime + preciseGameTime` 时，才计算 `remaining_seconds <= 180`；
+- 如果 365Scores 没有给出这两个字段，不能用 `elapsed >= 87` 或 `elapsed >= 90` 替代真实最后 3 分钟。
 
-这会少抓 87-90 分钟机会，但比写死 87 分钟更正确。
+这会少抓部分机会，但符合“没有真实源就不下单”的要求。
 
-## 10. 下一步给下一个 agent 的任务
+## 11. 下一步给下一个 agent 的任务
 
 1. 实现 `SportsLiveProvider`，接入 `wss://sports-api.polymarket.com/ws`。
 2. 建立 `gameId` / `sportradarGameId` 映射表。
 3. 把 `fetchEventMatchState` 从静态页面解析升级为“页面 snapshot + live update”。
 4. 增加 live capture 脚本，把 World Cup 原始 update 落盘。
-5. 在下一场 World Cup 比赛开赛后跑 5 分钟、80 分钟后、终场三组测试。
-6. 根据真实 soccer `elapsed` 格式决定最后 3 分钟判定逻辑。
-7. 判定逻辑确认后，再接回策略层和 live executor 做真实下单验收。
+5. 实现 `365ScoresLiveClockProvider`，用单场接口计算 `remaining_seconds`。
+6. 增加 fixtures 测试：`addedTime = 6`、`preciseGameTime = 93:09` 时应输出 `remaining_seconds = 171`。
+7. 判定逻辑接回策略层和 live executor 做真实下单验收。
 
-## 11. 资料位置
+## 12. 资料位置
 
 本轮调查的临时证据文件：
 

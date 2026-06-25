@@ -2,10 +2,10 @@ export type MatchPeriod = "NS" | "1H" | "HT" | "2H" | "ET" | "FT" | "UNKNOWN";
 
 export type TailWindowSource =
   | "remaining_seconds"
-  | "remaining_minutes"
-  | "conservative_90_plus"
   | "not_enough_time_data"
   | "not_live_second_half";
+
+export type RemainingSecondsSource = "365scores_added_time_precise_game_time";
 
 export interface MatchState {
   eventSlug: string;
@@ -19,12 +19,12 @@ export interface MatchState {
   ended?: boolean;
   elapsed?: string;
   elapsedSeconds?: number;
-  stoppageMinutes?: number;
-  expectedEndMinute?: number;
   remainingSeconds?: number;
-  remainingMinutes?: number;
+  remainingSecondsSource?: RemainingSecondsSource;
   gameId?: number;
   sportradarGameId?: string;
+  startTime?: string;
+  scores365GameId?: number;
   tailWindowSource?: TailWindowSource;
   tailWindowDetails?: string;
 }

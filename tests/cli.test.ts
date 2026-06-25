@@ -93,9 +93,8 @@ const liveMatch: MatchState = {
   minute: 88,
   period: "2H",
   isLive: true,
-  stoppageMinutes: 5,
-  expectedEndMinute: 95,
-  remainingMinutes: 2
+  remainingSeconds: 120,
+  remainingSecondsSource: "365scores_added_time_precise_game_time"
 };
 
 const liveMarkets: StrategyMarket[] = [
@@ -193,9 +192,8 @@ describe("CLI", () => {
         minute: 88,
         period: "2H",
         isLive: true,
-        stoppageMinutes: 5,
-        expectedEndMinute: 95,
-        remainingMinutes: 2
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
       })
     });
 
@@ -205,6 +203,42 @@ describe("CLI", () => {
       status: "filled",
       action: "BUY",
       eventSlug: "fifwc-esp-ksa-2026-06-21"
+    });
+  });
+
+  test("single event mode overlays verified 365Scores time before checking the tail window", async () => {
+    const result = await runCli([
+      "--mode", "paper",
+      "--event-slug", "fifwc-esp-ksa-2026-06-21",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97"
+    ], {}, {
+      fetchMatchState: async () => ({
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        homeTeam: "Spain",
+        awayTeam: "Saudi Arabia",
+        homeGoals: 4,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        startTime: "2026-06-21T19:00:00Z"
+      }),
+      fetchVerifiedClock: async (match) => ({
+        remainingSeconds: match.startTime ? 120 : 999,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "filled",
+      action: "BUY",
+      decision: {
+        tailWindowSource: "remaining_seconds"
+      }
     });
   });
 
@@ -428,8 +462,8 @@ describe("CLI", () => {
           homeGoals: 4,
           awayGoals: 0,
           minute: calls === 1 ? 91 : 93,
-          expectedEndMinute: 95,
-          remainingMinutes: calls === 1 ? 4 : 2
+          remainingSeconds: calls === 1 ? 240 : 120,
+          remainingSecondsSource: "365scores_added_time_precise_game_time"
         };
       }
     });
@@ -454,9 +488,8 @@ describe("CLI", () => {
         minute: 93,
         period: "2H",
         isLive: true,
-        stoppageMinutes: 5,
-        expectedEndMinute: 95,
-        remainingMinutes: 2
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
       };
     }
 
@@ -471,7 +504,8 @@ describe("CLI", () => {
       "--stake", "97"
     ], {}, {
       fetchWorldCupEventSlugs: async () => ["fifwc-esp-ksa-2026-06-21"],
-      watchSportsUpdates: async () => updates()
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
     });
 
     expect(result.exitCode).toBe(0);
@@ -483,7 +517,7 @@ describe("CLI", () => {
     });
   });
 
-  test("worldcup watch can use sports live updates instead of polling pages", async () => {
+  test("worldcup watch overlays verified 365Scores time before trading", async () => {
     async function* updates(): AsyncIterable<MatchState> {
       yield {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
@@ -513,7 +547,11 @@ describe("CLI", () => {
       fetchMatchState: async () => {
         throw new Error("polling pages should not be used");
       },
-      watchSportsUpdates: async () => updates()
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => ({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      })
     });
 
     expect(result.exitCode).toBe(0);
@@ -522,7 +560,8 @@ describe("CLI", () => {
       status: "filled",
       action: "BUY",
       decision: {
-        tailWindowSource: "conservative_90_plus"
+        tailWindowSource: "remaining_seconds",
+        tailWindowDetails: expect.stringContaining("365scores_added_time_precise_game_time")
       }
     });
   });
@@ -541,7 +580,6 @@ describe("CLI", () => {
         minute: 75,
         period: "2H",
         isLive: true,
-        remainingMinutes: 18
       };
     }
 
@@ -556,6 +594,7 @@ describe("CLI", () => {
     }, {
       fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-early-tail-2026-06-21", homeTeam: "Early", awayTeam: "Tail" }],
       watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
       readPusdBalance
     });
 
@@ -571,7 +610,7 @@ describe("CLI", () => {
         status: "no_trade",
         reason: "MATCH_NOT_LATE_ENOUGH",
         eventSlug: "fifwc-early-tail-2026-06-21",
-        details: expect.stringContaining("remainingMinutes=18")
+        details: expect.stringContaining("No verified remainingSeconds")
       }
     });
   });
@@ -621,7 +660,11 @@ describe("CLI", () => {
       "--stake", "97",
       "--max-iterations", "1"
     ], {}, {
-      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      fetchVerifiedClock: async () => ({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      })
     });
 
     const provider = await waitForDefaultSportsProvider();
@@ -643,7 +686,8 @@ describe("CLI", () => {
       "--stake", "97",
       "--max-iterations", "2"
     ], {}, {
-      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      fetchVerifiedClock: async () => null
     });
 
     const provider = await waitForDefaultSportsProvider();
@@ -665,7 +709,11 @@ describe("CLI", () => {
       "--stake", "97",
       "--max-iterations", "1"
     ], {}, {
-      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      fetchVerifiedClock: async () => ({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      })
     });
 
     const provider = await waitForDefaultSportsProvider();
@@ -693,7 +741,11 @@ describe("CLI", () => {
       "--stake", "97",
       "--max-iterations", "1"
     ], {}, {
-      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      fetchVerifiedClock: async () => ({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      })
     });
 
     const provider = await waitForDefaultSportsProvider();
@@ -776,7 +828,8 @@ describe("CLI", () => {
       https_proxy: "https://lower-proxy.example",
       http_proxy: "http://lower-proxy.example"
     }, {
-      fetchWorldCupEventRefs: async () => [eventRef]
+      fetchWorldCupEventRefs: async () => [eventRef],
+      fetchVerifiedClock: async () => null
     });
 
     const provider = await waitForDefaultSportsProvider();
