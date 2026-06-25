@@ -566,6 +566,56 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch keeps polling 365Scores after the sports feed stops at 90 minutes", async () => {
+    let clockCalls = 0;
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        homeTeam: "Spain",
+        awayTeam: "Saudi Arabia",
+        homeGoals: 4,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      };
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => {
+        clockCalls += 1;
+        return clockCalls <= 2 ? null : {
+          remainingSeconds: 120,
+          remainingSecondsSource: "365scores_added_time_precise_game_time"
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(clockCalls).toBeGreaterThanOrEqual(3);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "filled",
+      action: "BUY",
+      decision: {
+        tailWindowSource: "remaining_seconds"
+      }
+    });
+  });
+
   test("worldcup live watch skips balance and market fetches before the tail window", async () => {
     const readPusdBalance = vi.fn(async () => {
       throw new Error("balance should not be read before the tail window");

@@ -205,19 +205,43 @@ async function runSportsWatch(
   const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
   const fetchVerifiedClock = deps.fetchVerifiedClock ?? defaultVerifiedClockFetcher(clockOptions);
 
-  for await (const match of updates) {
-    iterations += 1;
-    const clockPatch = await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
-    const timedMatch = clockPatch ? { ...match, ...clockPatch } : match;
-    const result = await runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
-      ...deps,
-      fetchMatchState: async () => timedMatch
-    });
-    if (result.exitCode !== 0) return result;
+  const activeMatches = new Map<string, MatchState>();
+  const iterator = updates[Symbol.asyncIterator]();
+  let updatePromise: Promise<IteratorResult<MatchState>> | undefined = iterator.next();
 
-    last = JSON.parse(result.stdout) as Record<string, unknown>;
-    if (last.status !== "no_trade") return result;
-    if (iterations >= maxIterations) break;
+  try {
+    while (iterations < maxIterations) {
+      const input = await nextSportsWatchInput(updatePromise, activeMatches.size > 0, args.intervalMs ?? 1000);
+      if (input.type === "update") {
+        updatePromise = undefined;
+        if (input.result.done) break;
+        rememberClockPollMatch(activeMatches, input.result.value);
+        const processed = await processSportsWatchMatch(input.result.value);
+        iterations += 1;
+        last = processed.last;
+        if (processed.result.exitCode !== 0 || last.status !== "no_trade") return processed.result;
+        if (iterations < maxIterations) updatePromise = iterator.next();
+        continue;
+      }
+
+      for (const match of [...activeMatches.values()]) {
+        if (iterations >= maxIterations) break;
+        const clockPatch = await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
+        if (!clockPatch) continue;
+        const timedMatch = { ...match, ...clockPatch };
+        rememberClockPollMatch(activeMatches, timedMatch);
+        const processed = await processSportsWatchMatch(timedMatch);
+        iterations += 1;
+        last = processed.last;
+        if (processed.result.exitCode !== 0 || last.status !== "no_trade") return processed.result;
+      }
+    }
+  } finally {
+    if (updatePromise) {
+      void iterator.return?.();
+    } else {
+      await iterator.return?.();
+    }
   }
 
   return ok({
@@ -226,6 +250,52 @@ async function runSportsWatch(
     iterations,
     last
   });
+
+  async function processSportsWatchMatch(match: MatchState): Promise<{ result: CliResult; last: Record<string, unknown> }> {
+    const clockPatch = match.remainingSecondsSource === "365scores_added_time_precise_game_time"
+      ? null
+      : await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
+    const timedMatch = clockPatch ? { ...match, ...clockPatch } : match;
+    const result = await runSinglePass({ ...args, eventSlug: timedMatch.eventSlug }, env, {
+      ...deps,
+      fetchMatchState: async () => timedMatch
+    });
+    return {
+      result,
+      last: JSON.parse(result.stdout) as Record<string, unknown>
+    };
+  }
+}
+
+type SportsWatchInput =
+  | { type: "update"; result: IteratorResult<MatchState> }
+  | { type: "clock_poll" };
+
+async function nextSportsWatchInput(
+  updatePromise: Promise<IteratorResult<MatchState>> | undefined,
+  shouldPollClock: boolean,
+  intervalMs: number
+): Promise<SportsWatchInput> {
+  const waits: Promise<SportsWatchInput>[] = [];
+  if (updatePromise) waits.push(updatePromise.then((result) => ({ type: "update", result })));
+  if (shouldPollClock) waits.push(sleep(intervalMs).then(() => ({ type: "clock_poll" })));
+  if (waits.length === 0) return { type: "update", result: { done: true, value: undefined } };
+  return Promise.race(waits);
+}
+
+function rememberClockPollMatch(activeMatches: Map<string, MatchState>, match: MatchState): void {
+  if (match.period !== "2H" || !match.isLive || match.ended === true) {
+    activeMatches.delete(match.eventSlug);
+    return;
+  }
+  if (!shouldPollVerifiedClock(match)) return;
+  activeMatches.set(match.eventSlug, match);
+}
+
+function shouldPollVerifiedClock(match: MatchState): boolean {
+  if (match.remainingSeconds !== undefined) return true;
+  if (match.elapsedSeconds !== undefined) return match.elapsedSeconds >= 85 * 60;
+  return match.minute >= 85;
 }
 
 async function fetchWorldCupEventRefs(deps: CliDependencies): Promise<WorldCupEventRef[]> {
