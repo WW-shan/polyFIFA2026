@@ -75,6 +75,12 @@ const eventPageMock = vi.hoisted(() => ({
   })
 }));
 
+const clobMock = vi.hoisted(() => ({
+  fetchOrderbook: vi.fn<(tokenId: string) => Promise<unknown>>(async () => {
+    throw new Error("orderbook polling should not be used without a test stub");
+  })
+}));
+
 vi.mock("../src/polymarket/sports-live.js", () => ({
   SportsLiveProvider: sportsLiveMock.FakeSportsLiveProvider
 }));
@@ -82,6 +88,10 @@ vi.mock("../src/polymarket/sports-live.js", () => ({
 vi.mock("../src/polymarket/event-page.js", () => ({
   fetchEventMatchState: eventPageMock.fetchEventMatchState,
   fetchEventStrategyMarkets: eventPageMock.fetchEventStrategyMarkets
+}));
+
+vi.mock("../src/polymarket/clob.js", () => ({
+  fetchOrderbook: clobMock.fetchOrderbook
 }));
 
 const liveMatch: MatchState = {
@@ -121,6 +131,7 @@ afterEach(() => {
   sportsLiveMock.reset();
   eventPageMock.fetchEventMatchState.mockClear();
   eventPageMock.fetchEventStrategyMarkets.mockClear();
+  clobMock.fetchOrderbook.mockReset();
 });
 
 function latestSportsProvider(): InstanceType<typeof sportsLiveMock.FakeSportsLiveProvider> {
@@ -134,6 +145,35 @@ async function waitForDefaultSportsProvider(): Promise<InstanceType<typeof sport
     expect(sportsLiveMock.instances.length).toBeGreaterThan(0);
   });
   return latestSportsProvider();
+}
+
+function tailMatch(eventSlug: string, homeTeam: string, awayTeam: string, homeGoals: number, awayGoals: number): MatchState {
+  return {
+    eventSlug,
+    homeTeam,
+    awayTeam,
+    homeGoals,
+    awayGoals,
+    minute: 90,
+    period: "2H",
+    isLive: true,
+    remainingSeconds: 120,
+    remainingSecondsSource: "365scores_added_time_precise_game_time"
+  };
+}
+
+function totalMarket(eventSlug: string, homeTeam: string, awayTeam: string, line: number, underTokenId: string): StrategyMarket {
+  const lineSlug = String(line).replace(".", "pt");
+  return {
+    eventSlug,
+    marketSlug: `${eventSlug}-total-${lineSlug}`,
+    question: `${homeTeam} vs. ${awayTeam}: O/U ${line}`,
+    conditionId: `cond-${eventSlug}-total-${lineSlug}`,
+    outcomes: ["Over", "Under"],
+    clobTokenIds: [`${underTokenId}-over`, underTokenId],
+    line,
+    marketType: "total"
+  };
 }
 
 describe("CLI", () => {
@@ -613,6 +653,104 @@ describe("CLI", () => {
       decision: {
         tailWindowSource: "remaining_seconds"
       }
+    });
+  });
+
+  test("worldcup watch defers a sub-threshold candidate and buys a later instant candidate", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-instant-compare-"));
+    const marketsFile = join(dir, "markets.json");
+    const lowSlug = "fifwc-low-ret-2026-06-26";
+    const highSlug = "fifwc-high-ret-2026-06-26";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(lowSlug, "Low", "Return", 5.5, "low-under"),
+      totalMarket(highSlug, "High", "Return", 3.5, "high-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: tokenId === "low-under" ? 0.99 : 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(lowSlug, "Low", "Return", 2, 2);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      yield tailMatch(highSlug, "High", "Return", 1, 1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--instant-buy-net-return", "0.01",
+      "--candidate-compare-wait-ms", "60000",
+      "--interval-ms", "5"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [
+        { eventSlug: lowSlug, homeTeam: "Low", awayTeam: "Return" },
+        { eventSlug: highSlug, homeTeam: "High", awayTeam: "Return" }
+      ],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "filled",
+      eventSlug: highSlug,
+      marketSlug: `${highSlug}-total-3pt5`,
+      bestAsk: 0.98
+    });
+  });
+
+  test("worldcup watch compares deferred sub-threshold candidates and buys the best after waiting", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-deferred-compare-"));
+    const marketsFile = join(dir, "markets.json");
+    const lowerSlug = "fifwc-lower-deferred-2026-06-26";
+    const betterSlug = "fifwc-better-deferred-2026-06-26";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(lowerSlug, "Lower", "Deferred", 5.5, "lower-under"),
+      totalMarket(betterSlug, "Better", "Deferred", 5.5, "better-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: tokenId === "lower-under" ? 0.99 : 0.985, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(lowerSlug, "Lower", "Deferred", 2, 2);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      yield tailMatch(betterSlug, "Better", "Deferred", 2, 2);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--instant-buy-net-return", "0.02",
+      "--candidate-compare-wait-ms", "20",
+      "--interval-ms", "5"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [
+        { eventSlug: lowerSlug, homeTeam: "Lower", awayTeam: "Deferred" },
+        { eventSlug: betterSlug, homeTeam: "Better", awayTeam: "Deferred" }
+      ],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "filled",
+      eventSlug: betterSlug,
+      marketSlug: `${betterSlug}-total-5pt5`,
+      bestAsk: 0.985
     });
   });
 

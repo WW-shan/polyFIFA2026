@@ -42,8 +42,22 @@ interface ParsedArgs {
   worldcup?: boolean;
   intervalMs?: number;
   maxIterations?: number;
+  instantBuyNetReturn?: number;
+  candidateCompareWaitMs?: number;
   liveAuditFile?: string;
   orderType: LiveOrderType;
+}
+
+interface SinglePassOptions {
+  executeTrade?: boolean;
+}
+
+interface PendingBuy {
+  eventSlug: string;
+  match: MatchState;
+  firstSeenAt: number;
+  updatedAt: number;
+  decision: Extract<TradeDecision, { action: "BUY" }>;
 }
 
 export interface CliDependencies {
@@ -77,7 +91,8 @@ export async function runCli(
 async function runSinglePass(
   args: ParsedArgs,
   env: Record<string, string | undefined>,
-  deps: CliDependencies
+  deps: CliDependencies,
+  options: SinglePassOptions = {}
 ): Promise<CliResult> {
     let match = args.matchFile
       ? await readJsonFile<MatchState>(args.matchFile)
@@ -126,6 +141,7 @@ async function runSinglePass(
         details: "Ledger already has an active trade for this event"
       }));
     }
+    if (options.executeTrade === false) return ok(summary(args.mode, decision));
 
     const trade = args.mode === "paper"
       ? await new PaperExecutor().execute(decision)
@@ -204,8 +220,11 @@ async function runSportsWatch(
   const clockOptions = verifiedClockOptions(env);
   const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
   const fetchVerifiedClock = deps.fetchVerifiedClock ?? defaultVerifiedClockFetcher(clockOptions);
+  const instantBuyNetReturn = args.instantBuyNetReturn ?? numberEnv(env.POLY_INSTANT_BUY_NET_RETURN) ?? 0.01;
+  const candidateCompareWaitMs = args.candidateCompareWaitMs ?? numberEnv(env.POLY_CANDIDATE_COMPARE_WAIT_MS) ?? 60_000;
 
   const activeMatches = new Map<string, MatchState>();
+  const pendingBuys = new Map<string, PendingBuy>();
   const iterator = updates[Symbol.asyncIterator]();
   let updatePromise: Promise<IteratorResult<MatchState>> | undefined = iterator.next();
 
@@ -214,12 +233,19 @@ async function runSportsWatch(
       const input = await nextSportsWatchInput(updatePromise, activeMatches.size > 0, args.intervalMs ?? 1000);
       if (input.type === "update") {
         updatePromise = undefined;
-        if (input.result.done) break;
+        if (input.result.done) {
+          const deferred = await maybeExecuteDeferredBuy(Date.now());
+          if (deferred) return deferred;
+          if (activeMatches.size === 0 || pendingBuys.size === 0) break;
+          continue;
+        }
         rememberClockPollMatch(activeMatches, input.result.value);
         const processed = await processSportsWatchMatch(input.result.value);
         iterations += 1;
-        last = processed.last;
-        if (processed.result.exitCode !== 0 || last.status !== "no_trade") return processed.result;
+        const immediate = await handleSportsWatchDecision(processed);
+        if (immediate) return immediate;
+        const deferred = await maybeExecuteDeferredBuy(Date.now());
+        if (deferred) return deferred;
         if (iterations < maxIterations) updatePromise = iterator.next();
         continue;
       }
@@ -232,9 +258,11 @@ async function runSportsWatch(
         rememberClockPollMatch(activeMatches, timedMatch);
         const processed = await processSportsWatchMatch(timedMatch);
         iterations += 1;
-        last = processed.last;
-        if (processed.result.exitCode !== 0 || last.status !== "no_trade") return processed.result;
+        const immediate = await handleSportsWatchDecision(processed);
+        if (immediate) return immediate;
       }
+      const deferred = await maybeExecuteDeferredBuy(Date.now());
+      if (deferred) return deferred;
     }
   } finally {
     if (updatePromise) {
@@ -251,7 +279,7 @@ async function runSportsWatch(
     last
   });
 
-  async function processSportsWatchMatch(match: MatchState): Promise<{ result: CliResult; last: Record<string, unknown> }> {
+  async function processSportsWatchMatch(match: MatchState): Promise<{ result: CliResult; last: Record<string, unknown>; match: MatchState }> {
     const clockPatch = match.remainingSecondsSource === "365scores_added_time_precise_game_time"
       ? null
       : await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
@@ -259,11 +287,72 @@ async function runSportsWatch(
     const result = await runSinglePass({ ...args, eventSlug: timedMatch.eventSlug }, env, {
       ...deps,
       fetchMatchState: async () => timedMatch
-    });
+    }, { executeTrade: false });
     return {
       result,
-      last: JSON.parse(result.stdout) as Record<string, unknown>
+      last: JSON.parse(result.stdout) as Record<string, unknown>,
+      match: timedMatch
     };
+  }
+
+  async function handleSportsWatchDecision(processed: { result: CliResult; last: Record<string, unknown>; match: MatchState }): Promise<CliResult | undefined> {
+    last = processed.last;
+    if (processed.result.exitCode !== 0) return processed.result;
+
+    const decision = buyDecisionFromSummary(processed.last);
+    if (!decision) {
+      pendingBuys.delete(processed.match.eventSlug);
+      return undefined;
+    }
+
+    if (decision.estimatedNetReturn >= instantBuyNetReturn) {
+      pendingBuys.delete(processed.match.eventSlug);
+      return executeSportsWatchMatch(processed.match);
+    }
+
+    rememberPendingBuy(processed.match, decision, Date.now());
+    return undefined;
+  }
+
+  function rememberPendingBuy(match: MatchState, decision: Extract<TradeDecision, { action: "BUY" }>, now: number): void {
+    const existing = pendingBuys.get(match.eventSlug);
+    pendingBuys.set(match.eventSlug, {
+      eventSlug: match.eventSlug,
+      match,
+      firstSeenAt: existing?.firstSeenAt ?? now,
+      updatedAt: now,
+      decision
+    });
+  }
+
+  async function maybeExecuteDeferredBuy(now: number): Promise<CliResult | undefined> {
+    if (pendingBuys.size === 0) return undefined;
+    const oldestFirstSeenAt = Math.min(...[...pendingBuys.values()].map((pending) => pending.firstSeenAt));
+    if (now - oldestFirstSeenAt < candidateCompareWaitMs) return undefined;
+
+    const ranked = [...pendingBuys.values()].sort((a, b) => {
+      const returnDelta = b.decision.estimatedNetReturn - a.decision.estimatedNetReturn;
+      if (returnDelta !== 0) return returnDelta;
+      return (b.decision.lossRequiresGoals ?? 0) - (a.decision.lossRequiresGoals ?? 0);
+    });
+
+    for (const pending of ranked) {
+      pendingBuys.delete(pending.eventSlug);
+      const result = await executeSportsWatchMatch(pending.match);
+      if (result.exitCode !== 0) return result;
+      const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+      last = parsed;
+      if (parsed.status !== "no_trade") return result;
+    }
+
+    return undefined;
+  }
+
+  async function executeSportsWatchMatch(match: MatchState): Promise<CliResult> {
+    return runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
+      ...deps,
+      fetchMatchState: async () => match
+    });
   }
 }
 
@@ -296,6 +385,12 @@ function shouldPollVerifiedClock(match: MatchState): boolean {
   if (match.remainingSeconds !== undefined) return true;
   if (match.elapsedSeconds !== undefined) return match.elapsedSeconds >= 85 * 60;
   return match.minute >= 85;
+}
+
+function buyDecisionFromSummary(value: Record<string, unknown>): Extract<TradeDecision, { action: "BUY" }> | undefined {
+  const decision = value.decision;
+  if (!isRecord(decision) || decision.action !== "BUY") return undefined;
+  return decision as unknown as Extract<TradeDecision, { action: "BUY" }>;
 }
 
 async function fetchWorldCupEventRefs(deps: CliDependencies): Promise<WorldCupEventRef[]> {
@@ -675,6 +770,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.worldcup) parsed.worldcup = booleanArg(raw.worldcup, "--worldcup");
   if (raw.intervalMs) parsed.intervalMs = numberArg(raw.intervalMs, "--interval-ms");
   if (raw.maxIterations) parsed.maxIterations = numberArg(raw.maxIterations, "--max-iterations");
+  if (raw.instantBuyNetReturn) parsed.instantBuyNetReturn = numberArg(raw.instantBuyNetReturn, "--instant-buy-net-return");
+  if (raw.candidateCompareWaitMs) parsed.candidateCompareWaitMs = numberArg(raw.candidateCompareWaitMs, "--candidate-compare-wait-ms");
   if (raw.liveAuditFile) parsed.liveAuditFile = raw.liveAuditFile;
   if (raw.maxEntryPrice) parsed.maxEntryPrice = numberArg(raw.maxEntryPrice, "--max-entry-price");
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
