@@ -337,9 +337,10 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
     const notional = fills.reduce((total, fill) => total + fill.notional, 0);
     const fee = fills.reduce((total, fill) => total + fill.fee, 0);
     const price = notional / shares;
+    const requestedSize = confirmedOrderRequestedSize(order, confirmation);
     return {
       mode: "live",
-      status: fillsRequestedSize(shares, order.size) && !openOrder ? "filled" : "partial",
+      status: fillsRequestedSize(shares, requestedSize) && !openOrder ? "filled" : "partial",
       orderId,
       tokenId: order.tokenId,
       price,
@@ -474,7 +475,8 @@ function makerOrderPendingTrade(order: LiveOrderRequest, orderId: string, makerO
 
 function isFillConfirmingTrade(trade: Record<string, unknown>): boolean {
   if (hasTradeError(trade)) return false;
-  return tradeStatus(trade) === "confirmed";
+  const status = tradeStatus(trade);
+  return status === "confirmed" || (status === "matched" && hasTransactionHash(trade));
 }
 
 function isPendingTradeEvidence(trade: Record<string, unknown>): boolean {
@@ -493,6 +495,10 @@ function hasNonConfirmingStatus(record: Record<string, unknown>): boolean {
 
 function hasTradeError(record: Record<string, unknown>): boolean {
   return errorFieldMessage(record.err_msg) !== undefined || errorFieldMessage(record.errorMsg) !== undefined || errorFieldMessage(record.error) !== undefined;
+}
+
+function hasTransactionHash(record: Record<string, unknown>): boolean {
+  return Boolean(stringField(record, "transaction_hash") ?? stringField(record, "transactionHash"));
 }
 
 function terminalNoFillConfirmationStatus(
@@ -588,7 +594,15 @@ function validFill(shares: number | undefined, price: number | undefined): Confi
 }
 
 function fillsRequestedSize(filledShares: number, requestedShares: number): boolean {
-  return filledShares >= requestedShares || Math.abs(filledShares - requestedShares) <= 1e-9;
+  return filledShares >= requestedShares || Math.abs(filledShares - requestedShares) <= 1e-4;
+}
+
+function confirmedOrderRequestedSize(order: LiveOrderRequest, confirmation: LiveOrderConfirmation): number {
+  if (isRecord(confirmation.order)) {
+    const originalSize = numberField(confirmation.order, "original_size") ?? numberField(confirmation.order, "originalSize");
+    if (originalSize !== undefined && originalSize > 0) return originalSize;
+  }
+  return order.size;
 }
 
 function hasMatchingOpenOrder(order: LiveOrderRequest, orderId: string, openOrders: unknown[]): boolean {

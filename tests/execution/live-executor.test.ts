@@ -225,6 +225,62 @@ describe("LiveExecutor", () => {
     expect(result.estimatedProfit).toBeCloseTo(0.0145635);
   });
 
+  test("normalizes Polymarket MATCHED trades with transaction hashes as filled", () => {
+    const matchedOrder: LiveOrderRequest = {
+      ...liveOrder,
+      tokenId: "70002980913954115591354587263173571697242905332674012331302887342474232856448",
+      price: 0.99,
+      size: 2.968309090909091,
+      notional: 2.938626,
+      tickSize: "0.01",
+      estimatedFee: 0.0008815878000000007
+    };
+
+    const result = normalizeConfirmedLiveOrderResult(matchedOrder, {
+      postResponse: {
+        success: true,
+        errorMsg: "",
+        orderID: "0x17dfa002745392a84456a7783c88e3c4875d676b050dc68cff64d407c696019f",
+        takingAmount: "2.959594",
+        makingAmount: "2.929998",
+        status: "matched",
+        transactionsHashes: ["0x913ee80995286fb7316eef8443061ec5864c83c306e4572483d83e1bbb3bc1da"]
+      },
+      trades: [
+        {
+          taker_order_id: "0x17dfa002745392a84456a7783c88e3c4875d676b050dc68cff64d407c696019f",
+          asset_id: matchedOrder.tokenId,
+          side: "BUY",
+          size: "2.959594",
+          price: "0.99",
+          status: "MATCHED",
+          transaction_hash: "0x913ee80995286fb7316eef8443061ec5864c83c306e4572483d83e1bbb3bc1da"
+        }
+      ],
+      openOrders: [],
+      order: {
+        id: "0x17dfa002745392a84456a7783c88e3c4875d676b050dc68cff64d407c696019f",
+        status: "MATCHED",
+        asset_id: matchedOrder.tokenId,
+        side: "BUY",
+        original_size: "2.9595",
+        size_matched: "2.959594",
+        price: "0.99",
+        order_type: "FOK"
+      }
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      orderId: "0x17dfa002745392a84456a7783c88e3c4875d676b050dc68cff64d407c696019f",
+      tokenId: matchedOrder.tokenId,
+      price: 0.99,
+      shares: 2.959594
+    });
+    expect(result.notional).toBeCloseTo(2.92999806);
+  });
+
   test("counts TRADE_STATUS_CONFIRMED as a confirmed fill", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "matched" },
