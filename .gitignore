@@ -25,3 +25,8 @@ data/live-sports-audit.ndjson
 
 # local git worktrees
 .worktrees/
+
+# random_control artefacts
+analysis/.venv/
+analysis/__pycache__/
+analysis/random_control/__pycache__/
