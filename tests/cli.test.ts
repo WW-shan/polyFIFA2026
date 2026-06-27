@@ -1066,6 +1066,86 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup live watch retries the same event after an all-rejected FAK basket", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-live-rejected-retry-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-live-retry-after-rejected-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Retry", "Rejected", 5.5, "retry-rejected-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Retry", "Rejected", 2, 2);
+      yield tailMatch(eventSlug, "Retry", "Rejected", 2, 2);
+    }
+    let calls = 0;
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "10",
+      "--ledger-file", ledgerFile,
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [
+        { eventSlug, homeTeam: "Retry", awayTeam: "Rejected" }
+      ],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      executeLive: async (decision) => {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            mode: "live",
+            status: "rejected",
+            orderId: "live-rejected-basket",
+            tokenId: decision.tokenId,
+            price: decision.bestAsk,
+            shares: 0,
+            notional: 0,
+            fee: 0,
+            estimatedPayout: 0,
+            estimatedProfit: 0
+          };
+        }
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "live-retry-filled",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(calls).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug
+      }
+    });
+    const ledger = JSON.parse(await readFile(ledgerFile, "utf8"));
+    expect(ledger.map((entry: { status: string }) => entry.status)).toEqual(["rejected", "filled"]);
+  });
+
   test("worldcup watch skips candidates below the default 0.5% minimum without waiting", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-default-min-return-"));
     const marketsFile = join(dir, "markets.json");

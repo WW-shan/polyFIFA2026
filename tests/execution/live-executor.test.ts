@@ -658,6 +658,86 @@ describe("LiveExecutor", () => {
     expect(placeLimitBuy).toHaveBeenCalledTimes(2);
   });
 
+  test("returns a rejected basket instead of throwing when every live leg is rejected", async () => {
+    const decision = {
+      ...buyDecision,
+      bestAsk: 0.96,
+      shares: 8.02,
+      notional: 7.7494,
+      estimatedFee: 0.00783846,
+      estimatedNetReturn: 0.03,
+      legs: [
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "total-2p5",
+          question: "Strong vs. Weak: O/U 2.5",
+          tokenId: "total-under",
+          conditionId: "cond-total-2p5",
+          outcome: "Under",
+          strategy: "total_under_loss_ge2",
+          lossRequiresGoals: 2,
+          price: 0.96,
+          availableSize: 3,
+          shares: 3,
+          notional: 2.88,
+          estimatedFee: 0.003456,
+          estimatedNetReturn: 0.04,
+          tickSize: "0.001",
+          negRisk: false
+        },
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "weak-moneyline",
+          question: "Will Weak win?",
+          tokenId: "weak-no",
+          conditionId: "cond-weak",
+          outcome: "No",
+          strategy: "loser_no",
+          lossRequiresGoals: 2,
+          price: 0.97,
+          availableSize: 5.02,
+          shares: 5.02,
+          notional: 4.8694,
+          estimatedFee: 0.00438246,
+          estimatedNetReturn: 0.03,
+          tickSize: "0.001",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => {
+      throw new LiveExecutionError("LIVE_ORDER_REJECTED", `depth moved for ${order.tokenId}`, {
+        raw: { success: false, errorMsg: "order couldn't be fully filled" }
+      });
+    });
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(decision, { orderType: "FAK" });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "rejected",
+      shares: 0,
+      notional: 0,
+      estimatedProfit: 0,
+      legs: [
+        { tokenId: "total-under", status: "rejected", shares: 0, notional: 0 },
+        { tokenId: "weak-no", status: "rejected", shares: 0, notional: 0 }
+      ]
+    });
+    expect(placeLimitBuy).toHaveBeenCalledTimes(2);
+  });
+
   test("uses deposit wallet env as the live funder with POLY_1271 signing", async () => {
     const placeLimitBuy = vi.fn(async (): Promise<TradeResult> => ({
       mode: "live",
