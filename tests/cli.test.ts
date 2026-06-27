@@ -1466,6 +1466,26 @@ describe("CLI", () => {
     expect(discoveryCalls).toBe(2);
   });
 
+  test("worldcup watch retries transient event discovery fetch failures", async () => {
+    let discoveryCalls = 0;
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--interval-ms", "0"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) throw new TypeError("fetch failed");
+        throw new Error("REDISCOVERED_AFTER_TRANSIENT_DISCOVERY_ERROR");
+      }
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("REDISCOVERED_AFTER_TRANSIENT_DISCOVERY_ERROR");
+    expect(discoveryCalls).toBe(2);
+  });
+
   test("worldcup watch rediscovers events after a sports update stream finishes", async () => {
     let discoveryCalls = 0;
     const result = await runCli([

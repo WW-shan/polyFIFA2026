@@ -214,7 +214,19 @@ async function runSportsWatch(
   const settlementMonitor = autoSettlementMonitor(args, env, deps);
   while (iterations < maxIterations) {
     settlementMonitor?.kick();
-    const events = await fetchWorldCupEventRefs(deps);
+    let events: WorldCupEventRef[];
+    try {
+      events = await fetchWorldCupEventRefs(deps);
+    } catch (error) {
+      if (Number.isFinite(maxIterations) || !isTransientFetchError(error)) throw error;
+      last = {
+        status: "watch_reconnect",
+        reason: "EVENT_DISCOVERY_ERROR",
+        details: error instanceof Error ? error.message : String(error)
+      };
+      await sleep(args.intervalMs ?? SPORTS_WATCH_RECONNECT_INTERVAL_MS);
+      continue;
+    }
     if (events.length === 0) {
       last = {
         status: "no_events",
@@ -590,6 +602,11 @@ function autoSettlementMonitor(
     console.error(`AUTO_REDEEM_FAILED: ${error instanceof Error ? error.message : String(error)}`);
   });
   return new AutoSettlementMonitor(config, monitorDeps);
+}
+
+function isTransientFetchError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message === "fetch failed" || error.name === "AbortError" || error.name === "TimeoutError";
 }
 
 function defaultVerifiedClockFetcher(options: { proxyUrl?: string; timezoneName?: string }) {
