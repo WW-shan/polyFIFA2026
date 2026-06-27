@@ -1066,6 +1066,69 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup live watch retries the same event after a transient execution error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-live-exec-error-retry-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-live-error-retry-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Live", "Retry", 5.5, "live-error-retry-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Live", "Retry", 2, 2);
+      yield tailMatch(eventSlug, "Live", "Retry", 2, 2);
+    }
+    let calls = 0;
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "10",
+      "--ledger-file", ledgerFile,
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Live", awayTeam: "Retry" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      executeLive: async (decision) => {
+        calls += 1;
+        if (calls === 1) throw new Error("temporary balance propagation failed");
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "live-retry-after-error",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(calls, result.stdout).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug
+      }
+    });
+  });
+
   test("worldcup live watch retries the same event after an all-rejected FAK basket", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-live-rejected-retry-"));
     const marketsFile = join(dir, "markets.json");
@@ -1445,6 +1508,41 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("REDISCOVERED_AFTER_STREAM_ERROR");
     expect(discoveryCalls).toBe(2);
+  });
+
+  test("worldcup watch uses a short default reconnect delay after transient sports stream errors", async () => {
+    vi.useFakeTimers();
+    let discoveryCalls = 0;
+    try {
+      const resultPromise = runCli([
+        "--mode", "paper",
+        "--watch", "true",
+        "--worldcup", "true"
+      ], {}, {
+        fetchWorldCupEventRefs: async () => {
+          discoveryCalls += 1;
+          if (discoveryCalls === 1) return [{ eventSlug: "fifwc-fast-reconnect-2026-06-27", homeTeam: "Fast", awayTeam: "Reconnect" }];
+          throw new Error("REDISCOVERED_FAST_RECONNECT");
+        },
+        watchSportsUpdates: async () => (async function* (): AsyncIterable<MatchState> {
+          throw new Error("temporary sports stream down");
+        })()
+      });
+
+      await vi.waitFor(() => {
+        expect(discoveryCalls).toBe(1);
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(discoveryCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await resultPromise;
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("REDISCOVERED_FAST_RECONNECT");
+      expect(discoveryCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("worldcup live watch starts auto redeem settlement in the background", async () => {

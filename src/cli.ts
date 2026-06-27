@@ -62,6 +62,7 @@ interface PendingBuy {
 }
 
 const MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS = 1000;
+const SPORTS_WATCH_RECONNECT_INTERVAL_MS = 1000;
 
 export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
@@ -235,12 +236,12 @@ async function runSportsWatch(
         reason: "SPORTS_STREAM_ERROR",
         details: error instanceof Error ? error.message : String(error)
       };
-      await sleep(args.intervalMs ?? 60_000);
+      await sleep(args.intervalMs ?? SPORTS_WATCH_RECONNECT_INTERVAL_MS);
       continue;
     }
     if (fatal) return fatal;
     if (Number.isFinite(maxIterations)) break;
-    await sleep(args.intervalMs ?? 60_000);
+    await sleep(args.intervalMs ?? SPORTS_WATCH_RECONNECT_INTERVAL_MS);
   }
 
   return ok({
@@ -437,7 +438,6 @@ async function runSportsWatch(
         eventSlug: match.eventSlug,
         details
       };
-      completedEventSlugs.add(match.eventSlug);
       activeMatches.delete(match.eventSlug);
       pendingBuys.delete(match.eventSlug);
     }
