@@ -100,17 +100,24 @@ export class LiveExecutor {
     if (refreshedLegs.length === 0) return stalePlanResult(decision);
 
     const results = await Promise.all(refreshedLegs.map(async (leg) => {
-      const result = await client.placeLimitBuy({
-        tokenId: leg.tokenId,
-        price: leg.price,
-        size: leg.shares,
-        notional: leg.notional,
-        orderType: options.orderType ?? "FOK",
-        tickSize: leg.tickSize ?? "0.001",
-        negRisk: leg.negRisk ?? false,
-        estimatedFee: leg.estimatedFee
-      });
-      return tradeResultToLeg(result);
+      try {
+        const result = await client.placeLimitBuy({
+          tokenId: leg.tokenId,
+          price: leg.price,
+          size: leg.shares,
+          notional: leg.notional,
+          orderType: options.orderType ?? "FAK",
+          tickSize: leg.tickSize ?? "0.001",
+          negRisk: leg.negRisk ?? false,
+          estimatedFee: leg.estimatedFee
+        });
+        return tradeResultToLeg(result);
+      } catch (error) {
+        if (error instanceof LiveExecutionError && error.code === "LIVE_ORDER_REJECTED") {
+          return rejectedLegResult(leg, error);
+        }
+        throw error;
+      }
     }));
 
     return aggregateLiveResults(decision, results);
@@ -252,6 +259,26 @@ function aggregateLiveStatus(results: readonly TradeResultLeg[]): TradeResult["s
   if (results.some((result) => result.status === "posted")) return "posted";
   if (results.some((result) => result.status === "canceled")) return "canceled";
   return "rejected";
+}
+
+function rejectedLegResult(leg: BuyTradeLeg, error: LiveExecutionError): TradeResultLeg {
+  return {
+    mode: "live",
+    status: "rejected",
+    orderId: `live-rejected-${leg.tokenId}`,
+    tokenId: leg.tokenId,
+    price: leg.price,
+    shares: 0,
+    notional: 0,
+    fee: 0,
+    estimatedPayout: 0,
+    estimatedProfit: 0,
+    raw: {
+      code: error.code,
+      message: error.message,
+      error: error.raw
+    }
+  };
 }
 
 function stalePlanResult(decision: Extract<TradeDecision, { action: "BUY" }>): TradeResult {

@@ -480,6 +480,55 @@ describe("CLI", () => {
     });
   });
 
+  test("live mode defaults to FAK orders so stale depth does not kill the whole entry", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-default-fak-"));
+    const eventSlug = "fifwc-default-fak-2026-06-27";
+    const matchFile = join(dir, "match.json");
+    const marketsFile = join(dir, "markets.json");
+    const orderbookFile = join(dir, "orderbook.json");
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(matchFile, JSON.stringify(tailMatch(eventSlug, "Default", "FAK", 2, 0)));
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Default", "FAK", 4.5, "default-fak-under")
+    ]));
+    await writeFile(orderbookFile, JSON.stringify({
+      tokenId: "default-fak-under",
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    let capturedOrderType: unknown;
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", matchFile,
+      "--markets-file", marketsFile,
+      "--orderbook-file", orderbookFile,
+      "--stake", "5",
+      "--use-live-balance", "false",
+      "--ledger-file", ledgerFile
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      executeLive: async (decision, options) => {
+        capturedOrderType = options.orderType;
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "live-order-1",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(capturedOrderType).toBe("FAK");
+  });
+
   test("watch mode uses remaining time and trades when the refetched match enters the final window", async () => {
     let calls = 0;
     const result = await runCli([

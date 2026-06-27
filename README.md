@@ -76,7 +76,7 @@ For live page state, `--event-slug` can replace `--match-file`:
 npm run cli -- \
   --mode live \
   --event-slug fifwc-fra-irq-2026-06-22 \
-  --order-type FOK
+  --order-type FAK
 ```
 
 If `--event-slug` is used, the CLI fetches the Polymarket sports page, extracts the current `score`, `period`, `elapsed`, and remaining-time fields, then extracts strategy markets from the same event. If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then builds the ranked buy-leg plan.
@@ -117,7 +117,7 @@ Set `POLY_LIVE_AUDIT_FILE=data/live-sports-audit.ndjson` to append raw Sports We
 
 Production World Cup watch is intended to stay up 24/7. With no `--max-iterations`, it keeps rediscovering World Cup events when no events are open, reconnects after transient Sports stream failures, and continues watching other or later matches after one event gets a filled/partial/posted buy plan. `--max-iterations` is now only a finite dry-run/test guard; when it is set, the command returns `watch_complete` with the last decision/trade summary.
 
-Live capital allocation is all-in by default: if `--stake` is omitted, the bot builds the ranked leg plan above the configured minimum net return, then uses `pUSD balance - POLY_BALANCE_BUFFER` as the maximum order notional. Passing `--stake N` changes this to `min(N, pUSD balance - POLY_BALANCE_BUFFER)`. Live execution refreshes all planned leg orderbooks concurrently, reprices each leg to the current executable ask as long as it still clears the configured return floor and `maxEntryPrice`, then submits the remaining live legs concurrently as limit buys. If a refreshed leg falls below the return floor or below `minimumNotional`, that leg is skipped instead of delaying or chasing bad price.
+Live capital allocation is all-in by default: if `--stake` is omitted, the bot builds the ranked leg plan above the configured minimum net return, then uses `pUSD balance - POLY_BALANCE_BUFFER` as the maximum order notional. Passing `--stake N` changes this to `min(N, pUSD balance - POLY_BALANCE_BUFFER)`. Live execution refreshes all planned leg orderbooks concurrently, reprices each leg to the current executable ask as long as it still clears the configured return floor and `maxEntryPrice`, then submits the remaining live legs concurrently as immediate-or-cancel FAK limit buys by default. If a refreshed leg falls below the return floor or below `minimumNotional`, that leg is skipped instead of delaying or chasing bad price. If a submitted leg is rejected because depth moved again, that leg is recorded as rejected while other concurrent legs can still fill; the event remains eligible for later retry unless a filled/partial/posted buy plan is recorded.
 
 ### Auto settlement
 

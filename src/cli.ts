@@ -932,7 +932,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.matchFile && raw.eventSlug) {
     throw new Error("Use only one of --match-file or --event-slug");
   }
-  const orderType = parseOrderType(raw.orderType ?? "FOK");
+  const orderType = parseOrderType(raw.orderType ?? "FAK");
 
   const parsed: ParsedArgs = {
     mode,
