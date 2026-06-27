@@ -1,4 +1,4 @@
-import { buildTradeDecision } from "./domain/decision.js";
+import { allocateTradeLegs, buildTradeDecision, buildTradeLevels, buyDecisionFromLegs } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
 import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
@@ -8,7 +8,7 @@ import { PaperExecutor } from "./execution/paper-executor.js";
 export const DEFAULT_THRESHOLDS: Omit<DecisionThresholds, "maxNotional"> = {
   entryWindowMinutes: 3,
   maxEntryPrice: 0.999999,
-  minimumNetReturn: 0,
+  minimumNetReturn: 0.005,
   minimumNotional: 1
 };
 
@@ -76,6 +76,13 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
     if (!orderbook) return [];
     return [buildTradeDecision(input.match, candidate, orderbook, thresholds)];
   });
+  const levels = candidates.flatMap((candidate) => {
+    const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
+    if (!orderbook) return [];
+    return buildTradeLevels(input.match, candidate, orderbook, thresholds);
+  });
+  const legs = allocateTradeLegs(levels, thresholds);
+  if (legs.length > 0) return buyDecisionFromLegs(legs);
 
   const buys = decisions
     .filter((decision): decision is Extract<TradeDecision, { action: "BUY" }> => decision.action === "BUY")

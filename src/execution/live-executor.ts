@@ -1,5 +1,5 @@
-import type { TradeDecision, TradeResult } from "../domain/types.js";
-import { sportsTakerFeePerShare } from "../domain/fees.js";
+import type { BuyTradeLeg, OrderbookSnapshot, TradeDecision, TradeResult, TradeResultLeg } from "../domain/types.js";
+import { netReturnRate, sportsTakerFeePerShare } from "../domain/fees.js";
 import { signPoly1271Order } from "./poly1271-signature.js";
 
 export type LiveOrderType = "FOK" | "FAK";
@@ -26,6 +26,10 @@ export interface LiveExecutorConfig {
 
 export interface LiveExecuteOptions {
   orderType?: LiveOrderType;
+  refreshOrderbook?: (tokenId: string) => Promise<OrderbookSnapshot>;
+  minimumNotional?: number;
+  minimumNetReturn?: number;
+  maxEntryPrice?: number;
 }
 
 export interface LiveOrderRequest {
@@ -91,17 +95,182 @@ export class LiveExecutor {
 
     const config = requireLiveConfig(this.config);
     const client = await this.clientFactory(config);
-    return client.placeLimitBuy({
-      tokenId: decision.tokenId,
-      price: decision.bestAsk,
-      size: decision.shares,
-      notional: decision.notional,
-      orderType: options.orderType ?? "FOK",
-      tickSize: decision.tickSize ?? "0.001",
-      negRisk: decision.negRisk ?? false,
-      estimatedFee: decision.estimatedFee
-    });
+    const plannedLegs = decision.legs?.length ? decision.legs : [decisionToLeg(decision)];
+    const refreshedLegs = await refreshPlannedLegs(plannedLegs, options);
+    if (refreshedLegs.length === 0) return stalePlanResult(decision);
+
+    const results = await Promise.all(refreshedLegs.map(async (leg) => {
+      const result = await client.placeLimitBuy({
+        tokenId: leg.tokenId,
+        price: leg.price,
+        size: leg.shares,
+        notional: leg.notional,
+        orderType: options.orderType ?? "FOK",
+        tickSize: leg.tickSize ?? "0.001",
+        negRisk: leg.negRisk ?? false,
+        estimatedFee: leg.estimatedFee
+      });
+      return tradeResultToLeg(result);
+    }));
+
+    return aggregateLiveResults(decision, results);
   }
+}
+
+function decisionToLeg(decision: Extract<TradeDecision, { action: "BUY" }>): BuyTradeLeg {
+  const leg: BuyTradeLeg = {
+    eventSlug: decision.eventSlug,
+    marketSlug: decision.marketSlug,
+    question: decision.question,
+    tokenId: decision.tokenId,
+    conditionId: decision.conditionId,
+    outcome: decision.outcome,
+    price: decision.bestAsk,
+    availableSize: decision.availableSize,
+    shares: decision.shares,
+    notional: decision.notional,
+    estimatedFee: decision.estimatedFee,
+    estimatedNetReturn: decision.estimatedNetReturn
+  };
+  if (decision.line !== undefined) leg.line = decision.line;
+  if (decision.strategy !== undefined) leg.strategy = decision.strategy;
+  if (decision.lossRequiresGoals !== undefined) leg.lossRequiresGoals = decision.lossRequiresGoals;
+  if (decision.locked !== undefined) leg.locked = decision.locked;
+  if (decision.tickSize !== undefined) leg.tickSize = decision.tickSize;
+  if (decision.negRisk !== undefined) leg.negRisk = decision.negRisk;
+  if (decision.tailWindowSource !== undefined) leg.tailWindowSource = decision.tailWindowSource;
+  if (decision.tailWindowDetails !== undefined) leg.tailWindowDetails = decision.tailWindowDetails;
+  return leg;
+}
+
+async function refreshPlannedLeg(leg: BuyTradeLeg, options: LiveExecuteOptions): Promise<BuyTradeLeg | null> {
+  if (!options.refreshOrderbook) return leg;
+  let orderbook: OrderbookSnapshot;
+  try {
+    orderbook = await options.refreshOrderbook(leg.tokenId);
+  } catch {
+    return null;
+  }
+  const refreshed = refreshedExecutableNotional(leg, orderbook, options);
+  if (!refreshed) return null;
+  const { notional, price } = refreshed;
+  if (notional < (options.minimumNotional ?? 1)) return null;
+  const shares = notional / price;
+  return {
+    ...leg,
+    price,
+    availableSize: shares,
+    shares,
+    notional,
+    estimatedFee: shares * sportsTakerFeePerShare(price),
+    estimatedNetReturn: netReturnRate(price)
+  };
+}
+
+async function refreshPlannedLegs(legs: readonly BuyTradeLeg[], options: LiveExecuteOptions): Promise<BuyTradeLeg[]> {
+  const refreshed = await Promise.all(legs.map((leg) => refreshPlannedLeg(leg, options)));
+  return refreshed.filter((leg): leg is BuyTradeLeg => leg !== null);
+}
+
+function refreshedExecutableNotional(
+  leg: BuyTradeLeg,
+  orderbook: OrderbookSnapshot,
+  options: LiveExecuteOptions
+): { notional: number; price: number } | null {
+  const minimumNetReturn = options.minimumNetReturn ?? 0.005;
+  const maxEntryPrice = options.maxEntryPrice ?? 0.999999;
+  const asks = orderbook.asks
+    .filter((ask) => Number.isFinite(ask.price)
+      && Number.isFinite(ask.size)
+      && ask.price > 0
+      && ask.price < 1
+      && ask.price <= maxEntryPrice
+      && ask.size > 0
+      && netReturnRate(ask.price) >= minimumNetReturn)
+    .sort((a, b) => a.price - b.price);
+  let remaining = leg.notional;
+  let notional = 0;
+  let price = 0;
+
+  for (const ask of asks) {
+    if (remaining <= 0) break;
+    const levelNotional = ask.price * ask.size;
+    const take = Math.min(remaining, levelNotional);
+    if (take <= 0) continue;
+    notional += take;
+    remaining -= take;
+    price = ask.price;
+  }
+
+  return notional > 0 && price > 0 ? { notional, price } : null;
+}
+
+function tradeResultToLeg(result: TradeResult): TradeResultLeg {
+  const leg: TradeResultLeg = {
+    mode: result.mode,
+    status: result.status,
+    orderId: result.orderId,
+    tokenId: result.tokenId,
+    price: result.price,
+    shares: result.shares,
+    notional: result.notional,
+    fee: result.fee,
+    estimatedPayout: result.estimatedPayout,
+    estimatedProfit: result.estimatedProfit
+  };
+  if (result.raw !== undefined) leg.raw = result.raw;
+  return leg;
+}
+
+function aggregateLiveResults(decision: Extract<TradeDecision, { action: "BUY" }>, results: readonly TradeResultLeg[]): TradeResult {
+  const shares = results.reduce((total, result) => total + result.shares, 0);
+  const notional = results.reduce((total, result) => total + result.notional, 0);
+  const fee = results.reduce((total, result) => total + result.fee, 0);
+  const estimatedPayout = results.reduce((total, result) => total + result.estimatedPayout, 0);
+  const estimatedProfit = results.reduce((total, result) => total + result.estimatedProfit, 0);
+  const first = results[0]!;
+  const aggregate: TradeResult = {
+    mode: "live",
+    status: aggregateLiveStatus(results),
+    orderId: results.length === 1 ? first.orderId : `live-basket-${first.orderId}`,
+    tokenId: first.tokenId,
+    price: shares > 0 ? notional / shares : decision.bestAsk,
+    shares,
+    notional,
+    fee,
+    estimatedPayout,
+    estimatedProfit
+  };
+  if (decision.legs?.length) aggregate.legs = [...results];
+  return aggregate;
+}
+
+function aggregateLiveStatus(results: readonly TradeResultLeg[]): TradeResult["status"] {
+  if (results.length === 1) return results[0]!.status;
+  if (results.every((result) => result.status === "filled")) return "filled";
+  if (results.some((result) => result.status === "partial") || results.some((result) => result.notional > 0)) return "partial";
+  if (results.some((result) => result.status === "posted")) return "posted";
+  if (results.some((result) => result.status === "canceled")) return "canceled";
+  return "rejected";
+}
+
+function stalePlanResult(decision: Extract<TradeDecision, { action: "BUY" }>): TradeResult {
+  return {
+    mode: "live",
+    status: "rejected",
+    orderId: "live-stale-plan",
+    tokenId: decision.tokenId,
+    price: decision.bestAsk,
+    shares: 0,
+    notional: 0,
+    fee: 0,
+    estimatedPayout: 0,
+    estimatedProfit: 0,
+    raw: {
+      reason: "STALE_PLAN",
+      details: "No planned leg still had executable depth at or better than its limit price"
+    }
+  };
 }
 
 export function liveConfigFromEnv(env: Record<string, string | undefined>): LiveExecutorConfig {

@@ -84,6 +84,488 @@ describe("LiveExecutor", () => {
     });
   });
 
+  test("places every leg of a ranked BUY plan in order", async () => {
+    const decision = {
+      ...buyDecision,
+      bestAsk: 0.96,
+      shares: 8.02,
+      notional: 7.7494,
+      estimatedFee: 0.00783846,
+      estimatedNetReturn: 0.03,
+      legs: [
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "total-2p5",
+          question: "Strong vs. Weak: O/U 2.5",
+          tokenId: "total-under",
+          conditionId: "cond-total-2p5",
+          outcome: "Under",
+          strategy: "total_under_loss_ge2",
+          lossRequiresGoals: 2,
+          price: 0.96,
+          availableSize: 3,
+          shares: 3,
+          notional: 2.88,
+          estimatedFee: 0.003456,
+          estimatedNetReturn: 0.04,
+          tickSize: "0.001",
+          negRisk: false
+        },
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "weak-moneyline",
+          question: "Will Weak win?",
+          tokenId: "weak-no",
+          conditionId: "cond-weak",
+          outcome: "No",
+          strategy: "loser_no",
+          lossRequiresGoals: 2,
+          price: 0.97,
+          availableSize: 5.02,
+          shares: 5.02,
+          notional: 4.8694,
+          estimatedFee: 0.00438246,
+          estimatedNetReturn: 0.03,
+          tickSize: "0.001",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => ({
+      mode: "live",
+      status: "filled",
+      orderId: `live-${order.tokenId}`,
+      tokenId: order.tokenId,
+      price: order.price,
+      shares: order.size,
+      notional: order.notional,
+      fee: order.estimatedFee,
+      estimatedPayout: order.size,
+      estimatedProfit: order.size - order.notional - order.estimatedFee
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(decision, { orderType: "FAK" });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      shares: expect.closeTo(8.02, 8),
+      notional: expect.closeTo(7.7494, 8),
+      legs: [
+        { tokenId: "total-under", price: 0.96 },
+        { tokenId: "weak-no", price: 0.97 }
+      ]
+    });
+    expect(placeLimitBuy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      tokenId: "total-under",
+      price: 0.96,
+      notional: 2.88,
+      orderType: "FAK"
+    }));
+    expect(placeLimitBuy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      tokenId: "weak-no",
+      price: 0.97,
+      notional: expect.closeTo(4.8694, 8),
+      orderType: "FAK"
+    }));
+  });
+
+  test("refreshes depth before live legs and skips prices below the return floor", async () => {
+    const decision = {
+      ...buyDecision,
+      bestAsk: 0.96,
+      shares: 8.02,
+      notional: 7.7494,
+      estimatedFee: 0.00783846,
+      estimatedNetReturn: 0.03,
+      legs: [
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "total-2p5",
+          question: "Strong vs. Weak: O/U 2.5",
+          tokenId: "total-under",
+          conditionId: "cond-total-2p5",
+          outcome: "Under",
+          strategy: "total_under_loss_ge2",
+          lossRequiresGoals: 2,
+          price: 0.96,
+          availableSize: 3,
+          shares: 3,
+          notional: 2.88,
+          estimatedFee: 0.003456,
+          estimatedNetReturn: 0.04,
+          tickSize: "0.001",
+          negRisk: false
+        },
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "weak-moneyline",
+          question: "Will Weak win?",
+          tokenId: "weak-no",
+          conditionId: "cond-weak",
+          outcome: "No",
+          strategy: "loser_no",
+          lossRequiresGoals: 2,
+          price: 0.97,
+          availableSize: 5.02,
+          shares: 5.02,
+          notional: 4.8694,
+          estimatedFee: 0.00438246,
+          estimatedNetReturn: 0.03,
+          tickSize: "0.001",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => ({
+      mode: "live",
+      status: "filled",
+      orderId: `live-${order.tokenId}`,
+      tokenId: order.tokenId,
+      price: order.price,
+      shares: order.size,
+      notional: order.notional,
+      fee: order.estimatedFee,
+      estimatedPayout: order.size,
+      estimatedProfit: order.size - order.notional - order.estimatedFee
+    }));
+    const refreshOrderbook = vi.fn(async (tokenId: string) => ({
+      tokenId,
+      bids: [],
+      asks: tokenId === "total-under"
+        ? [{ price: 0.96, size: 3 }]
+        : [{ price: 0.995, size: 100 }]
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(decision, {
+      orderType: "FAK",
+      refreshOrderbook,
+      minimumNotional: 1,
+      minimumNetReturn: 0.005,
+      maxEntryPrice: 0.999999
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      tokenId: "total-under",
+      notional: 2.88,
+      legs: [
+        { tokenId: "total-under", price: 0.96, notional: 2.88 }
+      ]
+    });
+    expect(refreshOrderbook).toHaveBeenCalledTimes(2);
+    expect(placeLimitBuy).toHaveBeenCalledTimes(1);
+    expect(placeLimitBuy).toHaveBeenCalledWith(expect.objectContaining({
+      tokenId: "total-under",
+      price: 0.96
+    }));
+  });
+
+  test("reprices a live leg when the refreshed price still clears the return floor", async () => {
+    const decision = {
+      ...buyDecision,
+      bestAsk: 0.97,
+      shares: 5.02,
+      notional: 4.8694,
+      estimatedFee: 0.00438246,
+      estimatedNetReturn: 0.03,
+      legs: [
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "weak-moneyline",
+          question: "Will Weak win?",
+          tokenId: "weak-no",
+          conditionId: "cond-weak",
+          outcome: "No",
+          strategy: "loser_no",
+          lossRequiresGoals: 2,
+          price: 0.97,
+          availableSize: 5.02,
+          shares: 5.02,
+          notional: 4.8694,
+          estimatedFee: 0.00438246,
+          estimatedNetReturn: 0.03,
+          tickSize: "0.001",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => ({
+      mode: "live",
+      status: "filled",
+      orderId: `live-${order.tokenId}`,
+      tokenId: order.tokenId,
+      price: order.price,
+      shares: order.size,
+      notional: order.notional,
+      fee: order.estimatedFee,
+      estimatedPayout: order.size,
+      estimatedProfit: order.size - order.notional - order.estimatedFee
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(decision, {
+      orderType: "FAK",
+      refreshOrderbook: async () => ({
+        tokenId: "weak-no",
+        bids: [],
+        asks: [{ price: 0.975, size: 100 }]
+      }),
+      minimumNotional: 1,
+      minimumNetReturn: 0.005,
+      maxEntryPrice: 0.999999
+    });
+
+    expect(result).toMatchObject({
+      status: "filled",
+      tokenId: "weak-no",
+      price: 0.975,
+      notional: expect.closeTo(4.8694, 8)
+    });
+    expect(placeLimitBuy).toHaveBeenCalledWith(expect.objectContaining({
+      tokenId: "weak-no",
+      price: 0.975,
+      notional: expect.closeTo(4.8694, 8)
+    }));
+  });
+
+  test("refreshes planned live legs concurrently before placing orders", async () => {
+    const decision = {
+      ...buyDecision,
+      bestAsk: 0.96,
+      shares: 8.02,
+      notional: 7.7494,
+      estimatedFee: 0.00783846,
+      estimatedNetReturn: 0.03,
+      legs: [
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "total-2p5",
+          question: "Strong vs. Weak: O/U 2.5",
+          tokenId: "total-under",
+          conditionId: "cond-total-2p5",
+          outcome: "Under",
+          strategy: "total_under_loss_ge2",
+          lossRequiresGoals: 2,
+          price: 0.96,
+          availableSize: 3,
+          shares: 3,
+          notional: 2.88,
+          estimatedFee: 0.003456,
+          estimatedNetReturn: 0.04,
+          tickSize: "0.001",
+          negRisk: false
+        },
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "weak-moneyline",
+          question: "Will Weak win?",
+          tokenId: "weak-no",
+          conditionId: "cond-weak",
+          outcome: "No",
+          strategy: "loser_no",
+          lossRequiresGoals: 2,
+          price: 0.97,
+          availableSize: 5.02,
+          shares: 5.02,
+          notional: 4.8694,
+          estimatedFee: 0.00438246,
+          estimatedNetReturn: 0.03,
+          tickSize: "0.001",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => ({
+      mode: "live",
+      status: "filled",
+      orderId: `live-${order.tokenId}`,
+      tokenId: order.tokenId,
+      price: order.price,
+      shares: order.size,
+      notional: order.notional,
+      fee: order.estimatedFee,
+      estimatedPayout: order.size,
+      estimatedProfit: order.size - order.notional - order.estimatedFee
+    }));
+    const refreshResolvers = new Map<string, (book: { tokenId: string; bids: never[]; asks: Array<{ price: number; size: number }> }) => void>();
+    const refreshOrderbook = vi.fn((tokenId: string) => new Promise<{ tokenId: string; bids: never[]; asks: Array<{ price: number; size: number }> }>((resolve) => {
+      refreshResolvers.set(tokenId, resolve);
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const executePromise = executor.execute(decision, {
+      orderType: "FAK",
+      refreshOrderbook,
+      minimumNotional: 1
+    });
+    await Promise.resolve();
+    const callsBeforeAnyRefreshResolved = refreshOrderbook.mock.calls.length;
+
+    expect(placeLimitBuy).not.toHaveBeenCalled();
+    refreshResolvers.get("total-under")?.({ tokenId: "total-under", bids: [], asks: [{ price: 0.96, size: 3 }] });
+    await Promise.resolve();
+    refreshResolvers.get("weak-no")?.({ tokenId: "weak-no", bids: [], asks: [{ price: 0.97, size: 5.02 }] });
+    const result = await executePromise;
+
+    expect(callsBeforeAnyRefreshResolved).toBe(2);
+    expect(result).toMatchObject({
+      status: "filled",
+      legs: [
+        { tokenId: "total-under" },
+        { tokenId: "weak-no" }
+      ]
+    });
+  });
+
+  test("places refreshed live legs concurrently", async () => {
+    const decision = {
+      ...buyDecision,
+      bestAsk: 0.96,
+      shares: 8.02,
+      notional: 7.7494,
+      estimatedFee: 0.00783846,
+      estimatedNetReturn: 0.03,
+      legs: [
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "total-2p5",
+          question: "Strong vs. Weak: O/U 2.5",
+          tokenId: "total-under",
+          conditionId: "cond-total-2p5",
+          outcome: "Under",
+          strategy: "total_under_loss_ge2",
+          lossRequiresGoals: 2,
+          price: 0.96,
+          availableSize: 3,
+          shares: 3,
+          notional: 2.88,
+          estimatedFee: 0.003456,
+          estimatedNetReturn: 0.04,
+          tickSize: "0.001",
+          negRisk: false
+        },
+        {
+          eventSlug: buyDecision.eventSlug,
+          marketSlug: "weak-moneyline",
+          question: "Will Weak win?",
+          tokenId: "weak-no",
+          conditionId: "cond-weak",
+          outcome: "No",
+          strategy: "loser_no",
+          lossRequiresGoals: 2,
+          price: 0.97,
+          availableSize: 5.02,
+          shares: 5.02,
+          notional: 4.8694,
+          estimatedFee: 0.00438246,
+          estimatedNetReturn: 0.03,
+          tickSize: "0.001",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const orderResolvers = new Map<string, (result: TradeResult) => void>();
+    const placeLimitBuy = vi.fn((order: LiveOrderRequest) => new Promise<TradeResult>((resolve) => {
+      orderResolvers.set(order.tokenId, resolve);
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const executePromise = executor.execute(decision, { orderType: "FAK" });
+    await vi.waitFor(() => {
+      expect(placeLimitBuy).toHaveBeenCalledTimes(2);
+    });
+    const callsBeforeAnyOrderResolved = placeLimitBuy.mock.calls.length;
+
+    orderResolvers.get("total-under")?.({
+      mode: "live",
+      status: "filled",
+      orderId: "live-total-under",
+      tokenId: "total-under",
+      price: 0.96,
+      shares: 3,
+      notional: 2.88,
+      fee: 0.003456,
+      estimatedPayout: 3,
+      estimatedProfit: 3 - 2.88 - 0.003456
+    });
+    orderResolvers.get("weak-no")?.({
+      mode: "live",
+      status: "filled",
+      orderId: "live-weak-no",
+      tokenId: "weak-no",
+      price: 0.97,
+      shares: 5.02,
+      notional: 4.8694,
+      fee: 0.00438246,
+      estimatedPayout: 5.02,
+      estimatedProfit: 5.02 - 4.8694 - 0.00438246
+    });
+    const result = await executePromise;
+
+    expect(callsBeforeAnyOrderResolved).toBe(2);
+    expect(result).toMatchObject({
+      status: "filled",
+      legs: [
+        { tokenId: "total-under" },
+        { tokenId: "weak-no" }
+      ]
+    });
+  });
+
   test("uses deposit wallet env as the live funder with POLY_1271 signing", async () => {
     const placeLimitBuy = vi.fn(async (): Promise<TradeResult> => ({
       mode: "live",

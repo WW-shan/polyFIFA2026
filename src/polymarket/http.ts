@@ -4,6 +4,8 @@ export interface HttpOptions {
   timeoutMs?: number;
   proxyUrl?: string;
   headers?: Record<string, string>;
+  method?: string;
+  body?: string;
 }
 
 let cachedProxyUrl: string | undefined;
@@ -12,6 +14,14 @@ let cachedDispatcher: ProxyAgent | undefined;
 export async function fetchJson<T = unknown>(url: string, options: HttpOptions = {}): Promise<T> {
   const response = await fetchWithTimeout(url, options);
   return (await response.json()) as T;
+}
+
+export async function postJson<T = unknown>(url: string, body: string, options: HttpOptions = {}): Promise<T> {
+  return fetchJson<T>(url, {
+    ...options,
+    method: "POST",
+    body
+  });
 }
 
 export async function fetchText(url: string, options: HttpOptions = {}): Promise<string> {
@@ -26,6 +36,8 @@ async function fetchWithTimeout(url: string, options: HttpOptions): Promise<Resp
   try {
     const response = await fetch(url, {
       headers: options.headers,
+      method: options.method,
+      body: options.body,
       signal: controller.signal,
       dispatcher: dispatcherFor(options.proxyUrl ?? proxyFromEnv())
     } as RequestInit & { dispatcher?: ProxyAgent });

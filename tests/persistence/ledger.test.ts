@@ -120,4 +120,48 @@ describe("LiveLedger", () => {
     expect(await ledger.hasActiveEventTrade("event-1")).toBe(true);
     expect(await ledger.hasActiveTrade("event-1", "token-1")).toBe(true);
   });
+
+  test("marks redeemed condition ids inactive after settlement", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-06-23T10:00:00.000Z",
+      mode: "live",
+      status: "filled",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "order-1",
+      price: 0.97,
+      shares: 1,
+      notional: 0.97
+    });
+    await ledger.recordTrade({
+      timestamp: "2026-06-23T10:01:00.000Z",
+      mode: "live",
+      status: "filled",
+      eventSlug: "event-2",
+      marketSlug: "market-2",
+      tokenId: "token-2",
+      conditionId: "condition-2",
+      outcome: "No",
+      orderId: "order-2",
+      price: 0.98,
+      shares: 1,
+      notional: 0.98
+    });
+
+    await ledger.markRedeemedByConditionIds(["condition-1"]);
+
+    expect(await ledger.hasActiveEventTrade("event-1")).toBe(false);
+    expect(await ledger.hasActiveEventTrade("event-2")).toBe(true);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ eventSlug: "event-1", status: "redeemed" }),
+      expect.objectContaining({ eventSlug: "event-2", status: "filled" })
+    ]);
+  });
 });

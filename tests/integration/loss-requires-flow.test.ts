@@ -44,12 +44,27 @@ function book(tokenId: string, price: number, size = 100): OrderbookSnapshot {
 }
 
 describe("loss-requires decision flow", () => {
-  test("buys a 0.999 positive-net opportunity when no minimum profit threshold is set", () => {
+  test("skips a 0.999 positive-net opportunity below the default 0.5% minimum return", () => {
     const decision = runDecisionFlow({
       match,
       markets,
       orderbooks: [book("weak-no", 0.999, 25)],
       stake: 10
+    });
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "RETURN_TOO_LOW"
+    });
+  });
+
+  test("can explicitly lower the minimum return for experiments", () => {
+    const decision = runDecisionFlow({
+      match,
+      markets,
+      orderbooks: [book("weak-no", 0.999, 25)],
+      stake: 10,
+      thresholds: { minimumNetReturn: 0 }
     });
 
     expect(decision).toMatchObject({
@@ -79,6 +94,59 @@ describe("loss-requires decision flow", () => {
       tokenId: "total-under",
       bestAsk: 0.97
     });
+  });
+
+  test("builds a ranked buy plan across all profitable candidates until the return floor is reached", () => {
+    const decision = runDecisionFlow({
+      match,
+      markets,
+      orderbooks: [
+        {
+          tokenId: "weak-no",
+          bids: [],
+          asks: [
+            { price: 0.97, size: 5.02 },
+            { price: 0.995, size: 100 }
+          ]
+        },
+        {
+          tokenId: "total-under",
+          bids: [],
+          asks: [
+            { price: 0.96, size: 3 },
+            { price: 0.98, size: 20 },
+            { price: 0.995, size: 100 }
+          ]
+        }
+      ],
+      stake: 40
+    });
+
+    expect(decision).toMatchObject({
+      action: "BUY",
+      notional: expect.closeTo(27.3494, 6),
+      legs: [
+        {
+          tokenId: "total-under",
+          price: 0.96,
+          shares: 3,
+          notional: 2.88
+        },
+        {
+          tokenId: "weak-no",
+          price: 0.97,
+          shares: 5.02,
+          notional: expect.closeTo(4.8694, 8)
+        },
+        {
+          tokenId: "total-under",
+          price: 0.98,
+          shares: expect.closeTo(20, 8),
+          notional: 19.6
+        }
+      ]
+    });
+    expect(decision.action === "BUY" ? decision.legs?.map((leg) => leg.price) : []).not.toContain(0.995);
   });
 
   test("does not prefer higher lossRequiresGoals over a larger tradable edge", () => {

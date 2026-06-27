@@ -14,7 +14,7 @@ Start here:
 
 ## What The Bot Does
 
-This phase handles World Cup single-match markets where the selected bet only loses after at least two adverse goals, plus locked result markets. It accepts an explicit match state, builds all eligible strategy candidates, checks CLOB asks after fees, and sends the highest estimated net-return positive decision to either a paper executor or an opt-in live CLOB executor.
+This phase handles World Cup single-match markets where the selected bet only loses after at least two adverse goals, plus locked result markets. It accepts an explicit match state, builds all eligible strategy candidates, ranks profitable CLOB ask levels after fees, and sends the resulting buy-leg plan to either a paper executor or an opt-in live CLOB executor.
 
 Examples:
 
@@ -24,9 +24,9 @@ Examples:
 - 4-0 Spain: buy `Spain -2.5`, because one adverse goal still covers and two adverse goals lose.
 - Already-hit markets such as total `Over` or BTTS `Yes` are included as locked candidates.
 
-Default entry logic has no minimum profit hurdle beyond positive estimated net return after the Polymarket sports taker fee. Since orderbook asks must be `< 1`, the default `minimumNetReturn` is `0` and `maxEntryPrice` is `0.999999`.
+Default entry logic requires at least `0.5%` estimated net return after the Polymarket sports taker fee. The default `minimumNetReturn` is `0.005` and `maxEntryPrice` is `0.999999`; ask levels below that return are skipped instead of queued for a later comparison.
 
-Capital allocation is edge-first, not strategy-name-first: once candidates pass `lossRequiresGoals >= 2`, the bot chooses the currently executable candidate with the largest `estimatedNetReturn`. It only counts size available at that best ask price, so worse ask levels are not treated as part of the same edge.
+Capital allocation is edge-first, not strategy-name-first: once candidates pass `lossRequiresGoals >= 2`, the bot ranks every profitable ask level across all eligible markets by `estimatedNetReturn`. It buys ranked legs until the stake is exhausted, the next level would fall below the configured return floor, or the remaining/current depth is below the minimum notional. The default `minimumNotional` is `1` pUSD, so it only filters dust-sized legs that are too small to submit cleanly. A tiny best ask level no longer blocks use of the next profitable candidate or price level.
 
 ## Setup
 
@@ -79,7 +79,7 @@ npm run cli -- \
   --order-type FOK
 ```
 
-If `--event-slug` is used, the CLI fetches the Polymarket sports page, extracts the current `score`, `period`, `elapsed`, and remaining-time fields, then extracts strategy markets from the same event. If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then picks the highest estimated net-return BUY.
+If `--event-slug` is used, the CLI fetches the Polymarket sports page, extracts the current `score`, `period`, `elapsed`, and remaining-time fields, then extracts strategy markets from the same event. If `--markets-file` is omitted, the CLI fetches the Polymarket sports page for the match event slug and extracts strategy markets from the Next.js initial state. If `--orderbook-file` is omitted, it fetches CLOB orderbooks for all eligible candidate tokens, then builds the ranked buy-leg plan.
 
 The tail-entry window is controlled by `--entry-window-minutes` and the live timing mode described below.
 
@@ -107,15 +107,23 @@ npm run live:watch:worldcup -- --entry-window-minutes 3
 
 Single-event watch mode (`--watch true --event-slug ...`) polls the Polymarket sports page for that match. If no trade is available, it sleeps `--interval-ms` milliseconds before retrying. `--max-iterations` limits page-poll iterations and is mainly for tests/dry runs.
 
-World Cup watch mode (`--watch --worldcup true`) discovers open World Cup events and uses Polymarket Sports WebSocket updates as the primary live score source. Incoming updates are matched to events by `slug`, `gameId`, and `sportradarGameId`. If no trade is available for an update, it waits for the next matched Sports WebSocket update instead of sleeping; `--interval-ms` does not apply. `--max-iterations` counts matched Sports WebSocket updates.
+World Cup watch mode (`--watch --worldcup true`) discovers open World Cup events and uses Polymarket Sports WebSocket updates as the primary live score source. Incoming updates are matched to events by `slug`, `gameId`, and `sportradarGameId`. If no trade is available for an update, it waits for the next matched Sports WebSocket update instead of fixed page polling. Once an active second-half match is close enough for verified 365Scores clock polling, all active matches are polled concurrently and the sleep between 365 clock checks is capped at 1000 ms; a shorter `--interval-ms` still makes tests or experiments poll faster. `--max-iterations` counts matched Sports updates and 365 clock poll passes.
+
+World Cup watch buys immediately once a ranked leg passes the 0.5% default minimum net return. It does not wait 60 seconds for cross-match comparison by default. Deferred comparison is only an explicit experiment: pass `--minimum-net-return 0`, `--instant-buy-net-return N`, and `--candidate-compare-wait-ms N` together if you want to test that behavior.
 
 The entry window is strict: World Cup watch mode overlays Polymarket Sports updates with the 365Scores public single-game clock, then opens only when `2nd Half + addedTime + preciseGameTime` computes verified `remainingSeconds <= 180`. There is no `87'` or `90:00+` fallback. If 365Scores does not provide the required clock fields, the bot returns `MATCH_NOT_LATE_ENOUGH` and does not fetch balances, orderbooks, or place orders.
 
 Set `POLY_LIVE_AUDIT_FILE=data/live-sports-audit.ndjson` to append raw Sports WebSocket updates and normalized match-update audit records as NDJSON for replay/debugging.
 
-Watch mode stops as soon as one order is filled/partial/posted/rejected or a live error occurs.
+Production World Cup watch is intended to stay up 24/7. With no `--max-iterations`, it keeps rediscovering World Cup events when no events are open, reconnects after transient Sports stream failures, and continues watching other or later matches after one event gets a filled/partial/posted buy plan. `--max-iterations` is now only a finite dry-run/test guard; when it is set, the command returns `watch_complete` with the last decision/trade summary.
 
-Live capital allocation is all-in by default: if `--stake` is omitted, the bot selects the best executable positive-edge candidate, then uses `pUSD balance - POLY_BALANCE_BUFFER` as the order notional. Passing `--stake N` changes this to `min(N, pUSD balance - POLY_BALANCE_BUFFER)`.
+Live capital allocation is all-in by default: if `--stake` is omitted, the bot builds the ranked leg plan above the configured minimum net return, then uses `pUSD balance - POLY_BALANCE_BUFFER` as the maximum order notional. Passing `--stake N` changes this to `min(N, pUSD balance - POLY_BALANCE_BUFFER)`. Live execution refreshes all planned leg orderbooks concurrently, reprices each leg to the current executable ask as long as it still clears the configured return floor and `maxEntryPrice`, then submits the remaining live legs concurrently as limit buys. If a refreshed leg falls below the return floor or below `minimumNotional`, that leg is skipped instead of delaying or chasing bad price.
+
+### Auto settlement
+
+Resolved winning Polymarket CTF positions must be redeemed before they become reusable pUSD. In live World Cup watch mode, auto redeem is enabled by default when a live deposit/funder wallet and `POLY_PRIVATE_KEY` are configured. It runs in the background on an interval, so it does not block final-3-minute clock checks or order placement. It scans the Data API for `redeemable=true` current positions, routes regular markets through `CtfCollateralAdapter`, routes negative-risk markets through `NegRiskCtfCollateralAdapter`, submits a deposit-wallet batch through the Polymarket relayer, and then the next live balance read can compound the returned pUSD.
+
+Set `POLY_AUTO_REDEEM=false` to disable it. Optional knobs: `POLY_AUTO_REDEEM_INTERVAL_MS` defaults to `60000`, `POLY_AUTO_REDEEM_SIZE_THRESHOLD` defaults to `0.000001`, `POLY_AUTO_REDEEM_DEADLINE_SECONDS` defaults to `600`, and `POLY_RELAYER_URL` defaults to `https://relayer-v2.polymarket.com`. If your relayer requires auth, provide `POLY_RELAYER_API_KEY` / `POLY_RELAYER_API_KEY_ADDRESS` or builder signing headers via `POLY_BUILDER_API_KEY`, `POLY_BUILDER_API_SECRET`, and `POLY_BUILDER_PASSPHRASE`.
 
 ## Live Smoke Guard
 
@@ -145,6 +153,7 @@ Optional live env vars:
 - `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order
 - `POLY_LIVE_AUDIT_FILE` writes raw Sports WebSocket updates and normalized match-update audit records as NDJSON
 - `POLY_365SCORES_TIMEZONE` defaults to `Asia/Shanghai`; it is used only for 365Scores discovery/date parameters
+- `POLY_AUTO_REDEEM=false` disables background resolved-position redemption during live World Cup watch
 - `POLY_RPC_URL` for viem wallet transport
 - `POLY_CHAIN_ID` defaults to `137`
 - `POLY_CLOB_HOST` defaults to `https://clob.polymarket.com`

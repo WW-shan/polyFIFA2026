@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { BuyTradeDecision, TailStrategy, TradeResult } from "../domain/types.js";
 
-export type LedgerStatus = "filled" | "partial" | "posted" | "rejected" | "canceled";
+export type LedgerStatus = "filled" | "partial" | "posted" | "rejected" | "canceled" | "redeemed";
 
 export interface LedgerTradeEntry {
   timestamp: string;
@@ -54,6 +54,21 @@ export class LiveLedger {
     await writeFile(this.filePath, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
   }
 
+  async markRedeemedByConditionIds(conditionIds: readonly string[]): Promise<void> {
+    const conditionSet = new Set(conditionIds.map((conditionId) => conditionId.toLowerCase()));
+    if (conditionSet.size === 0) return;
+    const entries = await this.readEntries();
+    let changed = false;
+    const updated = entries.map((entry) => {
+      if (!conditionSet.has(entry.conditionId.toLowerCase()) || !isActiveLedgerStatus(entry.status)) return entry;
+      changed = true;
+      return { ...entry, status: "redeemed" as const };
+    });
+    if (!changed) return;
+    await mkdir(dirname(this.filePath), { recursive: true });
+    await writeFile(this.filePath, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
+  }
+
   async recordResult(decision: BuyTradeDecision, result: TradeResult, timestamp = new Date()): Promise<void> {
     const entry: LedgerTradeEntry = {
       timestamp: timestamp.toISOString(),
@@ -91,5 +106,6 @@ function isLedgerStatus(value: unknown): value is LedgerStatus {
     || value === "partial"
     || value === "posted"
     || value === "rejected"
-    || value === "canceled";
+    || value === "canceled"
+    || value === "redeemed";
 }

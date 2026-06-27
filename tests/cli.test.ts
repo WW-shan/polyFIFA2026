@@ -551,9 +551,13 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
-      status: "filled",
-      action: "BUY",
-      eventSlug: "fifwc-esp-ksa-2026-06-21"
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        action: "BUY",
+        eventSlug: "fifwc-esp-ksa-2026-06-21"
+      }
     });
   });
 
@@ -597,11 +601,15 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
-      status: "filled",
-      action: "BUY",
-      decision: {
-        tailWindowSource: "remaining_seconds",
-        tailWindowDetails: expect.stringContaining("365scores_added_time_precise_game_time")
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        action: "BUY",
+        decision: {
+          tailWindowSource: "remaining_seconds",
+          tailWindowDetails: expect.stringContaining("365scores_added_time_precise_game_time")
+        }
       }
     });
   });
@@ -648,15 +656,412 @@ describe("CLI", () => {
     expect(clockCalls).toBeGreaterThanOrEqual(3);
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
-      status: "filled",
-      action: "BUY",
-      decision: {
+      status: "watch_complete",
+      last: {
+        status: "filled",
+        action: "BUY",
+        decision: {
+          tailWindowSource: "remaining_seconds"
+        }
+      }
+    });
+  });
+
+  test("worldcup watch does not let a slow interval delay verified 365Scores clock polling near the entry window", async () => {
+    let clockCalls = 0;
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        homeTeam: "Spain",
+        awayTeam: "Saudi Arabia",
+        homeGoals: 4,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      };
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--interval-ms", "5000",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => {
+        clockCalls += 1;
+        return clockCalls <= 2 ? null : {
+          remainingSeconds: 120,
+          remainingSecondsSource: "365scores_added_time_precise_game_time"
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(clockCalls).toBeGreaterThanOrEqual(3);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      last: {
+        status: "filled",
+        action: "BUY",
+        decision: {
+          tailWindowSource: "remaining_seconds"
+        }
+      }
+    });
+  });
+
+  test("worldcup watch keeps running after filling one match and can fill a later simultaneous match", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-two-live-matches-"));
+    const marketsFile = join(dir, "markets.json");
+    const firstSlug = "fifwc-first-simultaneous-2026-06-27";
+    const secondSlug = "fifwc-second-simultaneous-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(firstSlug, "First", "Match", 5.5, "first-under"),
+      totalMarket(secondSlug, "Second", "Match", 5.5, "second-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(firstSlug, "First", "Match", 2, 2);
+      yield tailMatch(secondSlug, "Second", "Match", 2, 2);
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "10",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [
+        { eventSlug: firstSlug, homeTeam: "First", awayTeam: "Match" },
+        { eventSlug: secondSlug, homeTeam: "Second", awayTeam: "Match" }
+      ],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug: secondSlug
+      }
+    });
+    expect(clobMock.fetchOrderbook).toHaveBeenCalledWith("first-under");
+    expect(clobMock.fetchOrderbook).toHaveBeenCalledWith("second-under");
+  });
+
+  test("worldcup watch polls verified 365Scores clocks concurrently for simultaneous active matches", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-concurrent-clock-poll-"));
+    const marketsFile = join(dir, "markets.json");
+    const firstSlug = "fifwc-clock-first-2026-06-27";
+    const secondSlug = "fifwc-clock-second-2026-06-27";
+    const clockResolvers = new Map<string, (patch: Partial<MatchState> | null) => void>();
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(firstSlug, "Clock", "First", 5.5, "clock-first-under"),
+      totalMarket(secondSlug, "Clock", "Second", 5.5, "clock-second-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    const resultPromise = runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "10",
+      "--interval-ms", "0",
+      "--max-iterations", "4"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [
+        { eventSlug: firstSlug, homeTeam: "Clock", awayTeam: "First", startTime: new Date(Date.now() - 95 * 60_000).toISOString() },
+        { eventSlug: secondSlug, homeTeam: "Clock", awayTeam: "Second", startTime: new Date(Date.now() - 95 * 60_000).toISOString() }
+      ],
+      fetchMatchState: async (eventSlug) => ({
+        eventSlug,
+        homeTeam: "Clock",
+        awayTeam: eventSlug === firstSlug ? "First" : "Second",
+        homeGoals: 2,
+        awayGoals: 2,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      }),
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => {
+        return new Promise<Partial<MatchState> | null>((resolve) => {
+          clockResolvers.set(match.eventSlug, resolve);
+        });
+      }
+    });
+
+    await vi.waitFor(() => {
+      expect(clockResolvers.size).toBe(2);
+    });
+    for (const resolve of clockResolvers.values()) {
+      resolve({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      });
+    }
+    const result = await resultPromise;
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug: secondSlug
+      }
+    });
+  });
+
+  test("worldcup watch seeds late active matches after restart before the sports feed updates again", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-restart-late-seed-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-sen-irq-2026-06-26";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Senegal", "Iraq", 6.5, "senegal-iraq-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{
+        eventSlug,
+        homeTeam: "Senegal",
+        awayTeam: "Iraq",
+        startTime: new Date(Date.now() - 95 * 60_000).toISOString()
+      }],
+      fetchMatchState: async () => ({
+        eventSlug,
+        homeTeam: "Senegal",
+        awayTeam: "Iraq",
+        homeGoals: 5,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      }),
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => ({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        eventSlug,
+        action: "BUY",
         tailWindowSource: "remaining_seconds"
       }
     });
   });
 
-  test("worldcup watch defers a sub-threshold candidate and buys a later instant candidate", async () => {
+  test("worldcup watch instantly buys candidates at the default 0.5% minimum return", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-default-instant-threshold-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-default-threshold-2026-06-26";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Default", "Threshold", 5.5, "default-threshold-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.9948, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Default", "Threshold", 2, 2);
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--max-iterations", "1",
+      "--interval-ms", "0"
+    ], {
+      POLY_INSTANT_BUY_NET_RETURN: "0.01"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Default", awayTeam: "Threshold" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        eventSlug,
+        bestAsk: 0.9948
+      }
+    });
+  });
+
+  test("worldcup live watch keeps running after one event execution error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-live-exec-error-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const firstSlug = "fifwc-live-error-first-2026-06-27";
+    const secondSlug = "fifwc-live-error-second-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(firstSlug, "Live", "Error", 5.5, "live-error-first-under"),
+      totalMarket(secondSlug, "Live", "Next", 5.5, "live-error-second-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(firstSlug, "Live", "Error", 2, 2);
+      yield tailMatch(secondSlug, "Live", "Next", 2, 2);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "10",
+      "--ledger-file", ledgerFile,
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [
+        { eventSlug: firstSlug, homeTeam: "Live", awayTeam: "Error" },
+        { eventSlug: secondSlug, homeTeam: "Live", awayTeam: "Next" }
+      ],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      executeLive: async (decision) => {
+        if (decision.eventSlug === firstSlug) throw new Error("temporary CLOB execution failed");
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "live-second",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug: secondSlug
+      }
+    });
+  });
+
+  test("worldcup watch skips candidates below the default 0.5% minimum without waiting", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-default-min-return-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-default-min-return-2026-06-26";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Default", "Minimum", 5.5, "default-minimum-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.995, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Default", "Minimum", 2, 2);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--max-iterations", "1",
+      "--interval-ms", "0"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Default", awayTeam: "Minimum" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "no_trade",
+        reason: "RETURN_TOO_LOW",
+        eventSlug
+      }
+    });
+  });
+
+  test("worldcup watch uses deferred comparison only when explicitly enabled for experiments", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-instant-compare-"));
     const marketsFile = join(dir, "markets.json");
     const lowSlug = "fifwc-low-ret-2026-06-26";
@@ -683,9 +1088,11 @@ describe("CLI", () => {
       "--worldcup", "true",
       "--markets-file", marketsFile,
       "--stake", "97",
+      "--minimum-net-return", "0",
       "--instant-buy-net-return", "0.01",
       "--candidate-compare-wait-ms", "60000",
-      "--interval-ms", "5"
+      "--interval-ms", "5",
+      "--max-iterations", "2"
     ], {}, {
       fetchWorldCupEventRefs: async () => [
         { eventSlug: lowSlug, homeTeam: "Low", awayTeam: "Return" },
@@ -698,14 +1105,18 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
-      status: "filled",
-      eventSlug: highSlug,
-      marketSlug: `${highSlug}-total-3pt5`,
-      bestAsk: 0.98
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug: highSlug,
+        marketSlug: `${highSlug}-total-3pt5`,
+        bestAsk: 0.98
+      }
     });
   });
 
-  test("worldcup watch compares deferred sub-threshold candidates and buys the best after waiting", async () => {
+  test("worldcup watch executes deferred sub-threshold candidates after waiting while staying live", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-deferred-compare-"));
     const marketsFile = join(dir, "markets.json");
     const lowerSlug = "fifwc-lower-deferred-2026-06-26";
@@ -732,9 +1143,11 @@ describe("CLI", () => {
       "--worldcup", "true",
       "--markets-file", marketsFile,
       "--stake", "97",
+      "--minimum-net-return", "0",
       "--instant-buy-net-return", "0.02",
       "--candidate-compare-wait-ms", "20",
-      "--interval-ms", "5"
+      "--interval-ms", "5",
+      "--max-iterations", "10"
     ], {}, {
       fetchWorldCupEventRefs: async () => [
         { eventSlug: lowerSlug, homeTeam: "Lower", awayTeam: "Deferred" },
@@ -747,10 +1160,13 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
-      status: "filled",
-      eventSlug: betterSlug,
-      marketSlug: `${betterSlug}-total-5pt5`,
-      bestAsk: 0.985
+      status: "watch_complete",
+      last: {
+        status: "filled",
+        eventSlug: lowerSlug,
+        marketSlug: `${lowerSlug}-total-5pt5`,
+        bestAsk: 0.99
+      }
     });
   });
 
@@ -838,6 +1254,114 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch keeps rediscovering when no events are initially available", async () => {
+    let discoveryCalls = 0;
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--interval-ms", "0"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) return [];
+        throw new Error("REDISCOVERED_AFTER_NO_EVENTS");
+      }
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("REDISCOVERED_AFTER_NO_EVENTS");
+    expect(discoveryCalls).toBe(2);
+  });
+
+  test("worldcup watch rediscovers events after a sports update stream finishes", async () => {
+    let discoveryCalls = 0;
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--interval-ms", "0"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) return [{ eventSlug: "fifwc-empty-stream-2026-06-27", homeTeam: "Empty", awayTeam: "Stream" }];
+        throw new Error("REDISCOVERED_AFTER_STREAM_END");
+      },
+      watchSportsUpdates: async () => (async function* (): AsyncIterable<MatchState> {})()
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("REDISCOVERED_AFTER_STREAM_END");
+    expect(discoveryCalls).toBe(2);
+  });
+
+  test("worldcup watch reconnects instead of exiting after a transient sports stream error", async () => {
+    let discoveryCalls = 0;
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--interval-ms", "0"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) return [{ eventSlug: "fifwc-reconnect-stream-2026-06-27", homeTeam: "Reconnect", awayTeam: "Stream" }];
+        throw new Error("REDISCOVERED_AFTER_STREAM_ERROR");
+      },
+      watchSportsUpdates: async () => (async function* (): AsyncIterable<MatchState> {
+        throw new Error("temporary sports stream down");
+      })()
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("REDISCOVERED_AFTER_STREAM_ERROR");
+    expect(discoveryCalls).toBe(2);
+  });
+
+  test("worldcup live watch starts auto redeem settlement in the background", async () => {
+    const settleRedeemablePositions = vi.fn(() => new Promise<never>(() => {}));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-auto-settle-2026-06-27",
+        homeTeam: "Auto",
+        awayTeam: "Settle",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 70,
+        period: "2H",
+        isLive: true
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x00000000000000000000000000000000000000bb",
+      POLY_PRIVATE_KEY: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-auto-settle-2026-06-27", homeTeam: "Auto", awayTeam: "Settle" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      settleRedeemablePositions
+    });
+
+    expect(settleRedeemablePositions).toHaveBeenCalledTimes(1);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "no_trade",
+        reason: "MATCH_NOT_LATE_ENOUGH"
+      }
+    });
+  });
+
   test("worldcup watch reports default sports socket errors", async () => {
     const resultPromise = runCli([
       "--mode", "paper",
@@ -919,7 +1443,7 @@ describe("CLI", () => {
     expect(provider.socket?.closed).toBe(true);
   });
 
-  test("worldcup watch cleans up the default sports socket after a trade", async () => {
+  test("worldcup watch cleans up the default sports socket after max iterations following a trade", async () => {
     const resultPromise = runCli([
       "--mode", "paper",
       "--watch", "true",
@@ -953,8 +1477,12 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "paper",
-      status: "filled",
-      action: "BUY"
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        action: "BUY"
+      }
     });
     expect(provider.socket?.closed).toBe(true);
   });

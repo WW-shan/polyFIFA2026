@@ -149,6 +149,7 @@ export interface BuyTradeDecision {
   negRisk?: boolean;
   tailWindowSource?: TailWindowSource;
   tailWindowDetails?: string;
+  legs?: BuyTradeLeg[];
 }
 
 export interface NoTradeDecision {
@@ -160,9 +161,47 @@ export interface NoTradeDecision {
 
 export type TradeDecision = BuyTradeDecision | NoTradeDecision;
 
+export interface BuyTradeLeg {
+  eventSlug: string;
+  marketSlug: string;
+  question: string;
+  tokenId: string;
+  conditionId: string;
+  outcome: string;
+  line?: number;
+  strategy?: TailStrategy;
+  lossRequiresGoals?: number;
+  locked?: boolean;
+  price: number;
+  availableSize: number;
+  shares: number;
+  notional: number;
+  estimatedFee: number;
+  estimatedNetReturn: number;
+  tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
+  negRisk?: boolean;
+  tailWindowSource?: TailWindowSource;
+  tailWindowDetails?: string;
+}
+
 export interface TradeResult {
   mode: "paper" | "live";
   status: "filled" | "partial" | "posted" | "rejected" | "canceled";
+  orderId: string;
+  tokenId: string;
+  price: number;
+  shares: number;
+  notional: number;
+  fee: number;
+  estimatedPayout: number;
+  estimatedProfit: number;
+  legs?: TradeResultLeg[];
+  raw?: unknown;
+}
+
+export interface TradeResultLeg {
+  mode: "paper" | "live";
+  status: TradeResult["status"];
   orderId: string;
   tokenId: string;
   price: number;
