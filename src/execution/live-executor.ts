@@ -95,7 +95,7 @@ export class LiveExecutor {
 
     const config = requireLiveConfig(this.config);
     const client = await this.clientFactory(config);
-    const plannedLegs = decision.legs?.length ? decision.legs : [decisionToLeg(decision)];
+    const plannedLegs = combinePlannedLegsByToken(decision.legs?.length ? decision.legs : [decisionToLeg(decision)]);
     const refreshedLegs = await refreshPlannedLegs(plannedLegs, options);
     if (refreshedLegs.length === 0) return stalePlanResult(decision);
 
@@ -148,6 +148,32 @@ function decisionToLeg(decision: Extract<TradeDecision, { action: "BUY" }>): Buy
   if (decision.tailWindowSource !== undefined) leg.tailWindowSource = decision.tailWindowSource;
   if (decision.tailWindowDetails !== undefined) leg.tailWindowDetails = decision.tailWindowDetails;
   return leg;
+}
+
+function combinePlannedLegsByToken(legs: readonly BuyTradeLeg[]): BuyTradeLeg[] {
+  const groups = new Map<string, BuyTradeLeg>();
+  for (const leg of legs) {
+    const existing = groups.get(leg.tokenId);
+    if (!existing) {
+      groups.set(leg.tokenId, { ...leg });
+      continue;
+    }
+
+    const notional = existing.notional + leg.notional;
+    const price = Math.max(existing.price, leg.price);
+    const shares = notional / price;
+    groups.set(leg.tokenId, {
+      ...existing,
+      price,
+      availableSize: existing.availableSize + leg.availableSize,
+      shares,
+      notional,
+      estimatedFee: shares * sportsTakerFeePerShare(price),
+      estimatedNetReturn: netReturnRate(price),
+      lossRequiresGoals: Math.max(existing.lossRequiresGoals ?? 0, leg.lossRequiresGoals ?? 0)
+    });
+  }
+  return [...groups.values()];
 }
 
 async function refreshPlannedLeg(leg: BuyTradeLeg, options: LiveExecuteOptions): Promise<BuyTradeLeg | null> {
