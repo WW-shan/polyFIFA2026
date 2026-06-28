@@ -362,6 +362,90 @@ describe("LiveExecutor", () => {
     }));
   });
 
+  test("does not refresh a locked live leg into an implausibly low price", async () => {
+    const decision = {
+      ...buyDecision,
+      marketSlug: "fifwc-col-prt-2026-06-27-total-0pt5",
+      question: "Colombia vs. Portugal: O/U 0.5",
+      tokenId: "col-over",
+      conditionId: "cond-col-total-0p5",
+      outcome: "Over",
+      line: 0.5,
+      strategy: "total_over_locked",
+      lossRequiresGoals: 999,
+      locked: true,
+      bestAsk: 0.99,
+      shares: 100,
+      notional: 99,
+      estimatedFee: 0.0297,
+      estimatedNetReturn: 0.0098,
+      legs: [
+        {
+          eventSlug: "fifwc-col-prt-2026-06-27",
+          marketSlug: "fifwc-col-prt-2026-06-27-total-0pt5",
+          question: "Colombia vs. Portugal: O/U 0.5",
+          tokenId: "col-over",
+          conditionId: "cond-col-total-0p5",
+          outcome: "Over",
+          line: 0.5,
+          strategy: "total_over_locked",
+          lossRequiresGoals: 999,
+          locked: true,
+          price: 0.99,
+          availableSize: 100,
+          shares: 100,
+          notional: 99,
+          estimatedFee: 0.0297,
+          estimatedNetReturn: 0.0098,
+          tickSize: "0.001",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => ({
+      mode: "live",
+      status: "filled",
+      orderId: `live-${order.tokenId}`,
+      tokenId: order.tokenId,
+      price: order.price,
+      shares: order.size,
+      notional: order.notional,
+      fee: order.estimatedFee,
+      estimatedPayout: order.size,
+      estimatedProfit: order.size - order.notional - order.estimatedFee
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(decision, {
+      orderType: "FAK",
+      refreshOrderbook: async () => ({
+        tokenId: "col-over",
+        bids: [],
+        asks: [{ price: 0.18, size: 10_000 }]
+      }),
+      minimumNotional: 1,
+      minimumNetReturn: 0.005,
+      maxEntryPrice: 0.999999
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "rejected",
+      orderId: "live-stale-plan"
+    });
+    expect(placeLimitBuy).not.toHaveBeenCalled();
+  });
+
   test("combines same-token ask levels into one refreshed live order", async () => {
     const decision = {
       ...buyDecision,

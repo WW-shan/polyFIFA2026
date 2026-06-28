@@ -25,6 +25,8 @@ export function extract365ScoresClock(raw: unknown, match: MatchState): Scores36
   const game = unwrapGame(raw);
   if (!game) return null;
 
+  if (!gameTeamsMatch(game, match)) return null;
+
   const statusText = stringValue(game.statusText ?? game.shortStatusText).toLowerCase();
   const display = stringValue(game.gameTimeDisplay);
   if (!statusText.includes("2nd") && !display.startsWith("90+")) return null;
@@ -46,13 +48,6 @@ export function extract365ScoresClock(raw: unknown, match: MatchState): Scores36
     scores365GameId: numberValue(game.id) ?? match.scores365GameId ?? 0
   };
   if (patch.scores365GameId <= 0) return null;
-
-  const home = isRecord(game.homeCompetitor) ? game.homeCompetitor : null;
-  const away = isRecord(game.awayCompetitor) ? game.awayCompetitor : null;
-  const homeScore = numberValue(home?.score);
-  const awayScore = numberValue(away?.score);
-  if (homeScore !== undefined) patch.homeGoals = homeScore;
-  if (awayScore !== undefined) patch.awayGoals = awayScore;
   return patch;
 }
 
@@ -159,6 +154,14 @@ function unwrapGame(raw: unknown): Record<string, unknown> | null {
   if (!isRecord(raw)) return null;
   if (isRecord(raw.game)) return raw.game;
   return raw;
+}
+
+function gameTeamsMatch(game: Record<string, unknown>, match: MatchState): boolean {
+  const home = isRecord(game.homeCompetitor) ? stringValue(game.homeCompetitor.name) : "";
+  const away = isRecord(game.awayCompetitor) ? stringValue(game.awayCompetitor.name) : "";
+  if (!home || !away) return false;
+  return normalizeTeam(home) === normalizeTeam(match.homeTeam)
+    && normalizeTeam(away) === normalizeTeam(match.awayTeam);
 }
 
 function normalizeTeam(value: string): string {

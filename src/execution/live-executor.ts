@@ -2,6 +2,8 @@ import type { BuyTradeLeg, OrderbookSnapshot, TradeDecision, TradeResult, TradeR
 import { netReturnRate, sportsTakerFeePerShare } from "../domain/fees.js";
 import { signPoly1271Order } from "./poly1271-signature.js";
 
+const LOCKED_ENTRY_PRICE_FLOOR = 0.9;
+
 export type LiveOrderType = "FOK" | "FAK";
 export type LiveErrorCode =
   | "LIVE_CREDENTIALS_MISSING"
@@ -217,6 +219,7 @@ function refreshedExecutableNotional(
       && Number.isFinite(ask.size)
       && ask.price > 0
       && ask.price < 1
+      && (leg.locked !== true || ask.price >= LOCKED_ENTRY_PRICE_FLOOR)
       && ask.price <= maxEntryPrice
       && ask.size > 0
       && netReturnRate(ask.price) >= minimumNetReturn)

@@ -171,6 +171,17 @@ function validateTradeInputs(
     return { action: "NO_TRADE", decision: noTrade("NO_ELIGIBLE_STRATEGY", match.eventSlug, `Candidate only requires ${selected.lossRequiresGoals} adverse goal(s) to lose`) };
   }
 
+  if (!lockedConditionMatchesScore(match, selected)) {
+    return {
+      action: "NO_TRADE",
+      decision: noTrade(
+        "NO_ELIGIBLE_STRATEGY",
+        match.eventSlug,
+        `Locked candidate ${selected.strategy} is not confirmed by current score ${match.homeGoals}-${match.awayGoals}`
+      )
+    };
+  }
+
   if (orderbook.tokenId !== selected.tokenId) {
     return { action: "NO_TRADE", decision: noTrade("ORDERBOOK_UNAVAILABLE", match.eventSlug, "Orderbook token does not match selected spread token") };
   }
@@ -194,6 +205,54 @@ function validateTradeInputs(
   }
 
   return { action: "OK" };
+}
+
+function lockedConditionMatchesScore(match: MatchState, selected: SelectedStrategyMarket): boolean {
+  if (selected.locked !== true) return true;
+  if (selected.strategy === "total_over_locked") {
+    return normalizedOutcome(selected.outcome) === "over"
+      && selected.line !== undefined
+      && match.homeGoals + match.awayGoals >= overLocksAt(selected.line);
+  }
+  if (selected.strategy === "team_total_over_locked") {
+    if (normalizedOutcome(selected.outcome) !== "over" || selected.line === undefined || !selected.team) return false;
+    const score = findTeamScore(match, selected.team);
+    return score !== undefined && score >= overLocksAt(selected.line);
+  }
+  if (selected.strategy === "btts_yes_locked") {
+    return normalizedOutcome(selected.outcome) === "yes" && match.homeGoals > 0 && match.awayGoals > 0;
+  }
+  return false;
+}
+
+function overLocksAt(line: number): number {
+  return Math.floor(line) + 1;
+}
+
+function findTeamScore(match: MatchState, team: string): number | undefined {
+  const target = normalizeTeam(team);
+  const home = normalizeTeam(match.homeTeam);
+  const away = normalizeTeam(match.awayTeam);
+  if (target === home || target.includes(home) || home.includes(target)) return match.homeGoals;
+  if (target === away || target.includes(away) || away.includes(target)) return match.awayGoals;
+  return undefined;
+}
+
+function normalizedOutcome(value: string): string {
+  return normalizeTeam(value);
+}
+
+function normalizeTeam(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter((part) => part.length > 0 && part !== "and")
+    .join(" ");
 }
 
 function sortedPositiveAsks(asks: readonly PriceLevel[]): PriceLevel[] {

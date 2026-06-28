@@ -43,10 +43,53 @@ describe("365Scores live clock", () => {
       remainingSecondsSource: SCORES365_REMAINING_SECONDS_SOURCE,
       elapsedSeconds: 5589,
       minute: 93,
-      scores365GameId: 4627855,
-      homeGoals: 2,
-      awayGoals: 1
+      scores365GameId: 4627855
     });
+  });
+
+  test("does not let 365Scores overwrite the sports feed score", () => {
+    const clock = extract365ScoresClock({
+      game: {
+        id: 4627855,
+        statusText: "2nd Half",
+        gameTimeDisplay: "90+4'",
+        addedTime: 6,
+        preciseGameTime: {
+          minutes: 93,
+          seconds: 9,
+          autoProgress: true,
+          clockDirection: 1
+        },
+        homeCompetitor: { name: "Switzerland", score: 9 },
+        awayCompetitor: { name: "Canada", score: 8 }
+      }
+    }, match);
+
+    expect(clock).toMatchObject({
+      remainingSeconds: 171,
+      remainingSecondsSource: SCORES365_REMAINING_SECONDS_SOURCE
+    });
+    expect(clock).not.toHaveProperty("homeGoals");
+    expect(clock).not.toHaveProperty("awayGoals");
+  });
+
+  test("rejects game clocks whose teams do not match the current event", () => {
+    expect(extract365ScoresClock({
+      game: {
+        id: 4627855,
+        statusText: "2nd Half",
+        gameTimeDisplay: "90+4'",
+        addedTime: 6,
+        preciseGameTime: {
+          minutes: 93,
+          seconds: 9,
+          autoProgress: true,
+          clockDirection: 1
+        },
+        homeCompetitor: { name: "DR Congo", score: 3 },
+        awayCompetitor: { name: "Uzbekistan", score: 1 }
+      }
+    }, match)).toBeNull();
   });
 
   test("rejects 365Scores clocks before second-half added time is announced", () => {

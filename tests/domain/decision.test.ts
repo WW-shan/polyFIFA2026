@@ -41,8 +41,12 @@ const thresholds: DecisionThresholds = {
 };
 
 function book(asks: Array<[number, number]>): OrderbookSnapshot {
+  return bookFor(selected.tokenId, asks);
+}
+
+function bookFor(tokenId: string, asks: Array<[number, number]>): OrderbookSnapshot {
   return {
-    tokenId: selected.tokenId,
+    tokenId,
     asks: asks.map(([price, size]) => ({ price, size })),
     bids: [],
     tickSize: "0.001",
@@ -147,5 +151,42 @@ describe("buildTradeDecision", () => {
     });
 
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+  });
+
+  test("rejects a locked total-over candidate when the current score has not locked the market", () => {
+    const tokenId = "col-total-over";
+    const decision = buildTradeDecision({
+      ...match,
+      eventSlug: "fifwc-col-prt-2026-06-27",
+      homeTeam: "Colombia",
+      awayTeam: "Portugal",
+      homeGoals: 0,
+      awayGoals: 0
+    }, {
+      eventSlug: "fifwc-col-prt-2026-06-27",
+      marketSlug: "fifwc-col-prt-2026-06-27-total-0pt5",
+      question: "Colombia vs. Portugal: O/U 0.5",
+      conditionId: "cond-col-prt-total-0p5",
+      clobTokenIds: [tokenId, "col-total-under"],
+      outcomes: ["Over", "Under"],
+      line: 0.5,
+      marketType: "total",
+      outcome: "Over",
+      tokenId,
+      outcomeIndex: 0,
+      strategy: "total_over_locked",
+      lossRequiresGoals: 999,
+      locked: true
+    }, bookFor(tokenId, [[0.99, 10_000]]), {
+      ...thresholds,
+      maxEntryPrice: 0.995,
+      minimumNetReturn: 0.005
+    });
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "NO_ELIGIBLE_STRATEGY",
+      eventSlug: "fifwc-col-prt-2026-06-27"
+    });
   });
 });

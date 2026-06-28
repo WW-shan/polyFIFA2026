@@ -650,10 +650,29 @@ async function maybeFetchVerifiedClock(
 ): Promise<Partial<MatchState> | null> {
   if (match.period !== "2H" || !match.isLive || match.ended === true) return null;
   try {
-    return await fetchVerifiedClock(match, events, options);
+    return sanitizeVerifiedClockPatch(await fetchVerifiedClock(match, events, options));
   } catch {
     return null;
   }
+}
+
+function sanitizeVerifiedClockPatch(patch: Partial<MatchState> | null): Partial<MatchState> | null {
+  if (!patch) return null;
+  const safe: Partial<MatchState> = {};
+  if (isFiniteNumber(patch.remainingSeconds)) safe.remainingSeconds = patch.remainingSeconds;
+  if (patch.remainingSecondsSource === "365scores_added_time_precise_game_time") {
+    safe.remainingSecondsSource = patch.remainingSecondsSource;
+  }
+  if (isFiniteNumber(patch.elapsedSeconds)) safe.elapsedSeconds = patch.elapsedSeconds;
+  if (isFiniteNumber(patch.minute)) safe.minute = patch.minute;
+  if (isFiniteNumber(patch.scores365GameId) && patch.scores365GameId > 0) {
+    safe.scores365GameId = patch.scores365GameId;
+  }
+  return Object.keys(safe).length > 0 ? safe : null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 async function defaultSportsUpdates(

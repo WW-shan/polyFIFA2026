@@ -663,6 +663,64 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch does not let a verified clock patch change the event score", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-clock-score-guard-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-col-prt-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Colombia", "Portugal", 0.5, "col-prt-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.99, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug,
+        homeTeam: "Colombia",
+        awayTeam: "Portugal",
+        homeGoals: 0,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Colombia", awayTeam: "Portugal" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => ({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time",
+        homeGoals: 3,
+        awayGoals: 1
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "no_trade",
+        eventSlug
+      }
+    });
+    expect(clobMock.fetchOrderbook).not.toHaveBeenCalled();
+  });
+
   test("worldcup watch keeps polling 365Scores after the sports feed stops at 90 minutes", async () => {
     let clockCalls = 0;
     async function* updates(): AsyncIterable<MatchState> {
