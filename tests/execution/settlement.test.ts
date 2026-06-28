@@ -22,6 +22,7 @@ describe("auto settlement", () => {
       { conditionId: conditionA, size: "5.25", redeemable: true, negativeRisk: false, slug: "regular", eventSlug: "event-a" },
       { conditionId: conditionA, size: 5.25, redeemable: true, negativeRisk: false, slug: "regular-dupe" },
       { conditionId: conditionB, size: 2, redeemable: true, negativeRisk: true, slug: "neg-risk" },
+      { conditionId: conditionA, size: 10, redeemable: true, currentValue: 0, curPrice: 0, slug: "worthless-loser" },
       { conditionId: conditionB, size: 0, redeemable: true, negativeRisk: true },
       { conditionId: conditionA, size: 10, redeemable: false, negativeRisk: false },
       { conditionId: "not-a-condition", size: 10, redeemable: true }

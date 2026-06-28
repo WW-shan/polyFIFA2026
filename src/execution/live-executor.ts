@@ -549,7 +549,9 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
 
   const trades = Array.isArray(confirmation.trades) ? confirmation.trades : [];
   const openOrders = Array.isArray(confirmation.openOrders) ? confirmation.openOrders : [];
-  const fills = confirmedTradeFills(order, orderId, trades);
+  const tradeFills = confirmedTradeFills(order, orderId, trades);
+  const orderFill = tradeFills.length === 0 ? confirmedOrderFill(order, orderId, confirmation) : undefined;
+  const fills = orderFill ? [orderFill] : tradeFills;
   const openOrder = hasMatchingOpenOrder(order, orderId, openOrders);
   const pendingTrade = hasPendingMatchingTrade(order, orderId, trades);
   const canceled = isCancelConfirmed(orderId, confirmation.cancelResponse);
@@ -641,6 +643,23 @@ function confirmedTradeFills(order: LiveOrderRequest, orderId: string, trades: u
   return fills;
 }
 
+function confirmedOrderFill(order: LiveOrderRequest, orderId: string, confirmation: LiveOrderConfirmation): ConfirmedFill | undefined {
+  if (!isKnownOrderId(orderId) || !isRecord(confirmation.order)) return undefined;
+  if (!matchesAnyField(confirmation.order, ["id", "orderID", "orderId"], orderId)) return undefined;
+  if (!matchesAnyField(confirmation.order, ["asset_id", "assetId"], order.tokenId)) return undefined;
+  if (!isFillConfirmingOrderStatus(orderStatus(confirmation.order))) return undefined;
+
+  const shares = numberField(confirmation.order, "size_matched")
+    ?? numberField(confirmation.order, "sizeMatched")
+    ?? numberField(confirmation.order, "matched_size")
+    ?? numberField(confirmation.order, "matchedSize");
+  const price = postResponseFillPrice(confirmation.postResponse, shares)
+    ?? numberField(confirmation.order, "average_price")
+    ?? numberField(confirmation.order, "averagePrice")
+    ?? numberField(confirmation.order, "price");
+  return validFill(shares, price);
+}
+
 function hasPendingMatchingTrade(order: LiveOrderRequest, orderId: string, trades: unknown[]): boolean {
   if (!isKnownOrderId(orderId)) return false;
 
@@ -699,6 +718,19 @@ function isFillConfirmingTrade(trade: Record<string, unknown>): boolean {
   if (hasTradeError(trade)) return false;
   const status = tradeStatus(trade);
   return status === "confirmed" || (status === "matched" && hasTransactionHash(trade));
+}
+
+function isFillConfirmingOrderStatus(status: string | undefined): boolean {
+  return status === "matched" || status === "filled";
+}
+
+function postResponseFillPrice(postResponse: unknown, shares: number | undefined): number | undefined {
+  if (!isRecord(postResponse) || shares === undefined || shares <= 0) return undefined;
+  const takingAmount = numberField(postResponse, "takingAmount") ?? numberField(postResponse, "taking_amount");
+  const makingAmount = numberField(postResponse, "makingAmount") ?? numberField(postResponse, "making_amount");
+  if (takingAmount === undefined || makingAmount === undefined || takingAmount <= 0 || makingAmount <= 0) return undefined;
+  if (Math.abs(takingAmount - shares) > 1e-4) return undefined;
+  return makingAmount / takingAmount;
 }
 
 function isPendingTradeEvidence(trade: Record<string, unknown>): boolean {

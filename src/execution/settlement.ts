@@ -125,6 +125,9 @@ export function normalizeRedeemablePositions(raw: unknown): RedeemablePosition[]
     if (!isBytes32(conditionId)) continue;
     const size = numberValue(record.size ?? record.positionSize ?? record.shares);
     if (size === undefined || size <= 0) continue;
+    const currentValue = numberValue(record.currentValue ?? record.current_value);
+    const curPrice = numberValue(record.curPrice ?? record.currentPrice ?? record.current_price);
+    if ((currentValue !== undefined && currentValue <= 0) || (curPrice !== undefined && curPrice <= 0)) continue;
 
     const position: RedeemablePosition = {
       conditionId,

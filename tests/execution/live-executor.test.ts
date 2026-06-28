@@ -1039,6 +1039,36 @@ describe("LiveExecutor", () => {
     expect(result.notional).toBeCloseTo(2.92999806);
   });
 
+  test("uses matched order size when trade lookup lags behind CLOB order state", () => {
+    const result = normalizeConfirmedLiveOrderResult(liveOrder, {
+      postResponse: { success: true, orderID: "order-1", status: "matched" },
+      trades: [],
+      openOrders: [],
+      order: {
+        id: "order-1",
+        status: "MATCHED",
+        asset_id: liveOrder.tokenId,
+        side: "BUY",
+        original_size: "210.74725",
+        size_matched: "101",
+        price: "0.91",
+        order_type: "FAK"
+      }
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "partial",
+      orderId: "order-1",
+      tokenId: liveOrder.tokenId,
+      shares: 101
+    });
+    expect(result.price).toBeCloseTo(0.91);
+    expect(result.notional).toBeCloseTo(91.91);
+    expect(result.estimatedPayout).toBe(101);
+    expect(result.estimatedProfit).toBeCloseTo(101 - 91.91 - result.fee);
+  });
+
   test("counts TRADE_STATUS_CONFIRMED as a confirmed fill", () => {
     const result = normalizeConfirmedLiveOrderResult(liveOrder, {
       postResponse: { success: true, orderID: "order-1", status: "matched" },
