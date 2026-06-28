@@ -60,7 +60,7 @@ describe("LiveLedger", () => {
     expect(await ledger.hasActiveEventTrade("event-2")).toBe(false);
   });
 
-  test("does not treat rejected or canceled entries as active event trades", async () => {
+  test("does not treat rejected, canceled, or lost entries as active event trades", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-ledger-"));
     const file = join(dir, "ledger.json");
     const ledger = new LiveLedger(file);
@@ -93,8 +93,23 @@ describe("LiveLedger", () => {
       shares: 1,
       notional: 0.98
     });
+    await ledger.recordTrade({
+      timestamp: "2026-06-23T10:02:00.000Z",
+      mode: "live",
+      status: "lost",
+      eventSlug: "event-1",
+      marketSlug: "market-3",
+      tokenId: "token-3",
+      conditionId: "condition-3",
+      outcome: "Over",
+      orderId: "order-3",
+      price: 0.18,
+      shares: 1,
+      notional: 0.18
+    });
 
     expect(await ledger.hasActiveEventTrade("event-1")).toBe(false);
+    expect(await ledger.readEntries()).toContainEqual(expect.objectContaining({ status: "lost", eventSlug: "event-1" }));
   });
 
   test("treats partial entries as active event trades", async () => {

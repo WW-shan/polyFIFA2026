@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { BuyTradeDecision, TailStrategy, TradeResult } from "../domain/types.js";
 
-export type LedgerStatus = "filled" | "partial" | "posted" | "rejected" | "canceled" | "redeemed";
+export type LedgerStatus = "filled" | "partial" | "posted" | "rejected" | "canceled" | "redeemed" | "lost";
 
 export interface LedgerTradeEntry {
   timestamp: string;
@@ -107,5 +107,6 @@ function isLedgerStatus(value: unknown): value is LedgerStatus {
     || value === "posted"
     || value === "rejected"
     || value === "canceled"
-    || value === "redeemed";
+    || value === "redeemed"
+    || value === "lost";
 }
