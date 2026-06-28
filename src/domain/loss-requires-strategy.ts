@@ -1,5 +1,6 @@
 import { getLeader, isWorldCupMatch } from "./spread-selector.js";
 import { classifyTailWindow } from "./time-window.js";
+import { DEFAULT_ENTRY_WINDOW_MINUTES, MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS } from "./risk-thresholds.js";
 import type { MatchState, SelectedStrategyMarket, StrategyMarket, TailStrategy } from "./types.js";
 
 export interface LossRequiresStrategyOptions {
@@ -17,7 +18,7 @@ export function selectLossRequiresCandidates(
   markets: readonly StrategyMarket[],
   options: LossRequiresStrategyOptions = {}
 ): SelectedStrategyMarket[] {
-  const entryWindowMinutes = options.entryWindowMinutes ?? 3;
+  const entryWindowMinutes = options.entryWindowMinutes ?? DEFAULT_ENTRY_WINDOW_MINUTES;
   const includeLocked = options.includeLocked ?? true;
 
   if (!isWorldCupMatch(match) || !isInEntryWindow(match, entryWindowMinutes)) return [];
@@ -57,13 +58,16 @@ function moneylineCandidates(match: MatchState, market: StrategyMarket): Selecte
   const margin = teamScore.goals - otherScore.goals;
   const candidates: SelectedStrategyMarket[] = [];
 
-  if (margin >= 2) {
+  if (margin >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
     const candidate = toCandidate(market, "leader_yes_lead_ge2", "Yes", margin);
     if (candidate) candidates.push(candidate);
   }
 
   if (margin <= -1) {
-    const candidate = toCandidate(market, "loser_no", "No", Math.abs(margin) + 1);
+    const lossRequiresGoals = Math.abs(margin) + 1;
+    const candidate = lossRequiresGoals >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS
+      ? toCandidate(market, "loser_no", "No", lossRequiresGoals)
+      : null;
     if (candidate) candidates.push(candidate);
   }
 
@@ -72,7 +76,7 @@ function moneylineCandidates(match: MatchState, market: StrategyMarket): Selecte
 
 function drawCandidates(match: MatchState, market: StrategyMarket): SelectedStrategyMarket[] {
   const leader = getLeader(match);
-  if (!leader || leader.margin < 2) return [];
+  if (!leader || leader.margin < MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) return [];
 
   const candidate = toCandidate(market, "draw_no_lead_ge2", "No", leader.margin);
   return candidate ? [candidate] : [];
@@ -86,7 +90,7 @@ function totalCandidates(match: MatchState, market: StrategyMarket, includeLocke
   const overAtTotal = Math.floor(line) + 1;
   const candidates: SelectedStrategyMarket[] = [];
 
-  if (overAtTotal - currentTotal >= 2) {
+  if (overAtTotal - currentTotal >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
     const candidate = toCandidate({ ...market, line }, "total_under_loss_ge2", "Under", overAtTotal - currentTotal);
     if (candidate) candidates.push(candidate);
   }
@@ -117,7 +121,7 @@ function spreadCandidates(match: MatchState, market: StrategyMarket): SelectedSt
 
   if (currentMargin >= requiredMargin) {
     const lossRequiresGoals = currentMargin - requiredMargin + 1;
-    if (lossRequiresGoals >= 2) {
+    if (lossRequiresGoals >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
       const outcome = spreadCoverOutcome(market, spreadTeamName);
       const candidate = outcome ? toCandidate({ ...market, line }, "spread_tight_loss_ge2", outcome, lossRequiresGoals) : null;
       if (candidate) {
@@ -127,7 +131,7 @@ function spreadCandidates(match: MatchState, market: StrategyMarket): SelectedSt
     }
   } else {
     const lossRequiresGoals = requiredMargin - currentMargin;
-    if (lossRequiresGoals >= 2) {
+    if (lossRequiresGoals >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
       const otherOutcome = spreadOtherSideOutcome(market, spreadTeamName);
       if (otherOutcome) {
         const candidate = toCandidate({ ...market, line }, "spread_tight_loss_ge2", otherOutcome, lossRequiresGoals);
@@ -165,7 +169,7 @@ function teamTotalCandidates(match: MatchState, market: StrategyMarket, includeL
   const overAtTotal = Math.floor(line) + 1;
   const candidates: SelectedStrategyMarket[] = [];
 
-  if (overAtTotal - score.goals >= 2) {
+  if (overAtTotal - score.goals >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
     const candidate = toCandidate({ ...market, line, team: score.team }, "team_total_under_loss_ge2", "Under", overAtTotal - score.goals);
     if (candidate) candidates.push(candidate);
   }

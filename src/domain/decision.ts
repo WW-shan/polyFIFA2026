@@ -1,4 +1,5 @@
 import { netReturnRate, sportsTakerFeePerShare } from "./fees.js";
+import { MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS } from "./risk-thresholds.js";
 import { classifyTailWindow } from "./time-window.js";
 import type {
   BuyTradeLeg,
@@ -167,8 +168,8 @@ function validateTradeInputs(
     return { action: "NO_TRADE", decision: noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, tailWindow.details) };
   }
 
-  if (selected.lossRequiresGoals < 2) {
-    return { action: "NO_TRADE", decision: noTrade("NO_ELIGIBLE_STRATEGY", match.eventSlug, `Candidate only requires ${selected.lossRequiresGoals} adverse goal(s) to lose`) };
+  if (selected.locked !== true && selected.lossRequiresGoals < MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
+    return { action: "NO_TRADE", decision: noTrade("NO_ELIGIBLE_STRATEGY", match.eventSlug, `Candidate only requires ${selected.lossRequiresGoals} adverse goal(s) to lose; minimum is ${MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS}`) };
   }
 
   if (!lockedConditionMatchesScore(match, selected)) {

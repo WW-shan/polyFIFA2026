@@ -69,7 +69,7 @@ describe("selectLossRequiresCandidates", () => {
     expect(candidates).toEqual([]);
   });
 
-  test("one-goal lead buys trailing team No as strong team not lose", () => {
+  test("one-goal lead skips trailing team No because it only needs two adverse goals to lose", () => {
     const candidates = selectLossRequiresCandidates(match, [
       market({
         question: "Will Weak win on 2026-06-23?",
@@ -78,12 +78,7 @@ describe("selectLossRequiresCandidates", () => {
       })
     ]);
 
-    expect(candidates).toContainEqual(expect.objectContaining({
-      strategy: "loser_no",
-      outcome: "No",
-      tokenId: "weak-no",
-      lossRequiresGoals: 2
-    }));
+    expect(candidates).toEqual([]);
   });
 
   test("two-goal deficit makes loser No require a three-goal comeback to lose", () => {
@@ -122,17 +117,18 @@ describe("selectLossRequiresCandidates", () => {
   });
 
   test("does not impose a fixed strategy priority before pricing is known", () => {
-    const candidates = selectLossRequiresCandidates(match, [
+    const twoGoalDeficit = { ...match, homeGoals: 2, awayGoals: 0 };
+    const candidates = selectLossRequiresCandidates(twoGoalDeficit, [
       market({
         question: "Will Weak win on 2026-06-23?",
         outcomes: ["Yes", "No"],
         clobTokenIds: ["weak-yes", "weak-no"]
       }),
       market({
-        question: "Strong vs. Weak: O/U 2.5",
+        question: "Strong vs. Weak: O/U 4.5",
         outcomes: ["Over", "Under"],
         clobTokenIds: ["total-over", "total-under"],
-        line: 2.5
+        line: 4.5
       })
     ]);
 
@@ -142,7 +138,7 @@ describe("selectLossRequiresCandidates", () => {
     ]);
   });
 
-  test("two-goal lead includes leader Yes and draw No", () => {
+  test("two-goal lead skips leader Yes and draw No because two adverse goals can lose", () => {
     const twoGoalLead = { ...match, homeGoals: 2, awayGoals: 0 };
     const candidates = selectLossRequiresCandidates(twoGoalLead, [
       market({
@@ -157,18 +153,7 @@ describe("selectLossRequiresCandidates", () => {
       })
     ]);
 
-    expect(candidates).toContainEqual(expect.objectContaining({
-      strategy: "leader_yes_lead_ge2",
-      outcome: "Yes",
-      tokenId: "strong-yes",
-      lossRequiresGoals: 2
-    }));
-    expect(candidates).toContainEqual(expect.objectContaining({
-      strategy: "draw_no_lead_ge2",
-      outcome: "No",
-      tokenId: "draw-no",
-      lossRequiresGoals: 2
-    }));
+    expect(candidates).toEqual([]);
   });
 
   test("three-goal lead keeps leader Yes and draw No distinct with three required adverse goals", () => {
@@ -198,19 +183,19 @@ describe("selectLossRequiresCandidates", () => {
     }));
   });
 
-  test("total and team total under are selected when two more goals are required to lose", () => {
+  test("total and team total under are selected when three more goals are required to lose", () => {
     const candidates = selectLossRequiresCandidates(match, [
       market({
-        question: "Strong vs. Weak: O/U 2.5",
+        question: "Strong vs. Weak: O/U 3.5",
         outcomes: ["Over", "Under"],
         clobTokenIds: ["total-over", "total-under"],
-        line: 2.5
+        line: 3.5
       }),
       market({
-        question: "Strong vs. Weak: Weak O/U 1.5",
+        question: "Strong vs. Weak: Weak O/U 2.5",
         outcomes: ["Over", "Under"],
         clobTokenIds: ["weak-team-over", "weak-team-under"],
-        line: 1.5
+        line: 2.5
       })
     ]);
 
@@ -218,33 +203,33 @@ describe("selectLossRequiresCandidates", () => {
       strategy: "total_under_loss_ge2",
       outcome: "Under",
       tokenId: "total-under",
-      lossRequiresGoals: 2
+      lossRequiresGoals: 3
     }));
     expect(candidates).toContainEqual(expect.objectContaining({
       strategy: "team_total_under_loss_ge2",
       outcome: "Under",
       tokenId: "weak-team-under",
       team: "Weak",
-      lossRequiresGoals: 2
+      lossRequiresGoals: 3
     }));
   });
 
-  test("spread tight can buy the other side when favorite needs two goals to beat the line", () => {
+  test("spread tight can buy the other side when favorite needs three goals to beat the line", () => {
     const draw = { ...match, homeGoals: 0, awayGoals: 0 };
     const candidates = selectLossRequiresCandidates(draw, [
       market({
-        question: "Spread: Strong (-1.5)",
+        question: "Spread: Strong (-2.5)",
         outcomes: ["Strong", "Weak"],
-        clobTokenIds: ["strong-minus-1p5", "weak-plus-1p5"],
-        line: -1.5
+        clobTokenIds: ["strong-minus-2p5", "weak-plus-2p5"],
+        line: -2.5
       })
     ]);
 
     expect(candidates).toContainEqual(expect.objectContaining({
       strategy: "spread_tight_loss_ge2",
       outcome: "Weak",
-      tokenId: "weak-plus-1p5",
-      lossRequiresGoals: 2,
+      tokenId: "weak-plus-2p5",
+      lossRequiresGoals: 3,
       spreadSide: "other_side"
     }));
   });
@@ -258,10 +243,10 @@ describe("selectLossRequiresCandidates", () => {
         line: -1.5
       }),
       market({
-        question: "Spread: Strong (-2.5)",
+        question: "Spread: Strong (-3.5)",
         outcomes: ["Strong", "Weak"],
-        clobTokenIds: ["strong-minus-2p5", "weak-plus-2p5"],
-        line: -2.5
+        clobTokenIds: ["strong-minus-3p5", "weak-plus-3p5"],
+        line: -3.5
       })
     ]);
 
@@ -271,8 +256,8 @@ describe("selectLossRequiresCandidates", () => {
     expect(candidates).toContainEqual(expect.objectContaining({
       strategy: "spread_tight_loss_ge2",
       outcome: "Weak",
-      tokenId: "weak-plus-2p5",
-      lossRequiresGoals: 2,
+      tokenId: "weak-plus-3p5",
+      lossRequiresGoals: 3,
       spreadSide: "other_side"
     }));
   });
@@ -281,10 +266,10 @@ describe("selectLossRequiresCandidates", () => {
     const draw = { ...match, homeGoals: 0, awayGoals: 0 };
     const candidates = selectLossRequiresCandidates(draw, [
       market({
-        question: "Spread: Strong (-1.5)",
+        question: "Spread: Strong (-2.5)",
         outcomes: ["Yes", "No"],
         clobTokenIds: ["strong-minus-yes", "strong-minus-no"],
-        line: -1.5
+        line: -2.5
       })
     ]);
 
@@ -292,7 +277,7 @@ describe("selectLossRequiresCandidates", () => {
       strategy: "spread_tight_loss_ge2",
       outcome: "No",
       tokenId: "strong-minus-no",
-      lossRequiresGoals: 2,
+      lossRequiresGoals: 3,
       spreadSide: "other_side"
     }));
   });

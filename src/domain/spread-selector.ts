@@ -1,5 +1,6 @@
 import type { MatchState, SelectedSpread, SpreadMarket, SpreadSelection } from "./types.js";
 import { isTailWindowEligible } from "./time-window.js";
+import { DEFAULT_ENTRY_WINDOW_MINUTES } from "./risk-thresholds.js";
 
 export interface SpreadSelectorOptions {
   entryWindowMinutes?: number;
@@ -23,7 +24,7 @@ export function selectCoveredSpread(
   markets: readonly SpreadMarket[],
   options: SpreadSelectorOptions = {}
 ): SpreadSelection {
-  const entryWindowMinutes = options.entryWindowMinutes ?? 3;
+  const entryWindowMinutes = options.entryWindowMinutes ?? DEFAULT_ENTRY_WINDOW_MINUTES;
 
   if (!isWorldCupMatch(match)) {
     return { action: "NO_TRADE", reason: "NOT_WORLD_CUP" };

@@ -164,7 +164,7 @@ function referenceAllocation(markets: readonly StrategyMarket[], orderbooks: rea
     const grouped = groupAskSizesByPrice(book.asks);
     const lossRequiresGoals = Math.floor(market.line ?? 0) + 1 - (match.homeGoals + match.awayGoals);
     return [...grouped.entries()].flatMap(([price, size]) => {
-      if (price > MAX_ENTRY_PRICE || netReturnRate(price) < MIN_RETURN) return [];
+      if (lossRequiresGoals < 3 || price > MAX_ENTRY_PRICE || netReturnRate(price) < MIN_RETURN) return [];
       return [{
         tokenId,
         price,

@@ -1,4 +1,5 @@
 import type { MatchState, TailWindowSource } from "./types.js";
+import { DEFAULT_ENTRY_WINDOW_MINUTES } from "./risk-thresholds.js";
 
 export interface TailWindowOptions {
   entryWindowMinutes?: number;
@@ -11,7 +12,7 @@ export interface TailWindowDecision {
 }
 
 export function classifyTailWindow(match: MatchState, options: TailWindowOptions = {}): TailWindowDecision {
-  const entryWindowMinutes = options.entryWindowMinutes ?? 3;
+  const entryWindowMinutes = options.entryWindowMinutes ?? DEFAULT_ENTRY_WINDOW_MINUTES;
   const entryWindowSeconds = entryWindowMinutes * 60;
 
   if (match.period !== "2H" || !match.isLive || match.ended === true) {

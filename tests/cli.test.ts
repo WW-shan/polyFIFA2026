@@ -118,12 +118,12 @@ const liveMarkets: StrategyMarket[] = [
   },
   {
     eventSlug: liveMatch.eventSlug,
-    marketSlug: "total-2p5",
-    question: "Strong vs. Weak: O/U 2.5",
+    marketSlug: "total-3p5",
+    question: "Strong vs. Weak: O/U 3.5",
     conditionId: "cond-total",
     outcomes: ["Over", "Under"],
     clobTokenIds: ["total-over", "total-under"],
-    line: 2.5
+    line: 3.5
   }
 ];
 
@@ -180,7 +180,7 @@ describe("CLI", () => {
   test("paper mode prints a filled JSON trade result", async () => {
     const result = await runCli([
       "--mode", "paper",
-      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
       "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "97"
@@ -196,7 +196,7 @@ describe("CLI", () => {
       outcome: "Spain",
       line: -2.5,
       strategy: "spread_tight_loss_ge2",
-      lossRequiresGoals: 2,
+      lossRequiresGoals: 3,
       bestAsk: 0.97
     });
   });
@@ -204,7 +204,7 @@ describe("CLI", () => {
   test("live mode without credentials returns LIVE_CREDENTIALS_MISSING", async () => {
     const result = await runCli([
       "--mode", "live",
-      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
       "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "5",
@@ -227,7 +227,7 @@ describe("CLI", () => {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
-        homeGoals: 4,
+        homeGoals: 5,
         awayGoals: 0,
         minute: 88,
         period: "2H",
@@ -258,7 +258,7 @@ describe("CLI", () => {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
-        homeGoals: 4,
+        homeGoals: 5,
         awayGoals: 0,
         minute: 90,
         period: "2H",
@@ -347,7 +347,7 @@ describe("CLI", () => {
 
     const result = await runCli([
       "--mode", "paper",
-      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
       "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "97",
@@ -385,7 +385,7 @@ describe("CLI", () => {
 
     const result = await runCli([
       "--mode", "paper",
-      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
       "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "97",
@@ -407,7 +407,7 @@ describe("CLI", () => {
 
     const result = await runCli([
       "--mode", "paper",
-      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
       "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "97"
@@ -422,7 +422,7 @@ describe("CLI", () => {
   test("live mode skips trading when pUSD balance after buffer is below the CLOB minimum", async () => {
     const result = await runCli([
       "--mode", "live",
-      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
       "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--stake", "97",
@@ -446,7 +446,7 @@ describe("CLI", () => {
     const ledgerFile = join(dir, "ledger.json");
     const result = await runCli([
       "--mode", "live",
-      "--match-file", "tests/fixtures/matches/spain-4-0.json",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
       "--markets-file", "tests/fixtures/markets/spain-spreads.json",
       "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
       "--balance-buffer", "0.05"
@@ -548,10 +548,10 @@ describe("CLI", () => {
           eventSlug: "fifwc-esp-ksa-2026-06-21",
           homeTeam: "Spain",
           awayTeam: "Saudi Arabia",
-          homeGoals: 4,
+          homeGoals: 5,
           awayGoals: 0,
           minute: calls === 1 ? 91 : 93,
-          remainingSeconds: calls === 1 ? 240 : 120,
+          remainingSeconds: calls === 1 ? 241 : 240,
           remainingSecondsSource: "365scores_added_time_precise_game_time"
         };
       }
@@ -572,7 +572,7 @@ describe("CLI", () => {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
-        homeGoals: 4,
+        homeGoals: 5,
         awayGoals: 0,
         minute: 93,
         period: "2H",
@@ -616,7 +616,7 @@ describe("CLI", () => {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
-        homeGoals: 4,
+        homeGoals: 5,
         awayGoals: 0,
         minute: 90,
         period: "2H",
@@ -728,7 +728,7 @@ describe("CLI", () => {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
-        homeGoals: 4,
+        homeGoals: 5,
         awayGoals: 0,
         minute: 90,
         period: "2H",
@@ -781,7 +781,7 @@ describe("CLI", () => {
         eventSlug: "fifwc-esp-ksa-2026-06-21",
         homeTeam: "Spain",
         awayTeam: "Saudi Arabia",
-        homeGoals: 4,
+        homeGoals: 5,
         awayGoals: 0,
         minute: 90,
         period: "2H",
@@ -833,8 +833,8 @@ describe("CLI", () => {
     const firstSlug = "fifwc-first-simultaneous-2026-06-27";
     const secondSlug = "fifwc-second-simultaneous-2026-06-27";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(firstSlug, "First", "Match", 5.5, "first-under"),
-      totalMarket(secondSlug, "Second", "Match", 5.5, "second-under")
+      totalMarket(firstSlug, "First", "Match", 6.5, "first-under"),
+      totalMarket(secondSlug, "Second", "Match", 6.5, "second-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -884,8 +884,8 @@ describe("CLI", () => {
     const secondSlug = "fifwc-clock-second-2026-06-27";
     const clockResolvers = new Map<string, (patch: Partial<MatchState> | null) => void>();
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(firstSlug, "Clock", "First", 5.5, "clock-first-under"),
-      totalMarket(secondSlug, "Clock", "Second", 5.5, "clock-second-under")
+      totalMarket(firstSlug, "Clock", "First", 6.5, "clock-first-under"),
+      totalMarket(secondSlug, "Clock", "Second", 6.5, "clock-second-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -956,7 +956,7 @@ describe("CLI", () => {
     const marketsFile = join(dir, "markets.json");
     const eventSlug = "fifwc-sen-irq-2026-06-26";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(eventSlug, "Senegal", "Iraq", 6.5, "senegal-iraq-under")
+      totalMarket(eventSlug, "Senegal", "Iraq", 7.5, "senegal-iraq-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1019,7 +1019,7 @@ describe("CLI", () => {
     const marketsFile = join(dir, "markets.json");
     const eventSlug = "fifwc-default-threshold-2026-06-26";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(eventSlug, "Default", "Threshold", 5.5, "default-threshold-under")
+      totalMarket(eventSlug, "Default", "Threshold", 6.5, "default-threshold-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1066,8 +1066,8 @@ describe("CLI", () => {
     const firstSlug = "fifwc-live-error-first-2026-06-27";
     const secondSlug = "fifwc-live-error-second-2026-06-27";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(firstSlug, "Live", "Error", 5.5, "live-error-first-under"),
-      totalMarket(secondSlug, "Live", "Next", 5.5, "live-error-second-under")
+      totalMarket(firstSlug, "Live", "Error", 6.5, "live-error-first-under"),
+      totalMarket(secondSlug, "Live", "Next", 6.5, "live-error-second-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1130,7 +1130,7 @@ describe("CLI", () => {
     const ledgerFile = join(dir, "ledger.json");
     const eventSlug = "fifwc-live-error-retry-2026-06-27";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(eventSlug, "Live", "Retry", 5.5, "live-error-retry-under")
+      totalMarket(eventSlug, "Live", "Retry", 6.5, "live-error-retry-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1193,7 +1193,7 @@ describe("CLI", () => {
     const ledgerFile = join(dir, "ledger.json");
     const eventSlug = "fifwc-live-retry-after-rejected-2026-06-27";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(eventSlug, "Retry", "Rejected", 5.5, "retry-rejected-under")
+      totalMarket(eventSlug, "Retry", "Rejected", 6.5, "retry-rejected-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1349,7 +1349,7 @@ describe("CLI", () => {
     const marketsFile = join(dir, "markets.json");
     const eventSlug = "fifwc-default-min-return-2026-06-26";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(eventSlug, "Default", "Minimum", 5.5, "default-minimum-under")
+      totalMarket(eventSlug, "Default", "Minimum", 6.5, "default-minimum-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1394,8 +1394,8 @@ describe("CLI", () => {
     const lowSlug = "fifwc-low-ret-2026-06-26";
     const highSlug = "fifwc-high-ret-2026-06-26";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(lowSlug, "Low", "Return", 5.5, "low-under"),
-      totalMarket(highSlug, "High", "Return", 3.5, "high-under")
+      totalMarket(lowSlug, "Low", "Return", 6.5, "low-under"),
+      totalMarket(highSlug, "High", "Return", 4.5, "high-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1437,7 +1437,7 @@ describe("CLI", () => {
       last: {
         status: "filled",
         eventSlug: highSlug,
-        marketSlug: `${highSlug}-total-3pt5`,
+        marketSlug: `${highSlug}-total-4pt5`,
         bestAsk: 0.98
       }
     });
@@ -1449,8 +1449,8 @@ describe("CLI", () => {
     const lowerSlug = "fifwc-lower-deferred-2026-06-26";
     const betterSlug = "fifwc-better-deferred-2026-06-26";
     await writeFile(marketsFile, JSON.stringify([
-      totalMarket(lowerSlug, "Lower", "Deferred", 5.5, "lower-under"),
-      totalMarket(betterSlug, "Better", "Deferred", 5.5, "better-under")
+      totalMarket(lowerSlug, "Lower", "Deferred", 6.5, "lower-under"),
+      totalMarket(betterSlug, "Better", "Deferred", 6.5, "better-under")
     ]));
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
@@ -1491,7 +1491,7 @@ describe("CLI", () => {
       last: {
         status: "filled",
         eventSlug: lowerSlug,
-        marketSlug: `${lowerSlug}-total-5pt5`,
+        marketSlug: `${lowerSlug}-total-6pt5`,
         bestAsk: 0.99
       }
     });
@@ -1847,7 +1847,7 @@ describe("CLI", () => {
       eventSlug: "fifwc-esp-ksa-2026-06-21",
       homeTeam: "Spain",
       awayTeam: "Saudi Arabia",
-      homeGoals: 4,
+      homeGoals: 5,
       awayGoals: 0,
       minute: 90,
       period: "2H",
@@ -1887,7 +1887,7 @@ describe("CLI", () => {
       eventSlug: "fifwc-esp-ksa-2026-06-21",
       homeTeam: "Spain",
       awayTeam: "Saudi Arabia",
-      homeGoals: 4,
+      homeGoals: 5,
       awayGoals: 0,
       minute: 89,
       period: "2H",
@@ -1941,7 +1941,7 @@ describe("CLI", () => {
       eventSlug: "fifwc-esp-ksa-2026-06-21",
       homeTeam: "Spain",
       awayTeam: "Saudi Arabia",
-      homeGoals: 4,
+      homeGoals: 5,
       awayGoals: 0,
       minute: 89,
       period: "2H",

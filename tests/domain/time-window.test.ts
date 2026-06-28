@@ -17,7 +17,7 @@ describe("tail-window classifier", () => {
   test("uses only verified 365Scores remainingSeconds", () => {
     expect(classifyTailWindow({
       ...baseMatch,
-      remainingSeconds: 180,
+      remainingSeconds: 240,
       remainingSecondsSource: "365scores_added_time_precise_game_time"
     })).toMatchObject({
       eligible: true,
@@ -25,7 +25,7 @@ describe("tail-window classifier", () => {
     });
     expect(classifyTailWindow({
       ...baseMatch,
-      remainingSeconds: 181,
+      remainingSeconds: 241,
       remainingSecondsSource: "365scores_added_time_precise_game_time"
     })).toMatchObject({
       eligible: false,

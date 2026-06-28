@@ -9,7 +9,7 @@ async function readJson<T>(path: string): Promise<T> {
 
 describe("fixture paper flow", () => {
   test("identifies Spain -2.5 and fills a paper trade at 0.97", async () => {
-    const match = await readJson<MatchState>("tests/fixtures/matches/spain-4-0.json");
+    const match = await readJson<MatchState>("tests/fixtures/matches/spain-5-0.json");
     const markets = await readJson<SpreadMarket[]>("tests/fixtures/markets/spain-spreads.json");
     const orderbook = await readJson<OrderbookSnapshot>("tests/fixtures/orderbooks/spain-2p5-ask-097.json");
 
@@ -20,7 +20,7 @@ describe("fixture paper flow", () => {
       outcome: "Spain",
       line: -2.5,
       strategy: "spread_tight_loss_ge2",
-      lossRequiresGoals: 2,
+      lossRequiresGoals: 3,
       bestAsk: 0.97,
       estimatedNetReturn: expect.closeTo(0.03003, 5)
     });

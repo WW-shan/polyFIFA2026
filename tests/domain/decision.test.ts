@@ -55,7 +55,7 @@ function bookFor(tokenId: string, asks: Array<[number, number]>): OrderbookSnaps
 }
 
 describe("buildTradeDecision", () => {
-  test("rejects candidates that do not satisfy the two-goal safety filter", () => {
+  test("rejects candidates that do not satisfy the three-goal safety filter", () => {
     const decision = buildTradeDecision(match, selected, book([[0.97, 200]]), thresholds);
 
     expect(decision).toMatchObject({
@@ -65,8 +65,18 @@ describe("buildTradeDecision", () => {
     });
   });
 
-  test("best ask 0.97 with enough size returns a BUY decision", () => {
+  test("rejects candidates that only require two adverse goals to lose", () => {
     const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 2 }, book([[0.97, 200]]), thresholds);
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "NO_ELIGIBLE_STRATEGY",
+      eventSlug: match.eventSlug
+    });
+  });
+
+  test("best ask 0.97 with enough size returns a BUY decision", () => {
+    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 3 }, book([[0.97, 200]]), thresholds);
 
     expect(decision).toMatchObject({
       action: "BUY",
@@ -86,19 +96,19 @@ describe("buildTradeDecision", () => {
   });
 
   test("best ask above max entry price returns PRICE_TOO_HIGH", () => {
-    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 2 }, book([[0.995, 200]]), thresholds);
+    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 3 }, book([[0.995, 200]]), thresholds);
 
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "PRICE_TOO_HIGH" });
   });
 
   test("eligible price with no usable depth returns DEPTH_TOO_SMALL", () => {
-    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 2 }, book([[0.97, 0]]), thresholds);
+    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 3 }, book([[0.97, 0]]), thresholds);
 
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
   });
 
   test("does not count worse ask levels as size available at the best edge", () => {
-    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 2 }, book([[0.97, 1], [0.98, 200]]), {
+    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 3 }, book([[0.97, 1], [0.98, 200]]), {
       ...thresholds,
       minimumNetReturn: 0.02
     });
@@ -107,7 +117,7 @@ describe("buildTradeDecision", () => {
   });
 
   test("uses the next profitable ask level when best ask depth is too small", () => {
-    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 2 }, book([[0.97, 1], [0.98, 200]]), {
+    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 3 }, book([[0.97, 1], [0.98, 200]]), {
       ...thresholds,
       minimumNetReturn: 0
     });
@@ -122,7 +132,7 @@ describe("buildTradeDecision", () => {
   });
 
   test("net return below minimum returns RETURN_TOO_LOW", () => {
-    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 2 }, book([[0.981, 200]]), {
+    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 3 }, book([[0.981, 200]]), {
       ...thresholds,
       maxEntryPrice: 0.99,
       minimumNetReturn: 0.02
@@ -132,7 +142,7 @@ describe("buildTradeDecision", () => {
   });
 
   test("available notional below minimum returns DEPTH_TOO_SMALL", () => {
-    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 2 }, book([[0.97, 1]]), thresholds);
+    const decision = buildTradeDecision(match, { ...selected, lossRequiresGoals: 3 }, book([[0.97, 1]]), thresholds);
 
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
   });
