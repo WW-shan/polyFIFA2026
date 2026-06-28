@@ -4,9 +4,10 @@ import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutor, type LiveExecuteOptions, type LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
+import { DEFAULT_ENTRY_WINDOW_MINUTES } from "./domain/risk-thresholds.js";
 
 export const DEFAULT_THRESHOLDS: Omit<DecisionThresholds, "maxNotional"> = {
-  entryWindowMinutes: 3,
+  entryWindowMinutes: DEFAULT_ENTRY_WINDOW_MINUTES,
   maxEntryPrice: 0.999999,
   minimumNetReturn: 0.005,
   minimumNotional: 1
