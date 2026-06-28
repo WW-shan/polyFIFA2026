@@ -30,3 +30,6 @@ data/live-sports-audit.ndjson
 analysis/.venv/
 analysis/__pycache__/
 analysis/random_control/__pycache__/
+
+# Tier 3 raw fetches — regeneratable, too large for git (~114 MB)
+data/universe_tail_trades.json
