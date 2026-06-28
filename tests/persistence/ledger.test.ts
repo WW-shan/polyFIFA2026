@@ -60,6 +60,46 @@ describe("LiveLedger", () => {
     expect(await ledger.hasActiveEventTrade("event-2")).toBe(false);
   });
 
+  test("detects active locked event trades separately from other active trades", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-06-23T10:00:00.000Z",
+      mode: "live",
+      status: "filled",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Under",
+      strategy: "total_under_loss_ge2",
+      orderId: "order-1",
+      price: 0.97,
+      shares: 1,
+      notional: 0.97
+    });
+    await ledger.recordTrade({
+      timestamp: "2026-06-23T10:01:00.000Z",
+      mode: "live",
+      status: "partial",
+      eventSlug: "event-2",
+      marketSlug: "market-2",
+      tokenId: "token-2",
+      conditionId: "condition-2",
+      outcome: "Over",
+      strategy: "total_over_locked",
+      orderId: "order-2",
+      price: 0.91,
+      shares: 1,
+      notional: 0.91
+    });
+
+    expect(await ledger.hasActiveLockedEventTrade("event-1")).toBe(false);
+    expect(await ledger.hasActiveLockedEventTrade("event-2")).toBe(true);
+  });
+
   test("does not treat rejected, canceled, or lost entries as active event trades", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-ledger-"));
     const file = join(dir, "ledger.json");

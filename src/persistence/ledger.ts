@@ -47,6 +47,15 @@ export class LiveLedger {
     return entries.some((entry) => entry.eventSlug === eventSlug && isActiveLedgerStatus(entry.status));
   }
 
+  async hasActiveLockedEventTrade(eventSlug: string): Promise<boolean> {
+    const entries = await this.readEntries();
+    return entries.some((entry) =>
+      entry.eventSlug === eventSlug
+      && isActiveLedgerStatus(entry.status)
+      && isLockedStrategy(entry.strategy)
+    );
+  }
+
   async recordTrade(entry: LedgerTradeEntry): Promise<void> {
     const entries = await this.readEntries();
     entries.push(entry);
@@ -91,6 +100,12 @@ export class LiveLedger {
 
 export function isActiveLedgerStatus(status: LedgerStatus): boolean {
   return status === "filled" || status === "partial" || status === "posted";
+}
+
+export function isLockedStrategy(strategy: TailStrategy | undefined): boolean {
+  return strategy === "total_over_locked"
+    || strategy === "team_total_over_locked"
+    || strategy === "btts_yes_locked";
 }
 
 function isLedgerTradeEntry(value: unknown): value is LedgerTradeEntry {

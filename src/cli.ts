@@ -8,7 +8,7 @@ import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./exe
 import type { LiveExecuteOptions, LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
-import { LiveLedger, isActiveLedgerStatus } from "./persistence/ledger.js";
+import { LiveLedger, isActiveLedgerStatus, isLockedStrategy } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
 import { Scores365ClockProvider } from "./polymarket/scores365-clock.js";
@@ -51,6 +51,7 @@ interface ParsedArgs {
 
 interface SinglePassOptions {
   executeTrade?: boolean;
+  allowActiveEventRefill?: boolean;
 }
 
 interface PendingBuy {
@@ -143,12 +144,17 @@ async function runSinglePass(
       return ok(summary(args.mode, decision));
     }
     if (ledger && await ledger.hasActiveEventTrade(decision.eventSlug)) {
-      return ok(summary(args.mode, {
-        action: "NO_TRADE",
-        reason: "DUPLICATE_TRADE",
-        eventSlug: decision.eventSlug,
-        details: "Ledger already has an active trade for this event"
-      }));
+      const allowRefill = options.allowActiveEventRefill
+        && decision.locked === true
+        && await ledger.hasActiveLockedEventTrade(decision.eventSlug);
+      if (allowRefill !== true) {
+        return ok(summary(args.mode, {
+          action: "NO_TRADE",
+          reason: "DUPLICATE_TRADE",
+          eventSlug: decision.eventSlug,
+          details: "Ledger already has an active trade for this event"
+        }));
+      }
     }
     if (options.executeTrade === false) return ok(summary(args.mode, decision));
 
@@ -276,6 +282,7 @@ async function runSportsWatch(
     const activeMatches = new Map<string, MatchState>();
     const pendingBuys = new Map<string, PendingBuy>();
     const completedEventSlugs = new Set<string>();
+    const refillEventSlugs = new Set<string>();
     await seedLateActiveMatches(activeMatches, events, deps);
     const iterator = updates[Symbol.asyncIterator]();
     let updatePromise: Promise<IteratorResult<MatchState>> | undefined = iterator.next();
@@ -295,6 +302,7 @@ async function runSportsWatch(
           if (completedEventSlugs.has(input.result.value.eventSlug)) {
             activeMatches.delete(input.result.value.eventSlug);
             pendingBuys.delete(input.result.value.eventSlug);
+            refillEventSlugs.delete(input.result.value.eventSlug);
             if (iterations < maxIterations) updatePromise = iterator.next();
             continue;
           }
@@ -314,7 +322,8 @@ async function runSportsWatch(
           .slice(0, Math.max(0, maxIterations - iterations));
         const polledMatches = await Promise.all(pollMatches.map(async (match) => {
           const clockPatch = await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
-          return clockPatch ? { ...match, ...clockPatch } : null;
+          if (clockPatch) return { ...match, ...clockPatch };
+          return refillEventSlugs.has(match.eventSlug) && match.remainingSecondsSource === "365scores_added_time_precise_game_time" ? match : null;
         }));
         for (const timedMatch of polledMatches) {
           if (!timedMatch || iterations >= maxIterations) continue;
@@ -345,7 +354,7 @@ async function runSportsWatch(
       const result = await runSinglePass({ ...args, eventSlug: timedMatch.eventSlug }, env, {
         ...deps,
         fetchMatchState: async () => timedMatch
-      }, { executeTrade: false });
+      }, { executeTrade: false, allowActiveEventRefill: true });
       return {
         result,
         last: JSON.parse(result.stdout) as Record<string, unknown>,
@@ -425,9 +434,16 @@ async function runSportsWatch(
       const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
       last = parsed;
       if (isCompletedTradeSummary(parsed)) {
+        if (shouldKeepRefillingLockedEvent(parsed, match)) {
+          refillEventSlugs.add(match.eventSlug);
+          rememberClockPollMatch(activeMatches, match);
+          pendingBuys.delete(match.eventSlug);
+          return undefined;
+        }
         completedEventSlugs.add(match.eventSlug);
         activeMatches.delete(match.eventSlug);
         pendingBuys.delete(match.eventSlug);
+        refillEventSlugs.delete(match.eventSlug);
       }
       return undefined;
     }
@@ -436,7 +452,7 @@ async function runSportsWatch(
       return runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
         ...deps,
         fetchMatchState: async () => match
-      });
+      }, { allowActiveEventRefill: true });
     }
 
     function rememberSportsWatchExecutionError(match: MatchState, error: unknown): void {
@@ -452,6 +468,7 @@ async function runSportsWatch(
       };
       activeMatches.delete(match.eventSlug);
       pendingBuys.delete(match.eventSlug);
+      refillEventSlugs.delete(match.eventSlug);
     }
   }
 }
@@ -488,7 +505,7 @@ function shouldPollVerifiedClock(match: MatchState): boolean {
 }
 
 function verifiedClockPollIntervalMs(args: ParsedArgs): number {
-  return Math.min(args.intervalMs ?? MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS, MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS);
+  return Math.max(1, Math.min(args.intervalMs ?? MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS, MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS));
 }
 
 async function seedLateActiveMatches(
@@ -524,6 +541,18 @@ function buyDecisionFromSummary(value: Record<string, unknown>): Extract<TradeDe
 
 function isCompletedTradeSummary(value: Record<string, unknown>): boolean {
   return value.status === "filled" || value.status === "partial" || value.status === "posted";
+}
+
+function shouldKeepRefillingLockedEvent(value: Record<string, unknown>, match: MatchState): boolean {
+  if (value.status !== "filled" && value.status !== "partial") return false;
+  if (!isPositiveNumber(value.notional) && !isPositiveNumber(value.shares)) return false;
+  const decision = buyDecisionFromSummary(value);
+  if (!decision || decision.locked !== true || !isLockedStrategy(decision.strategy)) return false;
+  return match.period === "2H" && match.isLive && match.ended !== true;
+}
+
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 async function fetchWorldCupEventRefs(deps: CliDependencies): Promise<WorldCupEventRef[]> {

@@ -1267,6 +1267,83 @@ describe("CLI", () => {
     expect(ledger.map((entry: { status: string }) => entry.status)).toEqual(["rejected", "filled"]);
   });
 
+  test("worldcup live watch keeps refilling a locked event when new profitable depth appears", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-refill-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-refill-2026-06-27";
+    const overToken = "locked-refill-under-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Locked", "Refill", 0.5, "locked-refill-under")
+    ]));
+    let bookCalls = 0;
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
+      bookCalls += 1;
+      const price = bookCalls <= 2 ? 0.91 : bookCalls <= 4 ? 0.92 : 0.995;
+      return {
+        tokenId,
+        bids: [],
+        asks: [{ price, size: 10 }]
+      };
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Locked", "Refill", 1, 0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const balances = [30, 30, 20, 20, 4, 4];
+    let balanceCalls = 0;
+    const executed: Array<{ eventSlug: string; tokenId: string; notional: number; price: number }> = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "30",
+      "--ledger-file", ledgerFile,
+      "--interval-ms", "0",
+      "--max-iterations", "3"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked", awayTeam: "Refill" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      readPusdBalance: async () => balances[Math.min(balanceCalls++, balances.length - 1)]!,
+      executeLive: async (decision) => {
+        executed.push({
+          eventSlug: decision.eventSlug,
+          tokenId: decision.tokenId,
+          notional: decision.notional,
+          price: decision.bestAsk
+        });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `locked-refill-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([
+      { eventSlug, tokenId: overToken, notional: 9.1, price: 0.91 },
+      { eventSlug, tokenId: overToken, notional: expect.closeTo(9.2, 8), price: 0.92 }
+    ]);
+    const ledger = JSON.parse(await readFile(ledgerFile, "utf8"));
+    expect(ledger).toEqual([
+      expect.objectContaining({ eventSlug, tokenId: overToken, status: "filled", price: 0.91 }),
+      expect.objectContaining({ eventSlug, tokenId: overToken, status: "filled", price: 0.92 })
+    ]);
+  });
+
   test("worldcup watch skips candidates below the default 0.5% minimum without waiting", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-default-min-return-"));
     const marketsFile = join(dir, "markets.json");
