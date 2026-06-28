@@ -111,20 +111,29 @@ async function runSinglePass(
     const tailWindow = classifyTailWindow(match, {
       entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes
     });
+
+    let markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : undefined;
     if (!tailWindow.eligible) {
-      return ok(summary(args.mode, {
-        action: "NO_TRADE",
-        reason: "MATCH_NOT_LATE_ENOUGH",
-        eventSlug: match.eventSlug,
-        details: `${tailWindow.source}: ${tailWindow.details}`
-      }));
+      markets ??= await fetchEventStrategyMarkets(match.eventSlug);
+      const lockedCandidates = selectLossRequiresCandidates(match, markets, {
+        entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes,
+        allowLockedOutsideEntryWindow: true
+      }).filter((candidate) => candidate.locked === true);
+      if (lockedCandidates.length === 0) {
+        return ok(summary(args.mode, {
+          action: "NO_TRADE",
+          reason: "MATCH_NOT_LATE_ENOUGH",
+          eventSlug: match.eventSlug,
+          details: `${tailWindow.source}: ${tailWindow.details}`
+        }));
+      }
     }
 
     const liveConfig = args.mode === "live" ? liveConfigFromEnv(env) : undefined;
     const liveStake = await resolveStake(args, match, env, liveConfig, deps);
     if (liveStake.action === "NO_TRADE") return ok(summary(args.mode, liveStake.decision));
 
-    const markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : await fetchEventStrategyMarkets(match.eventSlug);
+    markets ??= await fetchEventStrategyMarkets(match.eventSlug);
     const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
     const orderbooks = args.orderbookFile
       ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
@@ -321,9 +330,10 @@ async function runSportsWatch(
           .filter((match) => !completedEventSlugs.has(match.eventSlug))
           .slice(0, Math.max(0, maxIterations - iterations));
         const polledMatches = await Promise.all(pollMatches.map(async (match) => {
+          if (!shouldPollVerifiedClock(match)) return refillEventSlugs.has(match.eventSlug) ? match : null;
           const clockPatch = await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
           if (clockPatch) return { ...match, ...clockPatch };
-          return refillEventSlugs.has(match.eventSlug) && match.remainingSecondsSource === "365scores_added_time_precise_game_time" ? match : null;
+          return refillEventSlugs.has(match.eventSlug) ? match : null;
         }));
         for (const timedMatch of polledMatches) {
           if (!timedMatch || iterations >= maxIterations) continue;
@@ -347,7 +357,7 @@ async function runSportsWatch(
     return undefined;
 
     async function processSportsWatchMatch(match: MatchState): Promise<{ result: CliResult; last: Record<string, unknown>; match: MatchState }> {
-      const clockPatch = match.remainingSecondsSource === "365scores_added_time_precise_game_time"
+      const clockPatch = match.remainingSecondsSource === "365scores_added_time_precise_game_time" || !shouldPollVerifiedClock(match)
         ? null
         : await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
       const timedMatch = clockPatch ? { ...match, ...clockPatch } : match;
@@ -650,6 +660,7 @@ async function overlayVerifiedClockForSinglePass(
   deps: CliDependencies
 ): Promise<MatchState> {
   if (args.matchFile || match.remainingSecondsSource === "365scores_added_time_precise_game_time") return match;
+  if (!shouldPollVerifiedClock(match)) return match;
 
   const clockOptions = verifiedClockOptions(env);
   const fetchVerifiedClock = deps.fetchVerifiedClock ?? (deps.fetchMatchState ? undefined : defaultVerifiedClockFetcher(clockOptions));
@@ -856,7 +867,8 @@ export async function fetchCandidateOrderbooks(
 ): Promise<OrderbookSnapshot[]> {
   const orderbookFetcher = typeof orderbookFetcherOverride === "function" ? orderbookFetcherOverride : fetcher;
   const candidates = selectLossRequiresCandidates(match, markets, {
-    entryWindowMinutes
+    entryWindowMinutes,
+    allowLockedOutsideEntryWindow: true
   });
   const tokenIds = [...new Set(candidates.map((candidate) => candidate.tokenId))];
   const results = await Promise.allSettled(tokenIds.map((tokenId) => orderbookFetcher(tokenId)));

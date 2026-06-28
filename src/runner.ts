@@ -49,21 +49,21 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
     entryWindowMinutes: thresholds.entryWindowMinutes
   };
   const tailWindow = classifyTailWindow(input.match, tailWindowOptions);
-  if (!tailWindow.eligible) {
-    return {
-      action: "NO_TRADE",
-      reason: "MATCH_NOT_LATE_ENOUGH",
-      eventSlug: input.match.eventSlug,
-      details: tailWindow.details
-    };
-  }
-
   const strategyOptions = {
-    entryWindowMinutes: thresholds.entryWindowMinutes
+    entryWindowMinutes: thresholds.entryWindowMinutes,
+    allowLockedOutsideEntryWindow: true
   };
   const candidates = selectLossRequiresCandidates(input.match, input.markets, strategyOptions);
 
   if (candidates.length === 0) {
+    if (!tailWindow.eligible) {
+      return {
+        action: "NO_TRADE",
+        reason: "MATCH_NOT_LATE_ENOUGH",
+        eventSlug: input.match.eventSlug,
+        details: tailWindow.details
+      };
+    }
     return { action: "NO_TRADE", reason: "NO_ELIGIBLE_STRATEGY", eventSlug: input.match.eventSlug };
   }
 

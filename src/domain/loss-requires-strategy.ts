@@ -6,6 +6,7 @@ import type { MatchState, SelectedStrategyMarket, StrategyMarket, TailStrategy }
 export interface LossRequiresStrategyOptions {
   entryWindowMinutes?: number;
   includeLocked?: boolean;
+  allowLockedOutsideEntryWindow?: boolean;
 }
 
 interface TeamScore {
@@ -20,12 +21,14 @@ export function selectLossRequiresCandidates(
 ): SelectedStrategyMarket[] {
   const entryWindowMinutes = options.entryWindowMinutes ?? DEFAULT_ENTRY_WINDOW_MINUTES;
   const includeLocked = options.includeLocked ?? true;
+  const inEntryWindow = isInEntryWindow(match, entryWindowMinutes);
 
-  if (!isWorldCupMatch(match) || !isInEntryWindow(match, entryWindowMinutes)) return [];
+  if (!isWorldCupMatch(match)) return [];
+  if (!inEntryWindow && !(includeLocked && options.allowLockedOutsideEntryWindow === true && isLiveSecondHalf(match))) return [];
 
   const candidates = markets
     .filter((market) => market.eventSlug === match.eventSlug)
-    .flatMap((market) => candidatesForMarket(match, market, includeLocked));
+    .flatMap((market) => candidatesForMarket(match, market, includeLocked, inEntryWindow));
 
   return dedupeCandidates(candidates);
 }
@@ -36,14 +39,18 @@ function isInEntryWindow(match: MatchState, entryWindowMinutes: number): boolean
   }).eligible;
 }
 
-function candidatesForMarket(match: MatchState, market: StrategyMarket, includeLocked: boolean): SelectedStrategyMarket[] {
-  if (isDrawMarket(market)) return drawCandidates(match, market);
+function candidatesForMarket(match: MatchState, market: StrategyMarket, includeLocked: boolean, includeNonLocked: boolean): SelectedStrategyMarket[] {
+  if (isDrawMarket(market)) return includeNonLocked ? drawCandidates(match, market) : [];
   if (isBttsMarket(market)) return includeLocked ? bttsCandidates(match, market) : [];
-  if (isTeamTotalMarket(market)) return teamTotalCandidates(match, market, includeLocked);
-  if (isTotalMarket(market)) return totalCandidates(match, market, includeLocked);
-  if (isSpreadMarket(market)) return spreadCandidates(match, market);
-  if (isMoneylineMarket(market)) return moneylineCandidates(match, market);
+  if (isTeamTotalMarket(market)) return teamTotalCandidates(match, market, includeLocked, includeNonLocked);
+  if (isTotalMarket(market)) return totalCandidates(match, market, includeLocked, includeNonLocked);
+  if (isSpreadMarket(market)) return includeNonLocked ? spreadCandidates(match, market) : [];
+  if (isMoneylineMarket(market)) return includeNonLocked ? moneylineCandidates(match, market) : [];
   return [];
+}
+
+function isLiveSecondHalf(match: MatchState): boolean {
+  return match.period === "2H" && match.isLive && match.ended !== true;
 }
 
 function moneylineCandidates(match: MatchState, market: StrategyMarket): SelectedStrategyMarket[] {
@@ -82,7 +89,7 @@ function drawCandidates(match: MatchState, market: StrategyMarket): SelectedStra
   return candidate ? [candidate] : [];
 }
 
-function totalCandidates(match: MatchState, market: StrategyMarket, includeLocked: boolean): SelectedStrategyMarket[] {
+function totalCandidates(match: MatchState, market: StrategyMarket, includeLocked: boolean, includeNonLocked = true): SelectedStrategyMarket[] {
   const line = market.line ?? parseOuLine(market.question);
   if (line === null) return [];
 
@@ -90,7 +97,7 @@ function totalCandidates(match: MatchState, market: StrategyMarket, includeLocke
   const overAtTotal = Math.floor(line) + 1;
   const candidates: SelectedStrategyMarket[] = [];
 
-  if (overAtTotal - currentTotal >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
+  if (includeNonLocked && overAtTotal - currentTotal >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
     const candidate = toCandidate({ ...market, line }, "total_under_loss_ge2", "Under", overAtTotal - currentTotal);
     if (candidate) candidates.push(candidate);
   }
@@ -158,7 +165,7 @@ function spreadOtherSideOutcome(market: StrategyMarket, spreadTeamName: string):
   return market.outcomes.find((outcome) => normalize(outcome) !== normalize(spreadTeamName)) ?? null;
 }
 
-function teamTotalCandidates(match: MatchState, market: StrategyMarket, includeLocked: boolean): SelectedStrategyMarket[] {
+function teamTotalCandidates(match: MatchState, market: StrategyMarket, includeLocked: boolean, includeNonLocked = true): SelectedStrategyMarket[] {
   const line = market.line ?? parseOuLine(market.question);
   const team = market.team ?? parseTeamTotalTeam(market.question, match);
   if (line === null || !team) return [];
@@ -169,7 +176,7 @@ function teamTotalCandidates(match: MatchState, market: StrategyMarket, includeL
   const overAtTotal = Math.floor(line) + 1;
   const candidates: SelectedStrategyMarket[] = [];
 
-  if (overAtTotal - score.goals >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
+  if (includeNonLocked && overAtTotal - score.goals >= MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS) {
     const candidate = toCandidate({ ...market, line, team: score.team }, "team_total_under_loss_ge2", "Under", overAtTotal - score.goals);
     if (candidate) candidates.push(candidate);
   }

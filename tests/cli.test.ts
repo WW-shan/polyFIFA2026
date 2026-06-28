@@ -663,6 +663,70 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch buys locked overs immediately from score updates without waiting for remaining time", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-immediate-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-immediate-2026-06-27";
+    const overToken = "locked-immediate-over";
+    await writeFile(marketsFile, JSON.stringify([{
+      eventSlug,
+      marketSlug: `${eventSlug}-total-0pt5`,
+      question: "Locked Immediate vs. Opponent: O/U 0.5",
+      conditionId: "cond-locked-immediate",
+      outcomes: ["Over", "Under"],
+      clobTokenIds: [overToken, "locked-immediate-under"],
+      line: 0.5,
+      marketType: "total"
+    } satisfies StrategyMarket]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug,
+        homeTeam: "Locked Immediate",
+        awayTeam: "Opponent",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 60,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 60 * 60
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked Immediate", awayTeam: "Opponent" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        action: "BUY",
+        eventSlug,
+        tokenId: overToken,
+        strategy: "total_over_locked",
+        locked: true
+      }
+    });
+  });
+
   test("worldcup watch does not let a verified clock patch change the event score", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-clock-score-guard-"));
     const marketsFile = join(dir, "markets.json");
@@ -1497,7 +1561,10 @@ describe("CLI", () => {
     });
   });
 
-  test("worldcup live watch skips balance and market fetches before the tail window", async () => {
+  test("worldcup live watch skips balance before the tail window when no locked market is available", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-early-tail-"));
+    const marketsFile = join(dir, "markets.json");
+    await writeFile(marketsFile, JSON.stringify([]));
     const readPusdBalance = vi.fn(async () => {
       throw new Error("balance should not be read before the tail window");
     });
@@ -1518,6 +1585,7 @@ describe("CLI", () => {
       "--mode", "live",
       "--watch", "true",
       "--worldcup", "true",
+      "--markets-file", marketsFile,
       "--interval-ms", "0",
       "--max-iterations", "1"
     ], {
@@ -1531,7 +1599,6 @@ describe("CLI", () => {
 
     expect(result.exitCode).toBe(0);
     expect(readPusdBalance).not.toHaveBeenCalled();
-    expect(eventPageMock.fetchEventStrategyMarkets).not.toHaveBeenCalled();
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "live",
       status: "watch_complete",
@@ -1701,6 +1768,9 @@ describe("CLI", () => {
   });
 
   test("worldcup live watch starts auto redeem settlement in the background", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-auto-settle-"));
+    const marketsFile = join(dir, "markets.json");
+    await writeFile(marketsFile, JSON.stringify([]));
     const settleRedeemablePositions = vi.fn(() => new Promise<never>(() => {}));
     async function* updates(): AsyncIterable<MatchState> {
       yield {
@@ -1719,6 +1789,7 @@ describe("CLI", () => {
       "--mode", "live",
       "--watch", "true",
       "--worldcup", "true",
+      "--markets-file", marketsFile,
       "--interval-ms", "0",
       "--max-iterations", "1"
     ], {

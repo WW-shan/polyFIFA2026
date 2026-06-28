@@ -164,7 +164,11 @@ function validateTradeInputs(
   const tailWindow = classifyTailWindow(match, {
     entryWindowMinutes: thresholds.entryWindowMinutes
   });
-  if (!tailWindow.eligible) {
+  if (selected.locked === true && !isLiveSecondHalf(match)) {
+    return { action: "NO_TRADE", decision: noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, `period=${match.period} isLive=${match.isLive} ended=${match.ended === true}`) };
+  }
+
+  if (selected.locked !== true && !tailWindow.eligible) {
     return { action: "NO_TRADE", decision: noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, tailWindow.details) };
   }
 
@@ -224,6 +228,10 @@ function lockedConditionMatchesScore(match: MatchState, selected: SelectedStrate
     return normalizedOutcome(selected.outcome) === "yes" && match.homeGoals > 0 && match.awayGoals > 0;
   }
   return false;
+}
+
+function isLiveSecondHalf(match: MatchState): boolean {
+  return match.period === "2H" && match.isLive && match.ended !== true;
 }
 
 function overLocksAt(line: number): number {

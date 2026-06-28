@@ -44,6 +44,68 @@ function book(tokenId: string, price: number, size = 100): OrderbookSnapshot {
 }
 
 describe("loss-requires decision flow", () => {
+  test("buys locked overs immediately without verified remaining time", () => {
+    const {
+      remainingSeconds: _remainingSeconds,
+      remainingSecondsSource: _remainingSecondsSource,
+      ...matchWithoutRemainingSeconds
+    } = match;
+    const earlyLocked = {
+      ...matchWithoutRemainingSeconds,
+      homeGoals: 1,
+      awayGoals: 0,
+      minute: 60,
+      elapsedSeconds: 60 * 60
+    };
+
+    const decision = runDecisionFlow({
+      match: earlyLocked,
+      markets: [{
+        eventSlug: match.eventSlug,
+        marketSlug: "match-total-0p5",
+        question: "Strong vs. Weak: O/U 0.5",
+        conditionId: "cond-total-0p5",
+        outcomes: ["Over", "Under"],
+        clobTokenIds: ["total0-over", "total0-under"],
+        line: 0.5,
+        marketType: "total"
+      }],
+      orderbooks: [book("total0-over", 0.98, 100)],
+      stake: 10
+    });
+
+    expect(decision).toMatchObject({
+      action: "BUY",
+      strategy: "total_over_locked",
+      locked: true,
+      tokenId: "total0-over",
+      bestAsk: 0.98
+    });
+  });
+
+  test("still refuses non-locked candidates without verified remaining time", () => {
+    const {
+      remainingSeconds: _remainingSeconds,
+      remainingSecondsSource: _remainingSecondsSource,
+      ...matchWithoutRemainingSeconds
+    } = match;
+
+    const decision = runDecisionFlow({
+      match: {
+        ...matchWithoutRemainingSeconds,
+        elapsedSeconds: 60 * 60
+      },
+      markets,
+      orderbooks: [book("weak-no", 0.98, 100)],
+      stake: 10
+    });
+
+    expect(decision).toMatchObject({
+      action: "NO_TRADE",
+      reason: "MATCH_NOT_LATE_ENOUGH"
+    });
+  });
+
   test("skips a 0.999 positive-net opportunity below the default 0.5% minimum return", () => {
     const decision = runDecisionFlow({
       match,
