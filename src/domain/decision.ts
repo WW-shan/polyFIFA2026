@@ -14,6 +14,9 @@ import type {
 
 export type TradeLevel = Omit<BuyTradeLeg, "shares" | "notional" | "estimatedFee">;
 
+// Low prices on "locked" legs usually indicate stale or mismatched score data.
+const LOCKED_ENTRY_PRICE_FLOOR = 0.9;
+
 export function buildTradeDecision(
   match: MatchState,
   selected: SelectedStrategyMarket,
@@ -25,7 +28,7 @@ export function buildTradeDecision(
 
   const levels = buildTradeLevels(match, selected, orderbook, thresholds);
   const legs = allocateTradeLegs(levels, thresholds);
-  if (legs.length === 0) return noExecutableLevelDecision(match, orderbook, thresholds);
+  if (legs.length === 0) return noExecutableLevelDecision(match, selected, orderbook, thresholds);
 
   return buyDecisionFromLegs(legs);
 }
@@ -45,7 +48,7 @@ export function buildTradeLevels(
   return [...new Set(asks.map((ask) => ask.price))]
     .sort((a, b) => a - b)
     .flatMap((price) => {
-      if (price > thresholds.maxEntryPrice) return [];
+      if (!isEligibleEntryPrice(price, selected, thresholds)) return [];
       const estimatedNetReturn = netReturnRate(price);
       if (estimatedNetReturn < thresholds.minimumNetReturn) return [];
       const availableSize = asks
@@ -141,6 +144,16 @@ export function buyDecisionFromLegs(legs: readonly BuyTradeLeg[]): BuyTradeDecis
   return decision;
 }
 
+function isEligibleEntryPrice(
+  price: number,
+  selected: SelectedStrategyMarket,
+  thresholds: Pick<DecisionThresholds, "maxEntryPrice">
+): boolean {
+  if (price > thresholds.maxEntryPrice) return false;
+  if (selected.locked === true && price < LOCKED_ENTRY_PRICE_FLOOR) return false;
+  return true;
+}
+
 function validateTradeInputs(
   match: MatchState,
   selected: SelectedStrategyMarket,
@@ -195,15 +208,22 @@ function noTrade(reason: NoTradeDecision["reason"], eventSlug: string, details?:
   return decision;
 }
 
-function noExecutableLevelDecision(match: MatchState, orderbook: OrderbookSnapshot, thresholds: DecisionThresholds): NoTradeDecision {
+function noExecutableLevelDecision(
+  match: MatchState,
+  selected: SelectedStrategyMarket,
+  orderbook: OrderbookSnapshot,
+  thresholds: DecisionThresholds
+): NoTradeDecision {
   const asks = sortedPositiveAsks(orderbook.asks);
-  const eligibleReturns = asks.filter((ask) => ask.price <= thresholds.maxEntryPrice).map((ask) => netReturnRate(ask.price));
+  const eligibleReturns = asks
+    .filter((ask) => isEligibleEntryPrice(ask.price, selected, thresholds))
+    .map((ask) => netReturnRate(ask.price));
   const bestReturn = eligibleReturns[0];
   if (bestReturn !== undefined && bestReturn < thresholds.minimumNetReturn) {
     return noTrade("RETURN_TOO_LOW", match.eventSlug, `Net return ${bestReturn} below minimum ${thresholds.minimumNetReturn}`);
   }
   const bestNotional = Math.max(0, ...asks
-    .filter((ask) => ask.price <= thresholds.maxEntryPrice && netReturnRate(ask.price) >= thresholds.minimumNetReturn)
+    .filter((ask) => isEligibleEntryPrice(ask.price, selected, thresholds) && netReturnRate(ask.price) >= thresholds.minimumNetReturn)
     .map((ask) => ask.price * ask.size));
   return noTrade("DEPTH_TOO_SMALL", match.eventSlug, `Available notional ${bestNotional} below minimum ${thresholds.minimumNotional}`);
 }

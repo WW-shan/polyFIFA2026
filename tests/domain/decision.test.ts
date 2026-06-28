@@ -132,4 +132,20 @@ describe("buildTradeDecision", () => {
 
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
   });
+
+  test("rejects locked candidates at implausibly low prices", () => {
+    const decision = buildTradeDecision(match, {
+      ...selected,
+      strategy: "total_over_locked",
+      outcome: "Over",
+      lossRequiresGoals: 999,
+      locked: true
+    }, book([[0.18, 10_000]]), {
+      ...thresholds,
+      maxEntryPrice: 0.995,
+      minimumNetReturn: 0.005
+    });
+
+    expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+  });
 });
