@@ -446,7 +446,7 @@ async function runSportsWatch(
       if (isCompletedTradeSummary(parsed)) {
         if (shouldKeepRefillingLockedEvent(parsed, match)) {
           refillEventSlugs.add(match.eventSlug);
-          rememberClockPollMatch(activeMatches, match);
+          activeMatches.set(match.eventSlug, match);
           pendingBuys.delete(match.eventSlug);
           return undefined;
         }
