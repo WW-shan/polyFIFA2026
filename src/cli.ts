@@ -330,10 +330,16 @@ async function runSportsWatch(
           .filter((match) => !completedEventSlugs.has(match.eventSlug))
           .slice(0, Math.max(0, maxIterations - iterations));
         const polledMatches = await Promise.all(pollMatches.map(async (match) => {
-          if (!shouldPollVerifiedClock(match)) return refillEventSlugs.has(match.eventSlug) ? match : null;
-          const clockPatch = await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
-          if (clockPatch) return { ...match, ...clockPatch };
-          return refillEventSlugs.has(match.eventSlug) ? match : null;
+          const [freshMatch, clockPatch] = await Promise.all([
+            fetchActiveMatchSnapshot(match),
+            shouldPollVerifiedClock(match)
+              ? maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions)
+              : Promise.resolve(null)
+          ]);
+          const baseMatch = freshMatch ?? match;
+          if (clockPatch && shouldPollVerifiedClock(baseMatch)) return { ...baseMatch, ...clockPatch };
+          if (freshMatch || refillEventSlugs.has(match.eventSlug)) return baseMatch;
+          return null;
         }));
         for (const timedMatch of polledMatches) {
           if (!timedMatch || iterations >= maxIterations) continue;
@@ -480,6 +486,14 @@ async function runSportsWatch(
       pendingBuys.delete(match.eventSlug);
       refillEventSlugs.delete(match.eventSlug);
     }
+
+    async function fetchActiveMatchSnapshot(match: MatchState): Promise<MatchState | null> {
+      try {
+        return await (deps.fetchMatchState ?? fetchEventMatchState)(match.eventSlug);
+      } catch {
+        return null;
+      }
+    }
   }
 }
 
@@ -504,7 +518,6 @@ function rememberClockPollMatch(activeMatches: Map<string, MatchState>, match: M
     activeMatches.delete(match.eventSlug);
     return;
   }
-  if (!shouldPollVerifiedClock(match)) return;
   activeMatches.set(match.eventSlug, match);
 }
 

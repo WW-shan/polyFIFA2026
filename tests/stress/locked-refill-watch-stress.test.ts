@@ -45,6 +45,7 @@ describe("locked refill watch stress coverage", () => {
         POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
       }, {
         fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked", awayTeam: "Refill" }],
+        fetchMatchState: async () => liveLockedMatch(eventSlug),
         watchSportsUpdates: async () => oneLiveUpdate(liveLockedMatch(eventSlug)),
         fetchVerifiedClock: async () => null,
         readPusdBalance: async () => balance,

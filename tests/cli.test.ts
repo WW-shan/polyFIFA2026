@@ -727,6 +727,89 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch actively rescans second-half matches for locked opportunities between sports updates", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-active-poll-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-active-poll-2026-06-29";
+    const overToken = "locked-active-poll-over";
+    await writeFile(marketsFile, JSON.stringify([{
+      eventSlug,
+      marketSlug: `${eventSlug}-total-0pt5`,
+      question: "Locked Active vs. Poll: O/U 0.5",
+      conditionId: "cond-locked-active-poll",
+      outcomes: ["Over", "Under"],
+      clobTokenIds: [overToken, "locked-active-poll-under"],
+      line: 0.5,
+      marketType: "total"
+    } satisfies StrategyMarket]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug,
+        homeTeam: "Locked Active",
+        awayTeam: "Poll",
+        homeGoals: 0,
+        awayGoals: 0,
+        minute: 60,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 60 * 60
+      };
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    let matchPolls = 0;
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked Active", awayTeam: "Poll" }],
+      watchSportsUpdates: async () => updates(),
+      fetchMatchState: async () => {
+        matchPolls += 1;
+        return {
+          eventSlug,
+          homeTeam: "Locked Active",
+          awayTeam: "Poll",
+          homeGoals: 1,
+          awayGoals: 0,
+          minute: 60,
+          period: "2H",
+          isLive: true,
+          elapsedSeconds: 60 * 60 + matchPolls
+        };
+      },
+      fetchVerifiedClock: async () => {
+        throw new Error("365 clock should not be needed before the tail window");
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(matchPolls).toBeGreaterThan(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        action: "BUY",
+        eventSlug,
+        tokenId: overToken,
+        strategy: "total_over_locked",
+        locked: true
+      }
+    });
+  });
+
   test("worldcup watch does not let a verified clock patch change the event score", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-clock-score-guard-"));
     const marketsFile = join(dir, "markets.json");

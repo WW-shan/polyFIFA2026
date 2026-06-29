@@ -25,6 +25,7 @@ describe("two-match full live chain stress coverage", () => {
       const clockCalls: string[] = [];
       const executionCounts = new Map<string, number>();
       const tokenPostCounts = new Map<string, number>();
+      const latestMatches = new Map<string, MatchState>();
       let balance = spec.initialBalance;
       let refreshPhase = false;
 
@@ -68,7 +69,8 @@ describe("two-match full live chain stress coverage", () => {
           { eventSlug: fixture.lockedSlug, homeTeam: "Locked", awayTeam: "Opponent" },
           { eventSlug: fixture.tailSlug, homeTeam: "Tail", awayTeam: "Opponent" }
         ],
-        watchSportsUpdates: async () => updatesFor(fixture, spec, postedOrders),
+        watchSportsUpdates: async () => trackUpdates(updatesFor(fixture, spec, postedOrders), latestMatches),
+        fetchMatchState: async (eventSlug) => latestMatches.get(eventSlug) ?? initialMatchFor(eventSlug, fixture),
         fetchVerifiedClock: async (match) => {
           clockCalls.push(match.eventSlug);
           if (match.eventSlug !== fixture.tailSlug) return null;
@@ -344,6 +346,43 @@ async function* updatesFor(
     period: "2H",
     isLive: true,
     elapsedSeconds: 90 * 60
+  };
+}
+
+async function* trackUpdates(
+  updates: AsyncIterable<MatchState>,
+  latestMatches: Map<string, MatchState>
+): AsyncIterable<MatchState> {
+  for await (const update of updates) {
+    latestMatches.set(update.eventSlug, update);
+    yield update;
+  }
+}
+
+function initialMatchFor(eventSlug: string, fixture: StressFixture): MatchState {
+  if (eventSlug === fixture.lockedSlug) {
+    return {
+      eventSlug,
+      homeTeam: "Locked",
+      awayTeam: "Opponent",
+      homeGoals: 1,
+      awayGoals: 0,
+      minute: 60,
+      period: "2H",
+      isLive: true,
+      elapsedSeconds: 60 * 60
+    };
+  }
+  return {
+    eventSlug,
+    homeTeam: "Tail",
+    awayTeam: "Opponent",
+    homeGoals: 2,
+    awayGoals: 0,
+    minute: 60,
+    period: "2H",
+    isLive: true,
+    elapsedSeconds: 60 * 60
   };
 }
 
