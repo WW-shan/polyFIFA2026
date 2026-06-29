@@ -13,9 +13,7 @@ export async function fetchEventStrategyMarkets(eventSlug: string): Promise<Stra
   let primaryError: unknown;
   try {
     const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
-    const payload = extractNextInitialState(html);
-    const state = decodeInitialStatePayload(payload);
-    const markets = findStrategyMarkets(state, eventSlug);
+    const markets = findStrategyMarketsFromSportsPageHtml(html, eventSlug);
     if (markets.length > 0) return markets;
   } catch (error) {
     primaryError = error;
@@ -40,6 +38,23 @@ async function fetchGammaEventStrategyMarkets(eventSlug: string): Promise<Strate
   return findStrategyMarkets(event, eventSlug);
 }
 
+export function findStrategyMarketsFromSportsPageHtml(html: string, eventSlug: string): StrategyMarket[] {
+  const markets: StrategyMarket[] = [];
+
+  try {
+    const payload = extractNextInitialState(html);
+    markets.push(...findStrategyMarkets(decodeInitialStatePayload(payload), eventSlug));
+  } catch {
+    // Newer Polymarket sports pages use Next app-router flight data instead.
+  }
+
+  for (const state of extractNextFlightCompressedStates(html)) {
+    markets.push(...findStrategyMarkets(state, eventSlug));
+  }
+
+  return dedupeMarkets(markets);
+}
+
 export function extractNextInitialState(html: string): string {
   const scriptMatch = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
   if (!scriptMatch?.[1]) {
@@ -58,6 +73,22 @@ export function decodeInitialStatePayload(payload: string): unknown {
   const compressed = Buffer.from(payload, "base64");
   const inflated = inflateOrUnzip(compressed).toString("utf8");
   return JSON.parse(inflated) as unknown;
+}
+
+export function extractNextFlightCompressedStates(html: string): unknown[] {
+  const states: unknown[] = [];
+  const flightText = extractNextFlightText(html);
+  const searchText = flightText.length > 0 ? flightText : html;
+  for (const payload of extractNextFlightCompressedPayloads(searchText)) {
+    try {
+      const compressed = decodeBase64Url(payload);
+      const inflated = inflateOrUnzip(compressed).toString("utf8");
+      states.push(JSON.parse(inflated) as unknown);
+    } catch {
+      // Ignore unrelated RSC text chunks that happen to look like compressed data.
+    }
+  }
+  return states;
 }
 
 export function findSpreadMarkets(state: unknown, eventSlug?: string): SpreadMarket[] {
@@ -361,6 +392,41 @@ function inflateOrUnzip(buffer: Buffer): Buffer {
   } catch {
     return unzipSync(buffer);
   }
+}
+
+function extractNextFlightCompressedPayloads(html: string): string[] {
+  const payloads: string[] = [];
+  const chunkPattern = /\b[0-9a-z]+:T([0-9a-fA-F]+),/g;
+  let match: RegExpExecArray | null;
+  while ((match = chunkPattern.exec(html)) !== null) {
+    const length = Number.parseInt(match[1] ?? "", 16);
+    const start = match.index + match[0].length;
+    const end = start + length;
+    if (!Number.isFinite(length) || length <= 0 || end > html.length) continue;
+    const payload = html.slice(start, end);
+    if (/^[A-Za-z0-9_-]+$/.test(payload)) payloads.push(payload);
+  }
+  return payloads;
+}
+
+function extractNextFlightText(html: string): string {
+  let text = "";
+  const pushPattern = /self\.__next_f\.push\(\[1,("(?:\\.|[^"\\])*")\]\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pushPattern.exec(html)) !== null) {
+    try {
+      text += JSON.parse(match[1] ?? "\"\"");
+    } catch {
+      // Leave malformed push strings out; other chunks can still be usable.
+    }
+  }
+  return text;
+}
+
+function decodeBase64Url(value: string): Buffer {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(normalized + padding, "base64");
 }
 
 function walk(value: unknown, visit: (value: unknown) => void): void {

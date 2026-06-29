@@ -112,6 +112,96 @@ describe("event page initial state parsing", () => {
     ]);
   });
 
+  test("extracts strategy markets from compressed Next flight data when NEXT_DATA is absent", async () => {
+    const eventSlug = "fifwc-strong-weak-2026-06-23";
+    const flightState = {
+      events: {
+        [eventSlug]: {
+          slug: eventSlug,
+          markets: [
+            {
+              eventSlug,
+              slug: "total-2pt5",
+              question: "Strong vs. Weak: O/U 2.5",
+              conditionId: "cond-total",
+              clobTokenIds: ["over", "under"],
+              outcomes: ["Over", "Under"],
+              sportsMarketType: "totals"
+            },
+            {
+              eventSlug,
+              slug: "weak-team-total-1pt5",
+              question: "Strong vs. Weak: Weak O/U 1.5",
+              conditionId: "cond-team-total",
+              clobTokenIds: ["team-over", "team-under"],
+              outcomes: ["Over", "Under"],
+              sportsMarketType: "soccer_team_totals"
+            },
+            {
+              eventSlug,
+              slug: "btts",
+              question: "Strong vs. Weak: Both Teams to Score",
+              conditionId: "cond-btts",
+              clobTokenIds: ["btts-yes", "btts-no"],
+              outcomes: ["Yes", "No"],
+              sportsMarketType: "both_teams_to_score"
+            }
+          ]
+        }
+      }
+    };
+    const encoded = deflateSync(JSON.stringify(flightState)).toString("base64url");
+    const flight = `23:T${encoded.length.toString(16)},${encoded}\n`;
+    const html = `<html><script>self.__next_f.push([1,${JSON.stringify(flight)}])</script></html>`;
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(html, { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ slug: eventSlug, markets: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    const markets = await fetchEventStrategyMarkets(eventSlug);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "total-2pt5", marketType: "total", line: 2.5 }));
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "weak-team-total-1pt5", marketType: "team_total", team: "Weak", line: 1.5 }));
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "btts", marketType: "btts" }));
+  });
+
+  test("reassembles split Next flight chunks before decoding compressed market state", async () => {
+    const eventSlug = "fifwc-strong-weak-2026-06-23";
+    const flightState = {
+      events: {
+        [eventSlug]: {
+          slug: eventSlug,
+          markets: [
+            {
+              slug: "total-3pt5",
+              question: "Strong vs. Weak: O/U 3.5",
+              conditionId: "cond-total-3pt5",
+              clobTokenIds: ["over-3pt5", "under-3pt5"],
+              outcomes: ["Over", "Under"],
+              sportsMarketType: "totals"
+            }
+          ]
+        }
+      }
+    };
+    const encoded = deflateSync(JSON.stringify(flightState)).toString("base64url");
+    const tag = `23:T${encoded.length.toString(16)},`;
+    const splitAt = Math.floor(encoded.length / 2);
+    const html = [
+      `<script>self.__next_f.push([1,${JSON.stringify(tag)}])</script>`,
+      `<script>self.__next_f.push([1,${JSON.stringify(encoded.slice(0, splitAt))}])</script>`,
+      `<script>self.__next_f.push([1,${JSON.stringify(`${encoded.slice(splitAt)}\n`)}])</script>`
+    ].join("");
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(html, { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ slug: eventSlug, markets: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    const markets = await fetchEventStrategyMarkets(eventSlug);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: "total-3pt5", marketType: "total", line: 3.5 }));
+  });
+
   test("parses spread line from question text", () => {
     expect(parseSpreadLine("Spread: Japan (-3.5)")).toBe(-3.5);
     expect(parseSpreadLine("Spread: Saudi Arabia (+3.5)")).toBe(3.5);
