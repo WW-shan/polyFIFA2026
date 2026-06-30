@@ -743,7 +743,7 @@ async function runSportsWatch(
     }
 
     function rememberScoreIncident(match: MatchState): ScoreIncidentContext {
-      if (match.period !== "2H" || !match.isLive || match.ended === true) return { action: "none" };
+      if (!isLiveLockedScoreMatch(match)) return { action: "none" };
       const previous = observedScores.get(match.eventSlug);
       const score = scorePair(match);
 
@@ -1078,7 +1078,13 @@ function shouldKeepRefillingLockedEvent(value: Record<string, unknown>, match: M
   if (!isPositiveNumber(value.notional) && !isPositiveNumber(value.shares)) return false;
   const decision = buyDecisionFromSummary(value);
   if (!decision || decision.locked !== true || !isLockedStrategy(decision.strategy)) return false;
-  return match.period === "2H" && match.isLive && match.ended !== true;
+  return isLiveLockedScoreMatch(match);
+}
+
+function isLiveLockedScoreMatch(match: MatchState): boolean {
+  return match.isLive
+    && match.ended !== true
+    && (match.period === "1H" || match.period === "HT" || match.period === "2H" || match.period === "ET");
 }
 
 function isPositiveNumber(value: unknown): value is number {

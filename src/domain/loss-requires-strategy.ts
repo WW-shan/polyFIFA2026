@@ -24,7 +24,7 @@ export function selectLossRequiresCandidates(
   const inEntryWindow = isInEntryWindow(match, entryWindowMinutes);
 
   if (!isWorldCupMatch(match)) return [];
-  if (!inEntryWindow && !(includeLocked && options.allowLockedOutsideEntryWindow === true && isLiveSecondHalf(match))) return [];
+  if (!inEntryWindow && !(includeLocked && options.allowLockedOutsideEntryWindow === true && isLiveMatch(match))) return [];
 
   const candidates = markets
     .filter((market) => market.eventSlug === match.eventSlug)
@@ -49,8 +49,10 @@ function candidatesForMarket(match: MatchState, market: StrategyMarket, includeL
   return [];
 }
 
-function isLiveSecondHalf(match: MatchState): boolean {
-  return match.period === "2H" && match.isLive && match.ended !== true;
+function isLiveMatch(match: MatchState): boolean {
+  return match.isLive
+    && match.ended !== true
+    && (match.period === "1H" || match.period === "HT" || match.period === "2H" || match.period === "ET");
 }
 
 function moneylineCandidates(match: MatchState, market: StrategyMarket): SelectedStrategyMarket[] {

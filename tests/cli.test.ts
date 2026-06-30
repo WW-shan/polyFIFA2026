@@ -743,6 +743,64 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch buys first-half locked overs immediately from score updates", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-first-half-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-first-half-2026-07-01";
+    const overToken = "locked-first-half-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Locked", "First Half", 0.5, "locked-first-half")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug,
+        homeTeam: "Locked",
+        awayTeam: "First Half",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 45,
+        period: "1H",
+        isLive: true,
+        elapsedSeconds: 45 * 60
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "100",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked", awayTeam: "First Half" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        action: "BUY",
+        eventSlug,
+        tokenId: overToken,
+        strategy: "total_over_locked",
+        locked: true,
+        notional: expect.closeTo(20, 8)
+      }
+    });
+  });
+
   test("worldcup live watch caps one score-change locked incident to 20 percent of total balance across related markets", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-incident-cap-"));
     const marketsFile = join(dir, "markets.json");
