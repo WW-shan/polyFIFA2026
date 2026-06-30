@@ -89,6 +89,41 @@ describe("auto settlement", () => {
     }));
   });
 
+  test("marks active ledger entries redeemed when a resolved winning token is already gone", async () => {
+    const markRedeemedConditionIds = vi.fn(async () => {});
+    const result = await settleRedeemablePositions({
+      enabled: true,
+      walletAddress,
+      ownerAddress,
+      privateKey: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      relayerUrl: "https://relayer-v2.polymarket.com",
+      chainId: 137,
+      rpcUrl: "http://rpc.example",
+      intervalMs: 60_000,
+      deadlineSeconds: 600,
+      sizeThreshold: 0
+    }, {
+      fetchRedeemablePositions: async () => [],
+      readActiveLedgerEntries: async () => [{
+        eventSlug: "event-a",
+        marketSlug: "event-a-total-0pt5",
+        tokenId: "token-over",
+        conditionId: conditionA,
+        outcome: "Over"
+      }],
+      fetchMarketSettlementStatus: async () => ({
+        outcomes: ["Over", "Under"],
+        outcomePrices: [1, 0],
+        resolved: true
+      }),
+      readConditionalTokenBalance: async () => 0n,
+      markRedeemedConditionIds
+    });
+
+    expect(result).toMatchObject({ status: "no_positions", positions: 0, conditions: 0, calls: 0 });
+    expect(markRedeemedConditionIds).toHaveBeenCalledWith([conditionA]);
+  });
+
   test("does not block the watch loop and suppresses overlapping settlement runs", async () => {
     let resolveRun!: (value: unknown) => void;
     const settle = vi.fn(() => new Promise<SettlementResult>((resolve) => {

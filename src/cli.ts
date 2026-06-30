@@ -7,7 +7,7 @@ import { capStakeToAvailableBalance, DEFAULT_POLYGON_RPC_URL, readPusdBalance } 
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import type { LiveExecuteOptions, LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
-import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
+import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type MarketSettlementStatus, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
 import { LiveLedger, isActiveLedgerStatus, isLockedStrategy } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
@@ -77,6 +77,8 @@ export interface CliDependencies {
   fetchRedeemablePositions?: (walletAddress: string, config: SettlementConfig) => Promise<RedeemablePosition[]>;
   submitDepositWalletBatch?: (input: SubmitDepositWalletBatchInput) => Promise<unknown>;
   settleRedeemablePositions?: (config: SettlementConfig) => Promise<SettlementResult>;
+  fetchMarketSettlementStatus?: (marketSlug: string, config: SettlementConfig) => Promise<MarketSettlementStatus | null>;
+  readConditionalTokenBalance?: (walletAddress: string, tokenId: string, config: SettlementConfig) => Promise<bigint>;
   onSettlementError?: (error: unknown) => void;
 }
 
@@ -645,9 +647,12 @@ function autoSettlementMonitor(
   if (deps.fetchRedeemablePositions) monitorDeps.fetchRedeemablePositions = deps.fetchRedeemablePositions;
   if (deps.submitDepositWalletBatch) monitorDeps.submitDepositWalletBatch = deps.submitDepositWalletBatch;
   if (deps.settleRedeemablePositions) monitorDeps.settle = (settlementConfig) => deps.settleRedeemablePositions!(settlementConfig);
+  if (deps.fetchMarketSettlementStatus) monitorDeps.fetchMarketSettlementStatus = deps.fetchMarketSettlementStatus;
+  if (deps.readConditionalTokenBalance) monitorDeps.readConditionalTokenBalance = deps.readConditionalTokenBalance;
   const ledgerFile = resolveLedgerFile(args, env);
   if (ledgerFile) {
     const ledger = new LiveLedger(ledgerFile);
+    monitorDeps.readActiveLedgerEntries = () => ledger.readActiveEntries();
     monitorDeps.markRedeemedConditionIds = (conditionIds) => ledger.markRedeemedByConditionIds(conditionIds);
   }
   monitorDeps.onError = deps.onSettlementError ?? ((error) => {

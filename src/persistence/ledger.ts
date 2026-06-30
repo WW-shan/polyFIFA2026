@@ -33,6 +33,11 @@ export class LiveLedger {
     }
   }
 
+  async readActiveEntries(): Promise<LedgerTradeEntry[]> {
+    const entries = await this.readEntries();
+    return entries.filter((entry) => isActiveLedgerStatus(entry.status));
+  }
+
   async hasActiveTrade(eventSlug: string, tokenId: string): Promise<boolean> {
     const entries = await this.readEntries();
     return entries.some((entry) =>

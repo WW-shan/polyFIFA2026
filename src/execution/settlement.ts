@@ -23,6 +23,10 @@ const ctfApprovalAbi = parseAbi([
   "function setApprovalForAll(address operator, bool approved)"
 ]);
 
+const ctfBalanceAbi = parseAbi([
+  "function balanceOf(address account, uint256 id) view returns (uint256)"
+]);
+
 const adapterRedeemAbi = parseAbi([
   "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)"
 ]);
@@ -47,6 +51,25 @@ export interface RedeemablePosition {
   negativeRisk: boolean;
   marketSlug?: string;
   eventSlug?: string;
+}
+
+export interface SettlementLedgerEntry {
+  eventSlug: string;
+  marketSlug: string;
+  tokenId: string;
+  conditionId: string;
+  outcome: string;
+}
+
+export interface MarketSettlementStatus {
+  outcomes: string[];
+  outcomePrices: number[];
+  resolved: boolean;
+}
+
+export interface SettlementReconciliationResult {
+  checkedEntries: number;
+  redeemedConditions: string[];
 }
 
 export interface DepositWalletCall {
@@ -107,6 +130,9 @@ export interface SettlementDependencies {
   isApprovedForAll?: (owner: string, operator: string) => Promise<boolean>;
   submitDepositWalletBatch?: (input: SubmitDepositWalletBatchInput) => Promise<unknown>;
   markRedeemedConditionIds?: (conditionIds: readonly string[]) => Promise<void>;
+  readActiveLedgerEntries?: () => Promise<readonly SettlementLedgerEntry[]>;
+  fetchMarketSettlementStatus?: (marketSlug: string, config: SettlementConfig) => Promise<MarketSettlementStatus | null>;
+  readConditionalTokenBalance?: (walletAddress: string, tokenId: string, config: SettlementConfig) => Promise<bigint>;
 }
 
 export interface SettlementMonitorDependencies extends SettlementDependencies {
@@ -210,6 +236,7 @@ export async function settleRedeemablePositions(
   const fetchPositions = deps.fetchRedeemablePositions ?? fetchRedeemablePositions;
   const positions = await fetchPositions(config.walletAddress, config);
   const groups = conditionGroups(positions);
+  await reconcileAlreadyRedeemedLedgerEntries(config, deps);
   if (positions.length === 0 || groups.length === 0) {
     return { status: "no_positions", positions: positions.length, conditions: groups.length, calls: 0 };
   }
@@ -253,6 +280,36 @@ export async function settleRedeemablePositions(
   const state = stringValue(field(response, "state"));
   if (state) result.state = state;
   return result;
+}
+
+export async function reconcileAlreadyRedeemedLedgerEntries(
+  config: SettlementConfig,
+  deps: SettlementDependencies = {}
+): Promise<SettlementReconciliationResult> {
+  if (!config.enabled || !config.walletAddress || !deps.readActiveLedgerEntries || !deps.markRedeemedConditionIds) {
+    return { checkedEntries: 0, redeemedConditions: [] };
+  }
+
+  const entries = await deps.readActiveLedgerEntries();
+  const fetchMarket = deps.fetchMarketSettlementStatus ?? fetchGammaMarketSettlementStatus;
+  const readBalance = deps.readConditionalTokenBalance ?? readConditionalTokenBalance;
+  const redeemedConditions = new Set<string>();
+
+  await Promise.all(entries.map(async (entry) => {
+    try {
+      if (!entry.marketSlug || !entry.tokenId || !entry.conditionId || !entry.outcome) return;
+      const market = await fetchMarket(entry.marketSlug, config);
+      if (!market?.resolved || !isWinningOutcome(market, entry.outcome)) return;
+      const balance = await readBalance(config.walletAddress!, entry.tokenId, config);
+      if (balance === 0n) redeemedConditions.add(entry.conditionId);
+    } catch {
+      // Reconciliation is best-effort; normal redeem polling should continue.
+    }
+  }));
+
+  const conditionIds = [...redeemedConditions];
+  if (conditionIds.length > 0) await deps.markRedeemedConditionIds(conditionIds);
+  return { checkedEntries: entries.length, redeemedConditions: conditionIds };
 }
 
 export class AutoSettlementMonitor {
@@ -336,6 +393,48 @@ async function submitDepositWalletBatch(input: SubmitDepositWalletBatchInput): P
   const submitOptions: HttpOptions = { headers: relayerHeaders(input, "POST", "/submit", bodyText) };
   if (input.proxyUrl) submitOptions.proxyUrl = input.proxyUrl;
   return postJson<unknown>(`${relayerUrl}/submit`, bodyText, submitOptions);
+}
+
+async function fetchGammaMarketSettlementStatus(
+  marketSlug: string,
+  config: SettlementConfig
+): Promise<MarketSettlementStatus | null> {
+  const options: HttpOptions = {};
+  if (config.proxyUrl) options.proxyUrl = config.proxyUrl;
+  const raw = await fetchJson<unknown>(`https://gamma-api.polymarket.com/markets/slug/${encodeURIComponent(marketSlug)}`, options);
+  return normalizeMarketSettlementStatus(raw);
+}
+
+function normalizeMarketSettlementStatus(raw: unknown): MarketSettlementStatus | null {
+  if (!isRecord(raw)) return null;
+  const outcomes = stringArrayValue(raw.outcomes);
+  const outcomePrices = numberArrayValue(raw.outcomePrices);
+  if (outcomes.length === 0 || outcomePrices.length === 0 || outcomes.length !== outcomePrices.length) return null;
+  const umaStatus = stringValue(raw.umaResolutionStatus)?.toLowerCase();
+  const resolved = umaStatus === "resolved" || (booleanValue(raw.closed) && outcomePrices.some((price) => price >= 0.999));
+  return { outcomes, outcomePrices, resolved };
+}
+
+function isWinningOutcome(market: MarketSettlementStatus, outcome: string): boolean {
+  const index = market.outcomes.findIndex((candidate) => candidate.trim().toLowerCase() === outcome.trim().toLowerCase());
+  return index >= 0 && (market.outcomePrices[index] ?? 0) >= 0.999;
+}
+
+async function readConditionalTokenBalance(
+  walletAddress: string,
+  tokenId: string,
+  config: SettlementConfig
+): Promise<bigint> {
+  const chain = config.chainId === 80002 ? polygonAmoy : polygon;
+  const client = createPublicClient({ chain, transport: http(config.rpcUrl || DEFAULT_POLYGON_RPC_URL) });
+  const raw = await client.readContract({
+    address: POLYMARKET_CONDITIONAL_TOKENS_ADDRESS as Address,
+    abi: ctfBalanceAbi,
+    functionName: "balanceOf",
+    args: [walletAddress as Address, BigInt(tokenId)]
+  });
+  if (typeof raw !== "bigint") throw new Error("CTF_BALANCE_READ_INVALID");
+  return raw;
 }
 
 function defaultApprovalReader(config: SettlementConfig): (owner: string, operator: string) => Promise<boolean> {
@@ -480,6 +579,35 @@ function numberValue(value: unknown): number | undefined {
   if (typeof value === "string" && value.trim().length === 0) return undefined;
   const parsed = typeof value === "string" ? Number(value.trim()) : value;
   return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function stringArrayValue(value: unknown): string[] {
+  const raw = typeof value === "string" ? safeJsonArray(value) : value;
+  return Array.isArray(raw)
+    ? raw.flatMap((item) => {
+      const parsed = stringValue(item);
+      return parsed === undefined ? [] : [parsed];
+    })
+    : [];
+}
+
+function numberArrayValue(value: unknown): number[] {
+  const raw = typeof value === "string" ? safeJsonArray(value) : value;
+  return Array.isArray(raw)
+    ? raw.flatMap((item) => {
+      const parsed = numberValue(item);
+      return parsed === undefined ? [] : [parsed];
+    })
+    : [];
+}
+
+function safeJsonArray(value: string): unknown {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function booleanValue(value: unknown): boolean {
