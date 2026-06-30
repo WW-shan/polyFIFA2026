@@ -870,7 +870,251 @@ describe("CLI", () => {
     );
   });
 
-  test("worldcup live watch limits unconfirmed high-return locked incidents to 10 percent of total balance", async () => {
+  test("worldcup live watch limits a locked incident to stale S0/S1/S2 cheap liquidity", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-pass-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-delta-pass-2026-06-27";
+    const totalOverToken = "locked-delta-pass-total-over";
+    const teamOverToken = "locked-delta-pass-team-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Delta", "Pass", 0.5, "locked-delta-pass-total"),
+      teamTotalMarket(eventSlug, "Delta", "Pass", "Delta", 0.5, "locked-delta-pass-team")
+    ]));
+    const calls = new Map<string, number>();
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
+      const call = calls.get(tokenId) ?? 0;
+      calls.set(tokenId, call + 1);
+      return {
+        tokenId,
+        bids: [],
+        asks: [{ price: 0.95, size: 5 / 0.95 }]
+      };
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Delta", "Pass", 0, 0);
+      yield tailMatch(eventSlug, "Delta", "Pass", 1, 0);
+    }
+    const executed: Array<{ notional: number; legs?: Array<{ tokenId: string; notional: number }> }> = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Delta", awayTeam: "Pass" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 456,
+        scoreMatchesSports: true,
+        hasMatchingGoal: true,
+        hasNoGoalSignal: false,
+        hasVarReviewSignal: false,
+        details: ["365 normal goal"]
+      }),
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        const execution: { notional: number; legs?: Array<{ tokenId: string; notional: number }> } = {
+          notional: decision.notional
+        };
+        if (decision.legs) execution.legs = decision.legs.map((leg) => ({ tokenId: leg.tokenId, notional: leg.notional }));
+        executed.push(execution);
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-delta-pass",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]!.notional).toBeCloseTo(10, 8);
+    expect(executed[0]!.legs?.map((leg) => leg.tokenId)).toEqual(
+      expect.arrayContaining([totalOverToken, teamOverToken])
+    );
+    expect(calls.get(totalOverToken)).toBeGreaterThanOrEqual(3);
+    expect(calls.get(teamOverToken)).toBeGreaterThanOrEqual(3);
+  });
+
+  test("worldcup live watch blocks locked incidents when cheap liquidity grows after the goal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-growth-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-delta-growth-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Delta", "Growth", 0.5, "locked-delta-growth-total"),
+      teamTotalMarket(eventSlug, "Delta", "Growth", "Delta", 0.5, "locked-delta-growth-team")
+    ]));
+    const calls = new Map<string, number>();
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
+      const call = calls.get(tokenId) ?? 0;
+      calls.set(tokenId, call + 1);
+      const notional = call <= 1 ? 5 : 50;
+      return {
+        tokenId,
+        bids: [],
+        asks: [{ price: 0.95, size: notional / 0.95 }]
+      };
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Delta", "Growth", 0, 0);
+      yield tailMatch(eventSlug, "Delta", "Growth", 1, 0);
+    }
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", join(dir, "ledger.json"),
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Delta", awayTeam: "Growth" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 789,
+        scoreMatchesSports: true,
+        hasMatchingGoal: true,
+        hasNoGoalSignal: false,
+        hasVarReviewSignal: false,
+        details: ["365 normal goal"]
+      }),
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-delta-growth",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("cheap liquidity grew")
+      }
+    });
+  });
+
+  test("worldcup live watch blocks locked incidents when best ask retraces before execution", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-retrace-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-delta-retrace-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Delta", "Retrace", 0.5, "locked-delta-retrace-total"),
+      teamTotalMarket(eventSlug, "Delta", "Retrace", "Delta", 0.5, "locked-delta-retrace-team")
+    ]));
+    const calls = new Map<string, number>();
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
+      const call = calls.get(tokenId) ?? 0;
+      calls.set(tokenId, call + 1);
+      const price = call >= 2 ? 0.94 : 0.98;
+      return {
+        tokenId,
+        bids: [],
+        asks: [{ price, size: 20 / price }]
+      };
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Delta", "Retrace", 0, 0);
+      yield tailMatch(eventSlug, "Delta", "Retrace", 1, 0);
+    }
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", join(dir, "ledger.json"),
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Delta", awayTeam: "Retrace" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 987,
+        scoreMatchesSports: true,
+        hasMatchingGoal: true,
+        hasNoGoalSignal: false,
+        hasVarReviewSignal: false,
+        details: ["365 normal goal"]
+      }),
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-delta-retrace",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("best ask retraced")
+      }
+    });
+  });
+
+  test("worldcup live watch skips unconfirmed high-return locked incidents by default", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-high-"));
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
@@ -923,12 +1167,18 @@ describe("CLI", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(executed).toEqual([
-      { tokenId: overToken, notional: expect.closeTo(10, 8) }
-    ]);
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("locked score guard")
+      }
+    });
   });
 
-  test("worldcup live watch limits unconfirmed medium-return locked incidents to 5 percent of total balance", async () => {
+  test("worldcup live watch skips unconfirmed medium-return locked incidents by default", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-medium-"));
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
@@ -981,9 +1231,15 @@ describe("CLI", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(executed).toEqual([
-      { tokenId: overToken, notional: expect.closeTo(5, 8) }
-    ]);
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("locked score guard")
+      }
+    });
   });
 
   test("worldcup live watch skips unconfirmed low-return locked incidents", async () => {
@@ -1043,8 +1299,81 @@ describe("CLI", () => {
       status: "watch_complete",
       last: {
         status: "no_trade",
-        reason: "RETURN_TOO_LOW",
-        details: expect.stringContaining("unconfirmed locked score")
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("locked score guard")
+      }
+    });
+  });
+
+  test("worldcup watch hard-blocks a locked buy when 365 events report no-goal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-nogoal-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-nogoal-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "No", "Goal", 0.5, "locked-nogoal-total"),
+      teamTotalMarket(eventSlug, "No", "Goal", "No", 0.5, "locked-nogoal-team")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "No", "Goal", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", join(dir, "ledger.json"),
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "No", awayTeam: "Goal" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 123,
+        scoreMatchesSports: true,
+        hasMatchingGoal: false,
+        hasNoGoalSignal: true,
+        hasVarReviewSignal: false,
+        details: ["Goal Disallowed Var", "VAR Decision: No Goal"]
+      }),
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-nogoal",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("No Goal")
       }
     });
   });
@@ -1216,7 +1545,7 @@ describe("CLI", () => {
       last: {
         status: "no_trade",
         reason: "NO_ELIGIBLE_STRATEGY",
-        details: expect.stringContaining("external score")
+        details: expect.stringContaining("365 score")
       }
     });
   });
@@ -1350,6 +1679,16 @@ describe("CLI", () => {
           elapsedSeconds: 60 * 60 + matchPolls
         };
       },
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 1301,
+        scoreMatchesSports: true,
+        hasMatchingGoal: true,
+        hasNoGoalSignal: false,
+        hasVarReviewSignal: false,
+        details: ["365 normal goal"]
+      }),
       fetchVerifiedClock: async () => {
         throw new Error("365 clock should not be needed before the tail window");
       }
@@ -1427,7 +1766,7 @@ describe("CLI", () => {
         eventSlug
       }
     });
-    expect(clobMock.fetchOrderbook).not.toHaveBeenCalled();
+    expect(clobMock.fetchOrderbook).toHaveBeenCalledTimes(1);
   });
 
   test("worldcup watch keeps polling 365Scores after the sports feed stops at 90 minutes", async () => {
@@ -1874,6 +2213,16 @@ describe("CLI", () => {
         isLive: true,
         elapsedSeconds: 60 * 60 + 1
       }),
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 2101,
+        scoreMatchesSports: true,
+        hasMatchingGoal: true,
+        hasNoGoalSignal: false,
+        hasVarReviewSignal: false,
+        details: ["365 normal goal"]
+      }),
       fetchVerifiedClock: async () => {
         throw new Error("locked active rescan should not need verified clock");
       }
@@ -1891,7 +2240,7 @@ describe("CLI", () => {
       }
     });
     expect(eventPageMock.fetchEventStrategyMarkets).toHaveBeenCalledTimes(1);
-    expect(clobMock.fetchOrderbook).toHaveBeenCalledTimes(1);
+    expect(clobMock.fetchOrderbook).toHaveBeenCalledTimes(3);
   });
 
   test("writes depth audit records with candidate books and decisions for replay", async () => {

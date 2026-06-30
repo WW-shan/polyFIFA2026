@@ -113,6 +113,8 @@ World Cup watch buys immediately once a ranked leg passes the 0.5% default minim
 
 The entry window is strict: World Cup watch mode overlays Polymarket Sports updates with the 365Scores public single-game clock, then opens only when `2nd Half + addedTime + preciseGameTime` computes verified `remainingSeconds <= 180`. There is no `87'` or `90:00+` fallback. If 365Scores does not provide the required clock fields, the bot returns `MATCH_NOT_LATE_ENOUGH` and does not fetch balances, orderbooks, or place orders.
 
+Locked goal buys use an additional fake-goal guard. The watch loop caches one-goal-ahead locked orderbooks before the score changes, then after a score increase it requires a non-conflicting 365Scores goal signal plus stable S0/S1/S2 orderbook delta before buying. 365Scores no-goal/VAR-disallowed signals, score conflicts, new cheap liquidity, best-ask retrace, or isolated related-market movement block the locked buy; high return alone no longer creates a 5%/10% unconfirmed cap path.
+
 Set `POLY_LIVE_AUDIT_FILE=data/live-sports-audit.ndjson` to append raw Sports WebSocket updates and normalized match-update audit records as NDJSON for replay/debugging.
 
 Production World Cup watch is intended to stay up 24/7. With no `--max-iterations`, it keeps rediscovering World Cup events when no events are open, reconnects after transient Sports stream failures, and continues watching other or later matches after one event gets a filled/partial/posted buy plan. `--max-iterations` is now only a finite dry-run/test guard; when it is set, the command returns `watch_complete` with the last decision/trade summary.
@@ -153,6 +155,7 @@ Optional live env vars:
 - `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order
 - `POLY_LIVE_AUDIT_FILE` writes raw Sports WebSocket updates and normalized match-update audit records as NDJSON
 - `POLY_365SCORES_TIMEZONE` defaults to `Asia/Shanghai`; it is used only for 365Scores discovery/date parameters
+- `POLY_LOCKED_ORDERBOOK_DELTA_DELAY_MS` defaults to `750`; it controls the S1-to-S2 locked-goal orderbook delta delay
 - `POLY_AUTO_REDEEM=false` disables background resolved-position redemption during live World Cup watch
 - `POLY_RPC_URL` for viem wallet transport
 - `POLY_CHAIN_ID` defaults to `137`

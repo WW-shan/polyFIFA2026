@@ -4,6 +4,8 @@ import { fetchJson, type HttpOptions } from "./http.js";
 export const SCORES365_REMAINING_SECONDS_SOURCE = "365scores_added_time_precise_game_time" as const;
 
 const DEFAULT_TIMEZONE = "Asia/Shanghai";
+const GOAL_SIGNAL_HTTP_TIMEOUT_MS = 700;
+const GOAL_SIGNAL_PBP_TIMEOUT_MS = 350;
 const SCORES365_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126 Safari/537.36",
   "Accept": "application/json,text/plain,*/*",
@@ -25,6 +27,14 @@ export interface Scores365ScorePatch extends Partial<MatchState> {
   homeGoals: number;
   awayGoals: number;
   scores365GameId: number;
+}
+
+export interface Scores365GoalSignal extends Scores365ScorePatch {
+  scoreMatchesSports: boolean;
+  hasMatchingGoal: boolean;
+  hasNoGoalSignal: boolean;
+  hasVarReviewSignal: boolean;
+  details: string[];
 }
 
 export function extract365ScoresClock(raw: unknown, match: MatchState): Scores365ClockPatch | null {
@@ -77,6 +87,36 @@ export function extract365ScoresScorePatch(raw: unknown, match: MatchState): Sco
   };
 }
 
+export function extract365ScoresGoalSignal(raw: unknown, match: MatchState, previousMatch?: MatchState): Scores365GoalSignal | null {
+  const game = unwrapGame(raw);
+  if (!game) return null;
+  if (!gameTeamsMatch(game, match)) return null;
+
+  const scorePatch = extract365ScoresScorePatch(game, match);
+  if (!scorePatch) return null;
+
+  const details: string[] = [];
+  const homeCompetitor = isRecord(game.homeCompetitor) ? game.homeCompetitor : null;
+  const awayCompetitor = isRecord(game.awayCompetitor) ? game.awayCompetitor : null;
+  const expectedCompetitors = expectedScoringCompetitorIds(match, previousMatch, homeCompetitor, awayCompetitor);
+  const eventSignals = inspect365Events(game.events, expectedCompetitors);
+  const pbpSignals = inspect365PlayByPlay(playByPlaySource(raw, game), match, previousMatch);
+  details.push(...eventSignals.details, ...pbpSignals.details);
+
+  const hasNoGoalSignal = eventSignals.hasNoGoalSignal || pbpSignals.hasNoGoalSignal;
+  const hasVarReviewSignal = !hasNoGoalSignal && (eventSignals.hasVarReviewSignal || pbpSignals.hasVarReviewSignal);
+  const hasMatchingGoal = !hasNoGoalSignal && (eventSignals.hasMatchingGoal || pbpSignals.hasMatchingGoal);
+
+  return {
+    ...scorePatch,
+    scoreMatchesSports: scorePatch.homeGoals === match.homeGoals && scorePatch.awayGoals === match.awayGoals,
+    hasMatchingGoal,
+    hasNoGoalSignal,
+    hasVarReviewSignal,
+    details: details.length > 0 ? details : ["365 goal signal contained score only"]
+  };
+}
+
 export function find365ScoresGameForMatch(raw: unknown, match: MatchState): Record<string, unknown> | null {
   const games = isRecord(raw) && Array.isArray(raw.games) ? raw.games : [];
   const normalizedHome = normalizeTeam(match.homeTeam);
@@ -124,6 +164,18 @@ export class Scores365ClockProvider {
     return extract365ScoresScorePatch(raw, { ...match, scores365GameId: gameId });
   }
 
+  async fetchGoalSignal(match: MatchState, previousMatch?: MatchState): Promise<Scores365GoalSignal | null> {
+    const gameId = match.scores365GameId ?? this.gameIdByEventSlug.get(match.eventSlug) ?? await this.discoverGameId(match);
+    if (gameId === undefined) return null;
+    this.gameIdByEventSlug.set(match.eventSlug, gameId);
+
+    const raw = await fetchJson<unknown>(this.gameUrl(gameId), this.httpOptions(GOAL_SIGNAL_HTTP_TIMEOUT_MS));
+    const game = unwrapGame(raw);
+    const feedUrl = game ? playByPlayFeedUrl(game) : undefined;
+    const playByPlay = feedUrl ? await fetchJson<unknown>(feedUrl, this.httpOptions(GOAL_SIGNAL_PBP_TIMEOUT_MS)).catch(() => null) : null;
+    return extract365ScoresGoalSignal(playByPlay ? { game: game ?? raw, playByPlay } : raw, { ...match, scores365GameId: gameId }, previousMatch);
+  }
+
   private async discoverGameId(match: MatchState): Promise<number | undefined> {
     const raw = await fetchJson<unknown>(this.allscoresUrl(match), this.httpOptions());
     const game = find365ScoresGameForMatch(raw, match);
@@ -155,7 +207,7 @@ export class Scores365ClockProvider {
     return `https://webws.365scores.com/web/game/?${params.toString()}`;
   }
 
-  private httpOptions(): HttpOptions {
+  private httpOptions(timeoutMs?: number): HttpOptions {
     const options: HttpOptions = {
       ...this.options,
       headers: {
@@ -163,8 +215,162 @@ export class Scores365ClockProvider {
         ...this.options.headers
       }
     };
+    if (timeoutMs !== undefined) options.timeoutMs = Math.min(this.options.timeoutMs ?? timeoutMs, timeoutMs);
     return options;
   }
+}
+
+interface GoalTextSignals {
+  hasMatchingGoal: boolean;
+  hasNoGoalSignal: boolean;
+  hasVarReviewSignal: boolean;
+  details: string[];
+}
+
+function inspect365Events(events: unknown, expectedCompetitors: Set<number>): GoalTextSignals {
+  const signals: GoalTextSignals = {
+    hasMatchingGoal: false,
+    hasNoGoalSignal: false,
+    hasVarReviewSignal: false,
+    details: []
+  };
+  if (!Array.isArray(events)) return signals;
+
+  for (const item of events) {
+    if (!isRecord(item)) continue;
+    const eventType = isRecord(item.eventType) ? item.eventType : {};
+    const eventTypeId = numberValue(eventType.id);
+    const competitorId = numberValue(item.competitorId);
+    const text = [
+      stringValue(eventType.name),
+      stringValue(eventType.subTypeName),
+      stringValue(item.name),
+      stringValue(item.description)
+    ].join(" ");
+    const normalized = text.toLowerCase();
+    if (isNoGoalText(normalized) || eventTypeId === 11) {
+      signals.hasNoGoalSignal = true;
+      signals.details.push(`365 event no goal/disallowed: ${compactText(text)}`);
+      continue;
+    }
+    if (normalized.includes("var")) {
+      signals.hasVarReviewSignal = true;
+      signals.details.push(`365 event VAR signal: ${compactText(text)}`);
+    }
+    const expectedSide = competitorId === undefined || expectedCompetitors.size === 0 || expectedCompetitors.has(competitorId);
+    if (eventTypeId === 1 && expectedSide && !isNoGoalText(normalized)) {
+      signals.hasMatchingGoal = true;
+      signals.details.push(`365 event normal goal: ${compactText(text)}`);
+    }
+  }
+  return signals;
+}
+
+function inspect365PlayByPlay(playByPlay: unknown, match: MatchState, previousMatch?: MatchState): GoalTextSignals {
+  const signals: GoalTextSignals = {
+    hasMatchingGoal: false,
+    hasNoGoalSignal: false,
+    hasVarReviewSignal: false,
+    details: []
+  };
+  for (const message of playByPlayMessages(playByPlay)) {
+    const text = recordText(message).toLowerCase();
+    if (!text) continue;
+    if (isNoGoalText(text)) {
+      signals.hasNoGoalSignal = true;
+      signals.details.push(`365 PBP no goal: ${compactText(recordText(message))}`);
+      continue;
+    }
+    if (text.includes("var")) {
+      signals.hasVarReviewSignal = true;
+      signals.details.push(`365 PBP VAR signal: ${compactText(recordText(message))}`);
+    }
+    if (isNormalGoalText(text) && scoreTextMatchesIncident(text, match, previousMatch)) {
+      signals.hasMatchingGoal = true;
+      signals.details.push(`365 PBP normal goal: ${compactText(recordText(message))}`);
+    }
+  }
+  return signals;
+}
+
+function expectedScoringCompetitorIds(
+  match: MatchState,
+  previousMatch: MatchState | undefined,
+  homeCompetitor: Record<string, unknown> | null,
+  awayCompetitor: Record<string, unknown> | null
+): Set<number> {
+  const ids = new Set<number>();
+  const homeId = numberValue(homeCompetitor?.id);
+  const awayId = numberValue(awayCompetitor?.id);
+  if (!previousMatch) {
+    if (homeId !== undefined && match.homeGoals > 0) ids.add(homeId);
+    if (awayId !== undefined && match.awayGoals > 0) ids.add(awayId);
+    return ids;
+  }
+  if (homeId !== undefined && match.homeGoals > previousMatch.homeGoals) ids.add(homeId);
+  if (awayId !== undefined && match.awayGoals > previousMatch.awayGoals) ids.add(awayId);
+  return ids;
+}
+
+function playByPlaySource(raw: unknown, game: Record<string, unknown>): unknown {
+  if (isRecord(raw) && raw.playByPlay !== undefined) return raw.playByPlay;
+  return game.playByPlay;
+}
+
+function playByPlayFeedUrl(game: Record<string, unknown>): string | undefined {
+  const playByPlay = isRecord(game.playByPlay) ? game.playByPlay : null;
+  const feedUrl = stringValue(playByPlay?.feedURL ?? playByPlay?.feedUrl);
+  return feedUrl || undefined;
+}
+
+function playByPlayMessages(playByPlay: unknown): Record<string, unknown>[] {
+  if (!isRecord(playByPlay)) return [];
+  const candidates = [
+    playByPlay.Messages,
+    playByPlay.messages,
+    playByPlay.comments,
+    playByPlay.Comments
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate.filter(isRecord);
+  }
+  return [];
+}
+
+function recordText(record: Record<string, unknown>): string {
+  const pieces: string[] = [];
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === "string" && isTextKey(key)) pieces.push(value);
+  }
+  return pieces.join(" ");
+}
+
+function isTextKey(key: string): boolean {
+  return /name|title|comment|description|text|type/i.test(key);
+}
+
+function isNoGoalText(text: string): boolean {
+  return /goal\s+disallowed|disallowed\s+goal|no\s+goal|goal\s+overturned|overturned\s+by\s+var|cancel(?:led|ed)\s+goal|goal\s+cancel(?:led|ed)/i.test(text);
+}
+
+function isNormalGoalText(text: string): boolean {
+  return /\bgoal\b/i.test(text) && !isNoGoalText(text);
+}
+
+function scoreTextMatchesIncident(text: string, match: MatchState, previousMatch?: MatchState): boolean {
+  if (!previousMatch) return true;
+  const targetScore = `${match.homeGoals}-${match.awayGoals}`;
+  const altTargetScore = `${match.homeGoals}, ${match.awayGoals}`;
+  if (text.includes(targetScore) || text.includes(altTargetScore)) return true;
+  return goalsTotal(match) > goalsTotal(previousMatch);
+}
+
+function goalsTotal(match: Pick<MatchState, "homeGoals" | "awayGoals">): number {
+  return match.homeGoals + match.awayGoals;
+}
+
+function compactText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function dateRangeForMatch(startTime: string | undefined, timezoneName: string): { startDate: string; endDate: string } {

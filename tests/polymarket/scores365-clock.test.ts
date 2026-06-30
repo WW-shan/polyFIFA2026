@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   SCORES365_REMAINING_SECONDS_SOURCE,
   extract365ScoresClock,
+  extract365ScoresGoalSignal,
   extract365ScoresScorePatch,
   find365ScoresGameForMatch
 } from "../../src/polymarket/scores365-clock.js";
@@ -89,6 +90,97 @@ describe("365Scores live clock", () => {
       awayGoals: 1,
       scores365GameId: 4627855
     });
+  });
+
+  test("extracts a normal 365Scores goal signal for a matching score increase", () => {
+    const signal = extract365ScoresGoalSignal({
+      game: {
+        id: 4627855,
+        homeCompetitor: { id: 10, name: "Switzerland", score: 3 },
+        awayCompetitor: { id: 20, name: "Canada", score: 1 },
+        events: [
+          {
+            competitorId: 10,
+            gameTime: 74,
+            isMajor: true,
+            eventType: { id: 1, name: "Goal", subTypeName: "Field Goal" }
+          }
+        ]
+      },
+      playByPlay: {
+        Messages: [
+          {
+            TypeName: "goal",
+            Title: "Goal",
+            Comment: "Goal! Switzerland 3, Canada 1."
+          }
+        ]
+      }
+    }, {
+      ...match,
+      homeGoals: 3,
+      awayGoals: 1
+    }, {
+      ...match,
+      homeGoals: 2,
+      awayGoals: 1
+    });
+
+    expect(signal).toMatchObject({
+      homeGoals: 3,
+      awayGoals: 1,
+      scores365GameId: 4627855,
+      scoreMatchesSports: true,
+      hasMatchingGoal: true,
+      hasNoGoalSignal: false,
+      hasVarReviewSignal: false
+    });
+    expect(signal?.details.join(" ")).toContain("normal goal");
+  });
+
+  test("detects 365Scores Goal Disallowed Var and PBP no-goal as a hard block", () => {
+    const signal = extract365ScoresGoalSignal({
+      game: {
+        id: 4627855,
+        homeCompetitor: { id: 10, name: "Switzerland", score: 3 },
+        awayCompetitor: { id: 20, name: "Canada", score: 1 },
+        events: [
+          {
+            competitorId: 10,
+            gameTime: 74,
+            isMajor: true,
+            eventType: { id: 11, name: "Goal Disallowed", subTypeName: "Var" }
+          }
+        ]
+      },
+      playByPlay: {
+        Messages: [
+          {
+            TypeName: "var",
+            Title: "VAR Decision: No Goal",
+            Comment: "GOAL OVERTURNED BY VAR: Switzerland 3-1 Canada."
+          }
+        ]
+      }
+    }, {
+      ...match,
+      homeGoals: 3,
+      awayGoals: 1
+    }, {
+      ...match,
+      homeGoals: 2,
+      awayGoals: 1
+    });
+
+    expect(signal).toMatchObject({
+      homeGoals: 3,
+      awayGoals: 1,
+      scores365GameId: 4627855,
+      scoreMatchesSports: true,
+      hasMatchingGoal: false,
+      hasNoGoalSignal: true
+    });
+    expect(signal?.details.join(" ")).toMatch(/no goal|disallowed/i);
   });
 
   test("rejects game clocks whose teams do not match the current event", () => {
