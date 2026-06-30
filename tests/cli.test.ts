@@ -176,6 +176,22 @@ function totalMarket(eventSlug: string, homeTeam: string, awayTeam: string, line
   };
 }
 
+function teamTotalMarket(eventSlug: string, homeTeam: string, awayTeam: string, team: string, line: number, underTokenId: string): StrategyMarket {
+  const lineSlug = String(line).replace(".", "pt");
+  const teamSlug = team.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return {
+    eventSlug,
+    marketSlug: `${eventSlug}-${teamSlug}-team-total-${lineSlug}`,
+    question: `${homeTeam} vs. ${awayTeam}: ${team} O/U ${line}`,
+    conditionId: `cond-${eventSlug}-${teamSlug}-team-total-${lineSlug}`,
+    outcomes: ["Over", "Under"],
+    clobTokenIds: [`${underTokenId}-over`, underTokenId],
+    line,
+    team,
+    marketType: "team_total"
+  };
+}
+
 describe("CLI", () => {
   test("paper mode prints a filled JSON trade result", async () => {
     const result = await runCli([
@@ -708,7 +724,7 @@ describe("CLI", () => {
     ], {}, {
       fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked Immediate", awayTeam: "Opponent" }],
       watchSportsUpdates: async () => updates(),
-      fetchVerifiedClock: async () => null
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals })
     });
 
     expect(result.exitCode).toBe(0);
@@ -723,6 +739,494 @@ describe("CLI", () => {
         tokenId: overToken,
         strategy: "total_over_locked",
         locked: true
+      }
+    });
+  });
+
+  test("worldcup live watch caps one score-change locked incident to 20 percent of total balance across related markets", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-incident-cap-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-incident-cap-2026-06-27";
+    const totalOverToken = "locked-incident-total-over";
+    const teamOverToken = "locked-incident-team-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Incident", "Cap", 0.5, "locked-incident-total"),
+      teamTotalMarket(eventSlug, "Incident", "Cap", "Incident", 0.5, "locked-incident-team")
+    ]));
+    const executed: Array<{ notional: number; legs?: Array<{ tokenId: string; notional: number }> }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: tokenId === totalOverToken || tokenId === teamOverToken
+        ? [{ price: 0.95, size: 15 / 0.95 }]
+        : []
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Incident", "Cap", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Incident", awayTeam: "Cap" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        const execution: { notional: number; legs?: Array<{ tokenId: string; notional: number }> } = {
+          notional: decision.notional
+        };
+        if (decision.legs) execution.legs = decision.legs.map((leg) => ({ tokenId: leg.tokenId, notional: leg.notional }));
+        executed.push(execution);
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-incident-cap-1",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]!.notional).toBeCloseTo(20, 8);
+    expect(executed[0]!.legs?.reduce((total, leg) => total + leg.notional, 0)).toBeCloseTo(20, 8);
+    expect(executed[0]!.legs?.map((leg) => leg.tokenId)).toEqual(
+      expect.arrayContaining([totalOverToken, teamOverToken])
+    );
+  });
+
+  test("worldcup live watch limits unconfirmed high-return locked incidents to 10 percent of total balance", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-high-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-risk-high-2026-06-27";
+    const overToken = "locked-risk-high-total-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Risk", "High", 0.5, "locked-risk-high-total")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Risk", "High", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Risk", awayTeam: "High" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `locked-risk-high-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([
+      { tokenId: overToken, notional: expect.closeTo(10, 8) }
+    ]);
+  });
+
+  test("worldcup live watch limits unconfirmed medium-return locked incidents to 5 percent of total balance", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-medium-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-risk-medium-2026-06-27";
+    const overToken = "locked-risk-medium-total-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Risk", "Medium", 0.5, "locked-risk-medium-total")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.97, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Risk", "Medium", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Risk", awayTeam: "Medium" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `locked-risk-medium-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([
+      { tokenId: overToken, notional: expect.closeTo(5, 8) }
+    ]);
+  });
+
+  test("worldcup live watch skips unconfirmed low-return locked incidents", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-low-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-risk-low-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Risk", "Low", 0.5, "locked-risk-low-total")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.99, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Risk", "Low", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Risk", awayTeam: "Low" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `locked-risk-low-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "RETURN_TOO_LOW",
+        details: expect.stringContaining("unconfirmed locked score")
+      }
+    });
+  });
+
+  test("worldcup live watch gives the next score increase a fresh 20 percent locked incident budget", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-next-incident-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-next-incident-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Next", "Incident", 0.5, "next-incident-total-0pt5"),
+      totalMarket(eventSlug, "Next", "Incident", 1.5, "next-incident-total-1pt5")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: tokenId.includes("1pt5") ? 0.94 : 0.95, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Next", "Incident", 1, 0);
+      yield tailMatch(eventSlug, "Next", "Incident", 2, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Next", awayTeam: "Incident" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `locked-next-incident-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([
+      { tokenId: "next-incident-total-0pt5-over", notional: expect.closeTo(20, 8) },
+      { tokenId: "next-incident-total-1pt5-over", notional: expect.closeTo(20, 8) }
+    ]);
+  });
+
+  test("worldcup live watch lets non-locked tail candidates trade after a locked incident cap is spent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-cap-then-tail-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-cap-then-tail-2026-06-27";
+    const lockedOverToken = "cap-then-tail-0pt5-over";
+    const tailUnderToken = "cap-then-tail-4pt5-under";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Cap", "Tail", 0.5, "cap-then-tail-0pt5"),
+      totalMarket(eventSlug, "Cap", "Tail", 4.5, tailUnderToken)
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: tokenId === lockedOverToken
+        ? [{ price: 0.95, size: 10_000 }]
+        : tokenId === tailUnderToken
+          ? [{ price: 0.97, size: 30 / 0.97 }]
+          : []
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Cap", "Tail", 1, 0);
+      yield tailMatch(eventSlug, "Cap", "Tail", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Cap", awayTeam: "Tail" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `cap-then-tail-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([
+      { tokenId: lockedOverToken, notional: expect.closeTo(20, 8) },
+      { tokenId: tailUnderToken, notional: expect.closeTo(30, 8) }
+    ]);
+  });
+
+  test("worldcup watch skips a new locked score-change opportunity when an external score source disagrees", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-score-mismatch-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-score-mismatch-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Score", "Mismatch", 0.5, "locked-score-mismatch-total")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      const { remainingSeconds: _remainingSeconds, remainingSecondsSource: _remainingSecondsSource, ...update } = tailMatch(eventSlug, "Score", "Mismatch", 1, 0);
+      yield update;
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Score", awayTeam: "Mismatch" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => ({
+        homeGoals: 0,
+        awayGoals: 0
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("external score")
+      }
+    });
+  });
+
+  test("worldcup live watch treats a rolled-back score that appears again as a fresh locked incident", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-score-rollback-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-score-rollback-2026-06-27";
+    const overToken = "locked-score-rollback-total-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Score", "Rollback", 0.5, "locked-score-rollback-total")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Score", "Rollback", 1, 0);
+      yield tailMatch(eventSlug, "Score", "Rollback", 0, 0);
+      yield tailMatch(eventSlug, "Score", "Rollback", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "3"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Score", awayTeam: "Rollback" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `locked-score-rollback-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([
+      { tokenId: overToken, notional: expect.closeTo(20, 8) },
+      { tokenId: overToken, notional: expect.closeTo(20, 8) }
+    ]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "filled",
+        tokenId: overToken
       }
     });
   });
@@ -1628,7 +2132,7 @@ describe("CLI", () => {
       yield tailMatch(eventSlug, "Locked", "Refill", 1, 0);
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    const balances = [30, 30, 20, 20, 4, 4];
+    const balances = [100, 100, 90, 90, 80, 80];
     let balanceCalls = 0;
 
     const result = await runCli([
@@ -1645,7 +2149,7 @@ describe("CLI", () => {
     }, {
       fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked", awayTeam: "Refill" }],
       watchSportsUpdates: async () => updates(),
-      fetchVerifiedClock: async () => null,
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
       readPusdBalance: async () => balances[Math.min(balanceCalls++, balances.length - 1)]!,
       executeLive: async (decision) => {
         executed.push({

@@ -1,7 +1,7 @@
-import { allocateTradeLegs, buildTradeDecision, buildTradeLevels, buyDecisionFromLegs } from "./domain/decision.js";
+import { allocateTradeLegs, buildTradeDecision, buildTradeLevels, buyDecisionFromLegs, lockedConditionMatchesScore } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
 import { classifyTailWindow } from "./domain/time-window.js";
-import type { DecisionThresholds, MatchState, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import type { DecisionThresholds, MatchState, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutor, type LiveExecuteOptions, type LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { DEFAULT_ENTRY_WINDOW_MINUTES } from "./domain/risk-thresholds.js";
@@ -20,6 +20,8 @@ export interface FlowInput {
   orderbooks?: OrderbookSnapshot[];
   stake: number;
   thresholds?: Partial<Omit<DecisionThresholds, "maxNotional">>;
+  lockedIncidentPreviousMatch?: MatchState;
+  suppressLockedIncidentCandidates?: boolean;
 }
 
 export interface FlowResult {
@@ -53,9 +55,22 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
     entryWindowMinutes: thresholds.entryWindowMinutes,
     allowLockedOutsideEntryWindow: true
   };
-  const candidates = selectLossRequiresCandidates(input.match, input.markets, strategyOptions);
+  const baseCandidates = selectLossRequiresCandidates(input.match, input.markets, strategyOptions);
+  const candidates = filterLockedIncidentCandidates(
+    baseCandidates,
+    input.lockedIncidentPreviousMatch,
+    input.suppressLockedIncidentCandidates === true
+  );
 
   if (candidates.length === 0) {
+    if (baseCandidates.length > 0 && input.lockedIncidentPreviousMatch) {
+      return {
+        action: "NO_TRADE",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        eventSlug: input.match.eventSlug,
+        details: `No new locked candidate for score incident ${input.lockedIncidentPreviousMatch.homeGoals}-${input.lockedIncidentPreviousMatch.awayGoals} -> ${input.match.homeGoals}-${input.match.awayGoals}`
+      };
+    }
     if (!tailWindow.eligible) {
       return {
         action: "NO_TRADE",
@@ -104,6 +119,20 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
     eventSlug: input.match.eventSlug,
     details: "No orderbook matched any eligible strategy token"
   };
+}
+
+function filterLockedIncidentCandidates(
+  candidates: readonly SelectedStrategyMarket[],
+  previousMatch: MatchState | undefined,
+  suppressLocked: boolean
+): SelectedStrategyMarket[] {
+  if (!previousMatch) return [...candidates];
+  if (suppressLocked) return candidates.filter((candidate) => candidate.locked !== true);
+  const newLocked = candidates.filter((candidate) =>
+    candidate.locked === true && !lockedConditionMatchesScore(previousMatch, candidate)
+  );
+  if (newLocked.length > 0) return newLocked;
+  return candidates.filter((candidate) => candidate.locked !== true);
 }
 
 export async function runPaperFlow(input: FlowInput): Promise<FlowResult> {

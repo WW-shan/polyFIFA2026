@@ -21,6 +21,12 @@ export interface Scores365ClockPatch extends Partial<MatchState> {
   scores365GameId: number;
 }
 
+export interface Scores365ScorePatch extends Partial<MatchState> {
+  homeGoals: number;
+  awayGoals: number;
+  scores365GameId: number;
+}
+
 export function extract365ScoresClock(raw: unknown, match: MatchState): Scores365ClockPatch | null {
   const game = unwrapGame(raw);
   if (!game) return null;
@@ -51,6 +57,26 @@ export function extract365ScoresClock(raw: unknown, match: MatchState): Scores36
   return patch;
 }
 
+export function extract365ScoresScorePatch(raw: unknown, match: MatchState): Scores365ScorePatch | null {
+  const game = unwrapGame(raw);
+  if (!game) return null;
+  if (!gameTeamsMatch(game, match)) return null;
+
+  const homeCompetitor = isRecord(game.homeCompetitor) ? game.homeCompetitor : null;
+  const awayCompetitor = isRecord(game.awayCompetitor) ? game.awayCompetitor : null;
+  const homeGoals = numberValue(homeCompetitor?.score);
+  const awayGoals = numberValue(awayCompetitor?.score);
+  const scores365GameId = numberValue(game.id) ?? match.scores365GameId ?? 0;
+  if (homeGoals === undefined || awayGoals === undefined || scores365GameId <= 0) return null;
+  if (homeGoals < 0 || awayGoals < 0) return null;
+
+  return {
+    homeGoals: Math.trunc(homeGoals),
+    awayGoals: Math.trunc(awayGoals),
+    scores365GameId
+  };
+}
+
 export function find365ScoresGameForMatch(raw: unknown, match: MatchState): Record<string, unknown> | null {
   const games = isRecord(raw) && Array.isArray(raw.games) ? raw.games : [];
   const normalizedHome = normalizeTeam(match.homeTeam);
@@ -77,6 +103,25 @@ export class Scores365ClockProvider {
     this.gameIdByEventSlug.set(match.eventSlug, gameId);
     const raw = await fetchJson<unknown>(this.gameUrl(gameId), this.httpOptions());
     return extract365ScoresClock(raw, { ...match, scores365GameId: gameId });
+  }
+
+  async fetchScore(match: MatchState): Promise<Scores365ScorePatch | null> {
+    const cachedGameId = match.scores365GameId ?? this.gameIdByEventSlug.get(match.eventSlug);
+    let discoveredGameId: number | undefined;
+    if (cachedGameId === undefined) {
+      const raw = await fetchJson<unknown>(this.allscoresUrl(match), this.httpOptions());
+      const game = find365ScoresGameForMatch(raw, match);
+      discoveredGameId = game ? numberValue(game.id) : undefined;
+      const scorePatch = game ? extract365ScoresScorePatch(game, match) : null;
+      if (discoveredGameId !== undefined) this.gameIdByEventSlug.set(match.eventSlug, discoveredGameId);
+      if (scorePatch) return scorePatch;
+    }
+
+    const gameId = cachedGameId ?? discoveredGameId ?? await this.discoverGameId(match);
+    if (gameId === undefined) return null;
+    this.gameIdByEventSlug.set(match.eventSlug, gameId);
+    const raw = await fetchJson<unknown>(this.gameUrl(gameId), this.httpOptions());
+    return extract365ScoresScorePatch(raw, { ...match, scores365GameId: gameId });
   }
 
   private async discoverGameId(match: MatchState): Promise<number | undefined> {

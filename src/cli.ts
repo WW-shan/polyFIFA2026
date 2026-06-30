@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
+import { lockedConditionMatchesScore } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
 import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
@@ -54,6 +55,9 @@ interface ParsedArgs {
 interface SinglePassOptions {
   executeTrade?: boolean;
   allowActiveEventRefill?: boolean;
+  lockedIncidentPreviousMatch?: MatchState;
+  lockedIncidentStakeLimit?: (fraction?: number) => Promise<number>;
+  assessLockedScoreRisk?: (match: MatchState, decision: Extract<TradeDecision, { action: "BUY" }>) => Promise<LockedScoreRiskResult>;
 }
 
 interface PendingBuy {
@@ -62,10 +66,53 @@ interface PendingBuy {
   firstSeenAt: number;
   updatedAt: number;
   decision: Extract<TradeDecision, { action: "BUY" }>;
+  lockedIncidentKey?: string;
+  lockedIncidentPreviousMatch?: MatchState;
 }
+
+interface LockedScoreIncident {
+  key: string;
+  previousMatch: MatchState;
+}
+
+interface LockedIncidentBudget {
+  bankroll: number;
+  spent: number;
+}
+
+interface LockedScoreRiskAssessment {
+  capFraction: number;
+  minimumNetReturn: number;
+  details: string;
+}
+
+type LockedScoreRiskResult =
+  | { action: "USE"; assessment: LockedScoreRiskAssessment }
+  | { action: "SKIP"; decision: NoTradeDecision };
+
+interface ScoreCheckResult {
+  source: string;
+  patch: Partial<MatchState> | null;
+}
+
+interface CurrentScoreIncidentState extends LockedScoreIncident {
+  homeGoals: number;
+  awayGoals: number;
+}
+
+type ScoreIncidentContext =
+  | { action: "locked_incident"; incident: LockedScoreIncident }
+  | { action: "blocked"; details: string }
+  | { action: "none" };
 
 const MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS = 1000;
 const SPORTS_WATCH_RECONNECT_INTERVAL_MS = 1000;
+const LOCKED_SCORE_CONFIRM_TIMEOUT_MS = 750;
+const LOCKED_INCIDENT_BANKROLL_FRACTION = 0.2;
+const UNCONFIRMED_LOCKED_HIGH_RETURN = 0.05;
+const UNCONFIRMED_LOCKED_HIGH_BANKROLL_FRACTION = 0.1;
+const UNCONFIRMED_LOCKED_MEDIUM_RETURN = 0.02;
+const UNCONFIRMED_LOCKED_MEDIUM_BANKROLL_FRACTION = 0.05;
 
 export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
@@ -135,26 +182,190 @@ async function runSinglePass(
       }
     }
 
+    if (options.lockedIncidentPreviousMatch) markets ??= await loadStrategyMarkets(match.eventSlug);
+    const lockedIncidentHasNewCandidate = options.lockedIncidentPreviousMatch && markets
+      ? hasNewLockedIncidentCandidate(match, markets, args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes, options.lockedIncidentPreviousMatch)
+      : false;
+    const lockedIncidentStakeLimit = lockedIncidentHasNewCandidate && options.lockedIncidentStakeLimit
+      ? await options.lockedIncidentStakeLimit()
+      : undefined;
+    const minimumNotional = args.minimumNotional ?? DEFAULT_THRESHOLDS.minimumNotional;
+    const lockedIncidentBudgetExhausted = lockedIncidentStakeLimit !== undefined && lockedIncidentStakeLimit < minimumNotional;
+    if (lockedIncidentBudgetExhausted && !tailWindow.eligible) {
+      return ok(summary(args.mode, {
+        action: "NO_TRADE",
+        reason: "INSUFFICIENT_BALANCE",
+        eventSlug: match.eventSlug,
+        details: `Locked score incident budget remaining ${lockedIncidentStakeLimit} is below minimum ${minimumNotional}`
+      }));
+    }
+    const stakeArgs = lockedIncidentStakeLimit !== undefined && !lockedIncidentBudgetExhausted
+      ? stakeLimitedArgs(args, lockedIncidentStakeLimit)
+      : args;
+
     const liveConfig = args.mode === "live" ? liveConfigFromEnv(env) : undefined;
-    const liveStake = await resolveStake(args, match, env, liveConfig, deps);
+    const liveStake = await resolveStake(stakeArgs, match, env, liveConfig, deps);
     if (liveStake.action === "NO_TRADE") return ok(summary(args.mode, liveStake.decision));
 
     markets ??= await loadStrategyMarkets(match.eventSlug);
-    const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
+    let thresholdOverrides = thresholdOverridesFromArgs(args);
+    let decisionStake = liveStake.stake;
+    let thresholds = buildThresholds(decisionStake, thresholdOverrides);
     const orderbooks = args.orderbookFile
       ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
       : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes, undefined, deps.fetchOrderbook ?? fetchOrderbook);
     const ledgerFile = resolveLedgerFile(args, env);
     const ledger = ledgerFile ? new LiveLedger(ledgerFile) : undefined;
-
-    const flowInput = {
-      match,
-      markets,
-      orderbooks,
-      stake: liveStake.stake,
-      thresholds: thresholdOverridesFromArgs(args)
+    const duplicateDecisionFor = async (buyDecision: Extract<TradeDecision, { action: "BUY" }>): Promise<NoTradeDecision | undefined> => {
+      if (!ledger || !(await ledger.hasActiveEventTrade(buyDecision.eventSlug))) return undefined;
+      const hasActiveLockedEventTrade = await ledger.hasActiveLockedEventTrade(buyDecision.eventSlug);
+      const allowLockedRefill = options.allowActiveEventRefill
+        && buyDecision.locked === true
+        && hasActiveLockedEventTrade;
+      const allowNonLockedAfterLocked = options.allowActiveEventRefill
+        && buyDecision.locked !== true
+        && hasActiveLockedEventTrade
+        && !(await ledger.hasActiveTrade(buyDecision.eventSlug, buyDecision.tokenId));
+      if (allowLockedRefill === true || allowNonLockedAfterLocked === true) return undefined;
+      return {
+        action: "NO_TRADE",
+        reason: "DUPLICATE_TRADE",
+        eventSlug: buyDecision.eventSlug,
+        details: "Ledger already has an active trade for this event"
+      };
     };
-    const decision = runDecisionFlow(flowInput);
+
+    const runDecision = (
+      stake: number,
+      overrides: Partial<Omit<DecisionThresholds, "maxNotional">>,
+      suppressLockedIncidentCandidates: boolean
+    ): TradeDecision => {
+      const flowInput: Parameters<typeof runDecisionFlow>[0] = {
+        match,
+        markets,
+        orderbooks,
+        stake,
+        thresholds: overrides
+      };
+      if (options.lockedIncidentPreviousMatch) flowInput.lockedIncidentPreviousMatch = options.lockedIncidentPreviousMatch;
+      if (suppressLockedIncidentCandidates) flowInput.suppressLockedIncidentCandidates = true;
+      return runDecisionFlow(flowInput);
+    };
+
+    let decision = runDecision(decisionStake, thresholdOverrides, lockedIncidentBudgetExhausted);
+    if (decision.action !== "BUY") {
+      await writeDepthAudit(args, env, {
+        match,
+        markets,
+        orderbooks,
+        thresholds,
+        decision
+      });
+      return ok(summary(args.mode, decision));
+    }
+    const duplicateDecision = await duplicateDecisionFor(decision);
+    if (duplicateDecision) {
+      await writeDepthAudit(args, env, {
+        match,
+        markets,
+        orderbooks,
+        thresholds,
+        decision: duplicateDecision
+      });
+      return ok(summary(args.mode, duplicateDecision));
+    }
+    if (options.executeTrade === false) {
+      await writeDepthAudit(args, env, {
+        match,
+        markets,
+        orderbooks,
+        thresholds,
+        decision
+      });
+      return ok(summary(args.mode, decision));
+    }
+    if (decision.locked === true && options.assessLockedScoreRisk) {
+      const risk = await options.assessLockedScoreRisk(match, decision);
+      if (risk.action === "SKIP") {
+        const suppressedDecision = tailWindow.eligible
+          ? runDecision(decisionStake, thresholdOverrides, true)
+          : risk.decision;
+        if (suppressedDecision.action !== "BUY") {
+          await writeDepthAudit(args, env, {
+            match,
+            markets,
+            orderbooks,
+            thresholds,
+            decision: risk.decision
+          });
+          return ok(summary(args.mode, risk.decision));
+        }
+        decision = suppressedDecision;
+      } else {
+        const riskStakeLimit = lockedIncidentHasNewCandidate && options.lockedIncidentStakeLimit
+          ? await options.lockedIncidentStakeLimit(risk.assessment.capFraction)
+          : undefined;
+        const riskBudgetExhausted = riskStakeLimit !== undefined && riskStakeLimit < minimumNotional;
+        if (riskBudgetExhausted && !tailWindow.eligible) {
+          const exhaustedDecision: NoTradeDecision = {
+            action: "NO_TRADE",
+            reason: "INSUFFICIENT_BALANCE",
+            eventSlug: match.eventSlug,
+            details: `Locked score incident ${risk.assessment.details} budget remaining ${riskStakeLimit} is below minimum ${minimumNotional}`
+          };
+          await writeDepthAudit(args, env, {
+            match,
+            markets,
+            orderbooks,
+            thresholds,
+            decision: exhaustedDecision
+          });
+          return ok(summary(args.mode, exhaustedDecision));
+        }
+
+        if (riskBudgetExhausted) {
+          decision = runDecision(decisionStake, thresholdOverrides, true);
+          if (decision.action !== "BUY") {
+            await writeDepthAudit(args, env, {
+              match,
+              markets,
+              orderbooks,
+              thresholds,
+              decision
+            });
+            return ok(summary(args.mode, decision));
+          }
+        } else {
+          if (riskStakeLimit !== undefined) decisionStake = Math.min(liveStake.stake, riskStakeLimit);
+          thresholdOverrides = thresholdOverridesWithMinimumNetReturn(thresholdOverrides, risk.assessment.minimumNetReturn);
+          thresholds = buildThresholds(decisionStake, thresholdOverrides);
+          decision = runDecision(decisionStake, thresholdOverrides, false);
+          if (decision.action !== "BUY") {
+            await writeDepthAudit(args, env, {
+              match,
+              markets,
+              orderbooks,
+              thresholds,
+              decision
+            });
+            return ok(summary(args.mode, decision));
+          }
+        }
+      }
+    }
+
+    const postRiskDuplicateDecision = await duplicateDecisionFor(decision);
+    if (postRiskDuplicateDecision) {
+      await writeDepthAudit(args, env, {
+        match,
+        markets,
+        orderbooks,
+        thresholds,
+        decision: postRiskDuplicateDecision
+      });
+      return ok(summary(args.mode, postRiskDuplicateDecision));
+    }
+
     await writeDepthAudit(args, env, {
       match,
       markets,
@@ -162,24 +373,6 @@ async function runSinglePass(
       thresholds,
       decision
     });
-    if (decision.action !== "BUY") {
-      return ok(summary(args.mode, decision));
-    }
-    if (ledger && await ledger.hasActiveEventTrade(decision.eventSlug)) {
-      const allowRefill = options.allowActiveEventRefill
-        && decision.locked === true
-        && await ledger.hasActiveLockedEventTrade(decision.eventSlug);
-      if (allowRefill !== true) {
-        return ok(summary(args.mode, {
-          action: "NO_TRADE",
-          reason: "DUPLICATE_TRADE",
-          eventSlug: decision.eventSlug,
-          details: "Ledger already has an active trade for this event"
-        }));
-      }
-    }
-    if (options.executeTrade === false) return ok(summary(args.mode, decision));
-
     const trade = args.mode === "paper"
       ? await new PaperExecutor().execute(decision)
       : await (deps.executeLive
@@ -295,7 +488,11 @@ async function runSportsWatch(
     const updateOptions = sportsUpdateOptions(args, env);
     const clockOptions = verifiedClockOptions(env);
     const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
-    const fetchVerifiedClock = deps.fetchVerifiedClock ?? defaultVerifiedClockFetcher(clockOptions);
+    const scores365Provider = deps.fetchVerifiedClock ? undefined : new Scores365ClockProvider(clockOptions);
+    const fetchVerifiedClock: NonNullable<CliDependencies["fetchVerifiedClock"]> = deps.fetchVerifiedClock
+      ?? (async (match: MatchState): Promise<Partial<MatchState> | null> => scores365Provider!.fetchClock(match));
+    const fetchExternalScore: NonNullable<CliDependencies["fetchVerifiedClock"]> = deps.fetchVerifiedClock
+      ?? (async (match: MatchState): Promise<Partial<MatchState> | null> => scores365Provider!.fetchScore(match));
     const streamDeps: CliDependencies = {
       ...deps,
       fetchEventStrategyMarkets: cachedStrategyMarketFetcher(deps.fetchEventStrategyMarkets ?? fetchEventStrategyMarkets)
@@ -314,6 +511,10 @@ async function runSportsWatch(
     const pendingBuys = new Map<string, PendingBuy>();
     const completedEventSlugs = new Set<string>();
     const refillEventSlugs = new Set<string>();
+    const observedScores = new Map<string, MatchState>();
+    const currentLockedIncidents = new Map<string, CurrentScoreIncidentState>();
+    const incidentSequences = new Map<string, number>();
+    const lockedIncidentBudgets = new Map<string, LockedIncidentBudget>();
     await seedLateActiveMatches(activeMatches, events, deps);
     const iterator = updates[Symbol.asyncIterator]();
     let updatePromise: Promise<IteratorResult<MatchState>> | undefined = iterator.next();
@@ -338,7 +539,8 @@ async function runSportsWatch(
             continue;
           }
           rememberClockPollMatch(activeMatches, input.result.value);
-          const processed = await processSportsWatchMatch(input.result.value);
+          const incidentContext = rememberScoreIncident(input.result.value);
+          const processed = await processSportsWatchMatch(input.result.value, incidentContext);
           iterations += 1;
           const fatal = await handleSportsWatchDecision(processed);
           if (fatal) return fatal;
@@ -366,7 +568,8 @@ async function runSportsWatch(
         for (const timedMatch of polledMatches) {
           if (!timedMatch || iterations >= maxIterations) continue;
           rememberClockPollMatch(activeMatches, timedMatch);
-          const processed = await processSportsWatchMatch(timedMatch);
+          const incidentContext = rememberScoreIncident(timedMatch);
+          const processed = await processSportsWatchMatch(timedMatch, incidentContext);
           iterations += 1;
           const fatal = await handleSportsWatchDecision(processed);
           if (fatal) return fatal;
@@ -384,13 +587,253 @@ async function runSportsWatch(
 
     return undefined;
 
-    async function processSportsWatchMatch(match: MatchState): Promise<{ result: CliResult; last: Record<string, unknown>; match: MatchState; executed: boolean }> {
+    function singlePassOptionsForLockedIncident(lockedIncident: LockedScoreIncident | undefined): SinglePassOptions {
+      const options: SinglePassOptions = { allowActiveEventRefill: true };
+      if (!lockedIncident) return options;
+      options.lockedIncidentPreviousMatch = lockedIncident.previousMatch;
+      options.lockedIncidentStakeLimit = (fraction) => lockedIncidentBudgetRemaining(lockedIncident.key, fraction);
+      options.assessLockedScoreRisk = assessLockedScoreRisk;
+      return options;
+    }
+
+    async function lockedIncidentBudgetRemaining(incidentKey: string, fraction = LOCKED_INCIDENT_BANKROLL_FRACTION): Promise<number> {
+      let budget = lockedIncidentBudgets.get(incidentKey);
+      if (!budget) {
+        const bankroll = Math.max(0, await estimateTotalBankroll());
+        budget = { bankroll, spent: 0 };
+        lockedIncidentBudgets.set(incidentKey, budget);
+      }
+      return Math.max(0, budget.bankroll * fraction - budget.spent);
+    }
+
+    async function estimateTotalBankroll(): Promise<number> {
+      if (args.mode !== "live") return args.stake ?? 97;
+      const liveConfig = liveConfigFromEnv(env);
+      const walletAddress = liveConfig.depositWalletAddress ?? liveConfig.funderAddress;
+      const cash = walletAddress
+        ? await (deps.readPusdBalance ?? readPusdBalance)(walletAddress, liveConfig.rpcUrl)
+        : args.stake ?? 0;
+      return cash + await activeLedgerExposureNotional();
+    }
+
+    async function activeLedgerExposureNotional(): Promise<number> {
+      const ledgerFile = resolveLedgerFile(args, env);
+      if (!ledgerFile) return 0;
+      const entries = await new LiveLedger(ledgerFile).readActiveEntries();
+      return entries.reduce((total, entry) => total + (Number.isFinite(entry.notional) ? entry.notional : 0), 0);
+    }
+
+    async function assessLockedScoreRisk(match: MatchState, decision: Extract<TradeDecision, { action: "BUY" }>): Promise<LockedScoreRiskResult> {
+      if (decision.locked !== true || !isLockedStrategy(decision.strategy)) {
+        return {
+          action: "USE",
+          assessment: {
+            capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
+            minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
+            details: "non-locked decision"
+          }
+        };
+      }
+      const scoreChecks = await fetchLockedScoreChecks(match);
+      const explicitScores = scoreChecks.flatMap((check) => {
+        const patch = check.patch;
+        return patch && isFiniteNumber(patch.homeGoals) && isFiniteNumber(patch.awayGoals)
+          ? [{ source: check.source, homeGoals: patch.homeGoals, awayGoals: patch.awayGoals }]
+          : [];
+      });
+      const conflict = explicitScores.find((score) => score.homeGoals !== match.homeGoals || score.awayGoals !== match.awayGoals);
+      if (conflict) {
+        return {
+          action: "SKIP",
+          decision: {
+            action: "NO_TRADE",
+            reason: "NO_ELIGIBLE_STRATEGY",
+            eventSlug: match.eventSlug,
+            details: `Locked score rejected because ${conflict.source} score ${conflict.homeGoals}-${conflict.awayGoals} disagrees with sports score ${match.homeGoals}-${match.awayGoals}`
+          }
+        };
+      }
+      if (explicitScores.some((score) => score.homeGoals === match.homeGoals && score.awayGoals === match.awayGoals)) {
+        return {
+          action: "USE",
+          assessment: {
+            capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
+            minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
+            details: `confirmed locked score ${match.homeGoals}-${match.awayGoals}`
+          }
+        };
+      }
+
+      if (decision.estimatedNetReturn >= UNCONFIRMED_LOCKED_HIGH_RETURN) {
+        return {
+          action: "USE",
+          assessment: {
+            capFraction: UNCONFIRMED_LOCKED_HIGH_BANKROLL_FRACTION,
+            minimumNetReturn: UNCONFIRMED_LOCKED_HIGH_RETURN,
+            details: `unconfirmed locked score high-return tier netReturn=${decision.estimatedNetReturn}`
+          }
+        };
+      }
+
+      if (decision.estimatedNetReturn >= UNCONFIRMED_LOCKED_MEDIUM_RETURN) {
+        return {
+          action: "USE",
+          assessment: {
+            capFraction: UNCONFIRMED_LOCKED_MEDIUM_BANKROLL_FRACTION,
+            minimumNetReturn: UNCONFIRMED_LOCKED_MEDIUM_RETURN,
+            details: `unconfirmed locked score medium-return tier netReturn=${decision.estimatedNetReturn}`
+          }
+        };
+      }
+
+      return {
+        action: "SKIP",
+        decision: {
+          action: "NO_TRADE",
+          reason: "RETURN_TOO_LOW",
+          eventSlug: match.eventSlug,
+          details: `unconfirmed locked score net return ${decision.estimatedNetReturn} below minimum ${UNCONFIRMED_LOCKED_MEDIUM_RETURN}`
+        }
+      };
+    }
+
+    async function fetchLockedScoreChecks(match: MatchState): Promise<ScoreCheckResult[]> {
+      const checks = [
+        fetchScoreCheck("external score", () => fetchExternalScore(match, events, clockOptions))
+      ];
+      if (deps.fetchMatchState) {
+        checks.push(fetchScoreCheck("event page", () => deps.fetchMatchState!(match.eventSlug)));
+      }
+      return Promise.all(checks);
+    }
+
+    async function fetchScoreCheck(source: string, fetcher: () => Promise<Partial<MatchState> | null>): Promise<ScoreCheckResult> {
+      try {
+        const patch = await Promise.race([
+          fetcher().catch(() => null),
+          sleep(LOCKED_SCORE_CONFIRM_TIMEOUT_MS).then(() => null)
+        ]);
+        return { source, patch };
+      } catch {
+        return { source, patch: null };
+      }
+    }
+
+    function rememberLockedIncidentSpend(value: Record<string, unknown>, lockedIncident: LockedScoreIncident | undefined): void {
+      if (!lockedIncident || !isCompletedTradeSummary(value)) return;
+      const decision = buyDecisionFromSummary(value);
+      if (!decision || decision.locked !== true || !isLockedStrategy(decision.strategy)) return;
+      const notional = executedNotional(value);
+      if (!isPositiveNumber(notional)) return;
+      const budget = lockedIncidentBudgets.get(lockedIncident.key);
+      if (!budget) {
+        lockedIncidentBudgets.set(lockedIncident.key, {
+          bankroll: notional / LOCKED_INCIDENT_BANKROLL_FRACTION,
+          spent: notional
+        });
+        return;
+      }
+      budget.spent += notional;
+    }
+
+    function executedNotional(value: Record<string, unknown>): number | undefined {
+      const trade = value.trade;
+      if (isRecord(trade) && isPositiveNumber(trade.notional)) return trade.notional;
+      return isPositiveNumber(value.notional) ? value.notional : undefined;
+    }
+
+    function rememberScoreIncident(match: MatchState): ScoreIncidentContext {
+      if (match.period !== "2H" || !match.isLive || match.ended === true) return { action: "none" };
+      const previous = observedScores.get(match.eventSlug);
+      const score = scorePair(match);
+
+      if (!previous) {
+        observedScores.set(match.eventSlug, match);
+        if (goalsTotal(match) <= 0) return { action: "none" };
+        return createLockedScoreIncident(match, zeroScoreMatch(match));
+      }
+
+      if (sameScore(previous, match)) {
+        observedScores.set(match.eventSlug, match);
+        const current = currentLockedIncidents.get(match.eventSlug);
+        if (current && current.homeGoals === match.homeGoals && current.awayGoals === match.awayGoals) {
+          return { action: "locked_incident", incident: current };
+        }
+        return { action: "none" };
+      }
+
+      observedScores.set(match.eventSlug, match);
+      if (scoreIncreased(previous, match)) {
+        return createLockedScoreIncident(match, previous);
+      }
+
+      currentLockedIncidents.delete(match.eventSlug);
+      return {
+        action: "blocked",
+        details: `Locked score suppressed because sports score moved from ${scorePair(previous)} to ${score}`
+      };
+    }
+
+    function createLockedScoreIncident(match: MatchState, previousMatch: MatchState): ScoreIncidentContext {
+      const sequence = (incidentSequences.get(match.eventSlug) ?? 0) + 1;
+      incidentSequences.set(match.eventSlug, sequence);
+      const incident: CurrentScoreIncidentState = {
+        key: `${match.eventSlug}:${sequence}:${scorePair(match)}`,
+        previousMatch,
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals
+      };
+      currentLockedIncidents.set(match.eventSlug, incident);
+      return { action: "locked_incident", incident };
+    }
+
+    function scoreIncreased(previous: MatchState, current: MatchState): boolean {
+      return current.homeGoals >= previous.homeGoals
+        && current.awayGoals >= previous.awayGoals
+        && goalsTotal(current) > goalsTotal(previous);
+    }
+
+    function sameScore(left: MatchState, right: MatchState): boolean {
+      return left.homeGoals === right.homeGoals && left.awayGoals === right.awayGoals;
+    }
+
+    function scorePair(match: Pick<MatchState, "homeGoals" | "awayGoals">): string {
+      return `${match.homeGoals}-${match.awayGoals}`;
+    }
+
+    function goalsTotal(match: Pick<MatchState, "homeGoals" | "awayGoals">): number {
+      return match.homeGoals + match.awayGoals;
+    }
+
+    function zeroScoreMatch(match: MatchState): MatchState {
+      return { ...match, homeGoals: 0, awayGoals: 0 };
+    }
+
+    async function processSportsWatchMatch(
+      match: MatchState,
+      incidentContext: ScoreIncidentContext
+    ): Promise<{ result: CliResult; last: Record<string, unknown>; match: MatchState; executed: boolean; lockedIncident?: LockedScoreIncident }> {
       const clockPatch = match.remainingSecondsSource === "365scores_added_time_precise_game_time" || !shouldPollVerifiedClock(match)
         ? null
         : await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
       const timedMatch = clockPatch ? { ...match, ...clockPatch } : match;
+      if (incidentContext.action === "blocked") {
+        const result = ok(summary(args.mode, {
+          action: "NO_TRADE",
+          reason: "NO_ELIGIBLE_STRATEGY",
+          eventSlug: timedMatch.eventSlug,
+          details: incidentContext.details
+        }));
+        return {
+          result,
+          last: JSON.parse(result.stdout) as Record<string, unknown>,
+          match: timedMatch,
+          executed: false
+        };
+      }
       const executeNow = candidateCompareWaitMs === undefined;
-      const singlePassOptions: SinglePassOptions = { allowActiveEventRefill: true };
+      const lockedIncident = incidentContext.action === "locked_incident" ? incidentContext.incident : undefined;
+      const singlePassOptions = singlePassOptionsForLockedIncident(lockedIncident);
       if (!executeNow) singlePassOptions.executeTrade = false;
       let result: CliResult;
       try {
@@ -403,20 +846,23 @@ async function runSportsWatch(
         rememberSportsWatchExecutionError(timedMatch, error);
         result = ok(last ?? sportsWatchExecutionErrorSummary(timedMatch, error));
       }
-      return {
+      const processed = {
         result,
         last: JSON.parse(result.stdout) as Record<string, unknown>,
         match: timedMatch,
         executed: executeNow
       };
+      if (lockedIncident) return { ...processed, lockedIncident };
+      return processed;
     }
 
-    async function handleSportsWatchDecision(processed: { result: CliResult; last: Record<string, unknown>; match: MatchState; executed: boolean }): Promise<CliResult | undefined> {
+    async function handleSportsWatchDecision(processed: { result: CliResult; last: Record<string, unknown>; match: MatchState; executed: boolean; lockedIncident?: LockedScoreIncident }): Promise<CliResult | undefined> {
       last = processed.last;
       if (processed.result.exitCode !== 0) return processed.result;
 
       if (processed.executed) {
         pendingBuys.delete(processed.match.eventSlug);
+        rememberLockedIncidentSpend(processed.last, processed.lockedIncident);
         rememberSportsWatchTradeOutcome(processed.last, processed.match);
         return undefined;
       }
@@ -429,27 +875,37 @@ async function runSportsWatch(
 
       if (candidateCompareWaitMs === undefined) {
         pendingBuys.delete(processed.match.eventSlug);
-        return executeAndRememberSportsWatchMatch(processed.match);
+        return executeAndRememberSportsWatchMatch(processed.match, processed.lockedIncident);
       }
 
       if (decision.estimatedNetReturn >= instantBuyNetReturn) {
         pendingBuys.delete(processed.match.eventSlug);
-        return executeAndRememberSportsWatchMatch(processed.match);
+        return executeAndRememberSportsWatchMatch(processed.match, processed.lockedIncident);
       }
 
-      rememberPendingBuy(processed.match, decision, Date.now());
+      rememberPendingBuy(processed.match, decision, Date.now(), processed.lockedIncident);
       return undefined;
     }
 
-    function rememberPendingBuy(match: MatchState, decision: Extract<TradeDecision, { action: "BUY" }>, now: number): void {
+    function rememberPendingBuy(
+      match: MatchState,
+      decision: Extract<TradeDecision, { action: "BUY" }>,
+      now: number,
+      lockedIncident: LockedScoreIncident | undefined
+    ): void {
       const existing = pendingBuys.get(match.eventSlug);
-      pendingBuys.set(match.eventSlug, {
+      const pending: PendingBuy = {
         eventSlug: match.eventSlug,
         match,
         firstSeenAt: existing?.firstSeenAt ?? now,
         updatedAt: now,
         decision
-      });
+      };
+      if (lockedIncident) {
+        pending.lockedIncidentKey = lockedIncident.key;
+        pending.lockedIncidentPreviousMatch = lockedIncident.previousMatch;
+      }
+      pendingBuys.set(match.eventSlug, pending);
     }
 
     async function maybeExecuteDeferredBuy(now: number): Promise<CliResult | undefined> {
@@ -466,7 +922,10 @@ async function runSportsWatch(
 
       for (const pending of ranked) {
         pendingBuys.delete(pending.eventSlug);
-        const fatal = await executeAndRememberSportsWatchMatch(pending.match);
+        const lockedIncident = pending.lockedIncidentKey && pending.lockedIncidentPreviousMatch
+          ? { key: pending.lockedIncidentKey, previousMatch: pending.lockedIncidentPreviousMatch }
+          : undefined;
+        const fatal = await executeAndRememberSportsWatchMatch(pending.match, lockedIncident);
         if (fatal) return fatal;
         if (last?.status !== "no_trade") return undefined;
       }
@@ -474,10 +933,10 @@ async function runSportsWatch(
       return undefined;
     }
 
-    async function executeAndRememberSportsWatchMatch(match: MatchState): Promise<CliResult | undefined> {
+    async function executeAndRememberSportsWatchMatch(match: MatchState, lockedIncident?: LockedScoreIncident): Promise<CliResult | undefined> {
       let result: CliResult;
       try {
-        result = await executeSportsWatchMatch(match);
+        result = await executeSportsWatchMatch(match, lockedIncident);
       } catch (error) {
         rememberSportsWatchExecutionError(match, error);
         return undefined;
@@ -488,15 +947,16 @@ async function runSportsWatch(
       }
       const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
       last = parsed;
+      rememberLockedIncidentSpend(parsed, lockedIncident);
       rememberSportsWatchTradeOutcome(parsed, match);
       return undefined;
     }
 
-    async function executeSportsWatchMatch(match: MatchState): Promise<CliResult> {
+    async function executeSportsWatchMatch(match: MatchState, lockedIncident?: LockedScoreIncident): Promise<CliResult> {
       return runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
         ...streamDeps,
         fetchMatchState: async () => match
-      }, { allowActiveEventRefill: true });
+      }, singlePassOptionsForLockedIncident(lockedIncident));
     }
 
     function rememberSportsWatchTradeOutcome(value: Record<string, unknown>, match: MatchState): void {
@@ -955,6 +1415,25 @@ export async function fetchCandidateOrderbooks(
   return results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 }
 
+function hasNewLockedIncidentCandidate(
+  match: MatchState,
+  markets: readonly StrategyMarket[],
+  entryWindowMinutes: number,
+  previousMatch: MatchState
+): boolean {
+  return selectLossRequiresCandidates(match, markets, {
+    entryWindowMinutes,
+    allowLockedOutsideEntryWindow: true
+  }).some((candidate) =>
+    candidate.locked === true && !lockedConditionMatchesScore(previousMatch, candidate)
+  );
+}
+
+function stakeLimitedArgs(args: ParsedArgs, stakeLimit: number): ParsedArgs {
+  const stake = args.stake !== undefined ? Math.min(args.stake, stakeLimit) : stakeLimit;
+  return { ...args, stake };
+}
+
 interface DepthAuditInput {
   match: MatchState;
   markets: readonly StrategyMarket[];
@@ -1114,6 +1593,16 @@ function thresholdOverridesFromArgs(args: ParsedArgs): Partial<Omit<DecisionThre
   if (args.minimumNotional !== undefined) overrides.minimumNotional = args.minimumNotional;
   if (args.entryWindowMinutes !== undefined) overrides.entryWindowMinutes = args.entryWindowMinutes;
   return overrides;
+}
+
+function thresholdOverridesWithMinimumNetReturn(
+  overrides: Partial<Omit<DecisionThresholds, "maxNotional">>,
+  minimumNetReturn: number
+): Partial<Omit<DecisionThresholds, "maxNotional">> {
+  return {
+    ...overrides,
+    minimumNetReturn: Math.max(overrides.minimumNetReturn ?? DEFAULT_THRESHOLDS.minimumNetReturn, minimumNetReturn)
+  };
 }
 
 async function readJsonFile<T>(file: string): Promise<T> {

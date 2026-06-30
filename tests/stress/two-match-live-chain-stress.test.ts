@@ -73,7 +73,9 @@ describe("two-match full live chain stress coverage", () => {
         fetchMatchState: async (eventSlug) => latestMatches.get(eventSlug) ?? initialMatchFor(eventSlug, fixture),
         fetchVerifiedClock: async (match) => {
           clockCalls.push(match.eventSlug);
-          if (match.eventSlug !== fixture.tailSlug) return null;
+          if (match.eventSlug !== fixture.tailSlug) {
+            return { homeGoals: match.homeGoals, awayGoals: match.awayGoals };
+          }
           return {
             minute: 90,
             elapsedSeconds: 90 * 60,
@@ -116,7 +118,7 @@ describe("two-match full live chain stress coverage", () => {
       const tailOrders = postedOrders.filter((order) => order.tokenId === fixture.tailTotalUnderToken || order.tokenId === fixture.tailTeamUnderToken);
       expect(lockedOrders.length, `${spec.name} locked posts`).toBe(spec.expectedLockedPosts);
       expect(tailOrders.length, `${spec.name} tail posts`).toBe(spec.expectedTailPosts);
-      expect(clockCalls, `${spec.name} clock calls`).not.toContain(fixture.lockedSlug);
+      expect(clockCalls, `${spec.name} locked score confirmation calls`).toContain(fixture.lockedSlug);
       expect(clockCalls, `${spec.name} clock calls`).toContain(fixture.tailSlug);
 
       const tailDecision = decisions.find((decision) => decision.eventSlug === fixture.tailSlug);
@@ -243,10 +245,9 @@ function stressCases(): StressCase[] {
         stage([{ price: 0.974, size: 2 }], [{ price: 0.975, size: 2 }]),
         stopStage()
       ],
-      expectedLockedPosts: 2,
+      expectedLockedPosts: 1,
       expectedTailPosts: 2,
       expectedLedger: [
-        ["LOCKED", "filled"],
         ["LOCKED", "filled"],
         ["TAIL", "filled"]
       ],

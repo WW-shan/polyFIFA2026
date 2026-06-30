@@ -47,7 +47,7 @@ describe("locked refill watch stress coverage", () => {
         fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Locked", awayTeam: "Refill" }],
         fetchMatchState: async () => liveLockedMatch(eventSlug),
         watchSportsUpdates: async () => oneLiveUpdate(liveLockedMatch(eventSlug)),
-        fetchVerifiedClock: async () => null,
+        fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
         readPusdBalance: async () => balance,
         fetchOrderbook: async (tokenId) => {
           const stage = stages[Math.min(attemptIndex, stages.length - 1)]!;
@@ -77,7 +77,10 @@ describe("locked refill watch stress coverage", () => {
         price: entry.price,
         notional: entry.notional
       })), `case ${caseIndex}`).toEqual(expected.entries);
-      expect(ledger.filter((entry) => entry.status === "filled").length, `case ${caseIndex}`).toBeGreaterThanOrEqual(2);
+      const filledNotional = ledger
+        .filter((entry) => entry.status === "filled")
+        .reduce((total, entry) => total + Number(entry.notional), 0);
+      expect(filledNotional, `case ${caseIndex} locked incident cap`).toBeLessThanOrEqual(round(initialBalance * 0.2, 8) + EPSILON);
     }
   });
 });
@@ -97,15 +100,19 @@ interface ExpectedEntry {
 
 function simulate(stages: readonly Stage[], initialBalance: number): { entries: ExpectedEntry[] } {
   let balance = initialBalance;
+  const incidentCap = initialBalance * 0.2;
+  let incidentSpent = 0;
   let hasLockedFill = false;
   const entries: ExpectedEntry[] = [];
 
   for (const stage of stages) {
     const availableBalance = roundDownMoney(balance - BALANCE_BUFFER);
-    if (availableBalance < MIN_NOTIONAL) break;
+    const budgetRemaining = incidentCap - incidentSpent;
+    const availableStake = Math.min(availableBalance, budgetRemaining);
+    if (availableStake < MIN_NOTIONAL) break;
     if (!isProfitableLockedPrice(stage.decisionPrice)) break;
 
-    const plannedNotional = Math.min(availableBalance, stage.decisionPrice * stage.decisionSize);
+    const plannedNotional = Math.min(availableStake, stage.decisionPrice * stage.decisionSize);
     if (plannedNotional < MIN_NOTIONAL) break;
 
     const refreshCapacity = isProfitableLockedPrice(stage.refreshPrice) ? stage.refreshPrice * stage.refreshSize : 0;
@@ -119,6 +126,7 @@ function simulate(stages: readonly Stage[], initialBalance: number): { entries: 
     const entry = { status: "filled" as const, price: stage.refreshPrice, notional: round(notional, 8) };
     entries.push(entry);
     balance = round(balance - entry.notional, 6);
+    incidentSpent = round(incidentSpent + entry.notional, 8);
     hasLockedFill = true;
   }
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   SCORES365_REMAINING_SECONDS_SOURCE,
   extract365ScoresClock,
+  extract365ScoresScorePatch,
   find365ScoresGameForMatch
 } from "../../src/polymarket/scores365-clock.js";
 import type { MatchState } from "../../src/domain/types.js";
@@ -71,6 +72,23 @@ describe("365Scores live clock", () => {
     });
     expect(clock).not.toHaveProperty("homeGoals");
     expect(clock).not.toHaveProperty("awayGoals");
+  });
+
+  test("extracts a separate score patch for fast locked-goal confirmation", () => {
+    const score = extract365ScoresScorePatch({
+      game: {
+        id: 4627855,
+        statusText: "2nd Half",
+        homeCompetitor: { name: "Switzerland", score: "2" },
+        awayCompetitor: { name: "Canada", score: 1 }
+      }
+    }, match);
+
+    expect(score).toEqual({
+      homeGoals: 2,
+      awayGoals: 1,
+      scores365GameId: 4627855
+    });
   });
 
   test("rejects game clocks whose teams do not match the current event", () => {

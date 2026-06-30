@@ -212,7 +212,7 @@ function validateTradeInputs(
   return { action: "OK" };
 }
 
-function lockedConditionMatchesScore(match: MatchState, selected: SelectedStrategyMarket): boolean {
+export function lockedConditionMatchesScore(match: MatchState, selected: SelectedStrategyMarket): boolean {
   if (selected.locked !== true) return true;
   if (selected.strategy === "total_over_locked") {
     return normalizedOutcome(selected.outcome) === "over"
