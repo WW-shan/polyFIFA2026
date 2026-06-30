@@ -1,8 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
 import { classifyTailWindow } from "./domain/time-window.js";
-import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, DEFAULT_POLYGON_RPC_URL, readPusdBalance } from "./execution/balance.js";
 import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import type { LiveExecuteOptions, LiveExecutorConfig } from "./execution/live-executor.js";
@@ -46,6 +47,7 @@ interface ParsedArgs {
   instantBuyNetReturn?: number;
   candidateCompareWaitMs?: number;
   liveAuditFile?: string;
+  depthAuditFile?: string;
   orderType: LiveOrderType;
 }
 
@@ -72,6 +74,7 @@ export interface CliDependencies {
   fetchWorldCupEventRefs?: () => Promise<WorldCupEventRef[]>;
   watchSportsUpdates?: (events: readonly WorldCupEventRef[], options: { auditFile?: string; proxyUrl?: string }) => Promise<AsyncIterable<MatchState>>;
   fetchVerifiedClock?: (match: MatchState, events: readonly WorldCupEventRef[], options: { proxyUrl?: string; timezoneName?: string }) => Promise<Partial<MatchState> | null>;
+  fetchEventStrategyMarkets?: (eventSlug: string) => Promise<StrategyMarket[]>;
   fetchOrderbook?: (tokenId: string) => Promise<OrderbookSnapshot>;
   executeLive?: (decision: Extract<TradeDecision, { action: "BUY" }>, options: LiveExecuteOptions) => Promise<TradeResult>;
   fetchRedeemablePositions?: (walletAddress: string, config: SettlementConfig) => Promise<RedeemablePosition[]>;
@@ -106,6 +109,7 @@ async function runSinglePass(
   deps: CliDependencies,
   options: SinglePassOptions = {}
 ): Promise<CliResult> {
+    const loadStrategyMarkets = deps.fetchEventStrategyMarkets ?? fetchEventStrategyMarkets;
     let match = args.matchFile
       ? await readJsonFile<MatchState>(args.matchFile)
       : await (deps.fetchMatchState ?? fetchEventMatchState)(required(args.eventSlug, "--event-slug"));
@@ -116,7 +120,7 @@ async function runSinglePass(
 
     let markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : undefined;
     if (!tailWindow.eligible) {
-      markets ??= await fetchEventStrategyMarkets(match.eventSlug);
+      markets ??= await loadStrategyMarkets(match.eventSlug);
       const lockedCandidates = selectLossRequiresCandidates(match, markets, {
         entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes,
         allowLockedOutsideEntryWindow: true
@@ -135,7 +139,7 @@ async function runSinglePass(
     const liveStake = await resolveStake(args, match, env, liveConfig, deps);
     if (liveStake.action === "NO_TRADE") return ok(summary(args.mode, liveStake.decision));
 
-    markets ??= await fetchEventStrategyMarkets(match.eventSlug);
+    markets ??= await loadStrategyMarkets(match.eventSlug);
     const thresholds = buildThresholds(liveStake.stake, thresholdOverridesFromArgs(args));
     const orderbooks = args.orderbookFile
       ? [await readJsonFile<OrderbookSnapshot>(args.orderbookFile)]
@@ -151,6 +155,13 @@ async function runSinglePass(
       thresholds: thresholdOverridesFromArgs(args)
     };
     const decision = runDecisionFlow(flowInput);
+    await writeDepthAudit(args, env, {
+      match,
+      markets,
+      orderbooks,
+      thresholds,
+      decision
+    });
     if (decision.action !== "BUY") {
       return ok(summary(args.mode, decision));
     }
@@ -285,6 +296,15 @@ async function runSportsWatch(
     const clockOptions = verifiedClockOptions(env);
     const updates = await (deps.watchSportsUpdates ?? defaultSportsUpdates)(events, updateOptions);
     const fetchVerifiedClock = deps.fetchVerifiedClock ?? defaultVerifiedClockFetcher(clockOptions);
+    const streamDeps: CliDependencies = {
+      ...deps,
+      fetchEventStrategyMarkets: cachedStrategyMarketFetcher(deps.fetchEventStrategyMarkets ?? fetchEventStrategyMarkets)
+    };
+    if (!args.marketsFile) {
+      for (const event of events) {
+        void streamDeps.fetchEventStrategyMarkets?.(event.eventSlug).catch(() => undefined);
+      }
+    }
     const candidateCompareWaitMs = args.candidateCompareWaitMs;
     const instantBuyNetReturn = candidateCompareWaitMs === undefined
       ? 0.005
@@ -364,25 +384,42 @@ async function runSportsWatch(
 
     return undefined;
 
-    async function processSportsWatchMatch(match: MatchState): Promise<{ result: CliResult; last: Record<string, unknown>; match: MatchState }> {
+    async function processSportsWatchMatch(match: MatchState): Promise<{ result: CliResult; last: Record<string, unknown>; match: MatchState; executed: boolean }> {
       const clockPatch = match.remainingSecondsSource === "365scores_added_time_precise_game_time" || !shouldPollVerifiedClock(match)
         ? null
         : await maybeFetchVerifiedClock(fetchVerifiedClock, match, events, clockOptions);
       const timedMatch = clockPatch ? { ...match, ...clockPatch } : match;
-      const result = await runSinglePass({ ...args, eventSlug: timedMatch.eventSlug }, env, {
-        ...deps,
-        fetchMatchState: async () => timedMatch
-      }, { executeTrade: false, allowActiveEventRefill: true });
+      const executeNow = candidateCompareWaitMs === undefined;
+      const singlePassOptions: SinglePassOptions = { allowActiveEventRefill: true };
+      if (!executeNow) singlePassOptions.executeTrade = false;
+      let result: CliResult;
+      try {
+        result = await runSinglePass({ ...args, eventSlug: timedMatch.eventSlug }, env, {
+          ...streamDeps,
+          fetchMatchState: async () => timedMatch
+        }, singlePassOptions);
+      } catch (error) {
+        if (!executeNow) throw error;
+        rememberSportsWatchExecutionError(timedMatch, error);
+        result = ok(last ?? sportsWatchExecutionErrorSummary(timedMatch, error));
+      }
       return {
         result,
         last: JSON.parse(result.stdout) as Record<string, unknown>,
-        match: timedMatch
+        match: timedMatch,
+        executed: executeNow
       };
     }
 
-    async function handleSportsWatchDecision(processed: { result: CliResult; last: Record<string, unknown>; match: MatchState }): Promise<CliResult | undefined> {
+    async function handleSportsWatchDecision(processed: { result: CliResult; last: Record<string, unknown>; match: MatchState; executed: boolean }): Promise<CliResult | undefined> {
       last = processed.last;
       if (processed.result.exitCode !== 0) return processed.result;
+
+      if (processed.executed) {
+        pendingBuys.delete(processed.match.eventSlug);
+        rememberSportsWatchTradeOutcome(processed.last, processed.match);
+        return undefined;
+      }
 
       const decision = buyDecisionFromSummary(processed.last);
       if (!decision) {
@@ -451,32 +488,43 @@ async function runSportsWatch(
       }
       const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
       last = parsed;
-      if (isCompletedTradeSummary(parsed)) {
-        if (shouldKeepRefillingLockedEvent(parsed, match)) {
-          refillEventSlugs.add(match.eventSlug);
-          activeMatches.set(match.eventSlug, match);
-          pendingBuys.delete(match.eventSlug);
-          return undefined;
-        }
-        completedEventSlugs.add(match.eventSlug);
-        activeMatches.delete(match.eventSlug);
-        pendingBuys.delete(match.eventSlug);
-        refillEventSlugs.delete(match.eventSlug);
-      }
+      rememberSportsWatchTradeOutcome(parsed, match);
       return undefined;
     }
 
     async function executeSportsWatchMatch(match: MatchState): Promise<CliResult> {
       return runSinglePass({ ...args, eventSlug: match.eventSlug }, env, {
-        ...deps,
+        ...streamDeps,
         fetchMatchState: async () => match
       }, { allowActiveEventRefill: true });
+    }
+
+    function rememberSportsWatchTradeOutcome(value: Record<string, unknown>, match: MatchState): void {
+      if (!isCompletedTradeSummary(value)) return;
+      if (shouldKeepRefillingLockedEvent(value, match)) {
+        refillEventSlugs.add(match.eventSlug);
+        activeMatches.set(match.eventSlug, match);
+        pendingBuys.delete(match.eventSlug);
+        return;
+      }
+      completedEventSlugs.add(match.eventSlug);
+      activeMatches.delete(match.eventSlug);
+      pendingBuys.delete(match.eventSlug);
+      refillEventSlugs.delete(match.eventSlug);
     }
 
     function rememberSportsWatchExecutionError(match: MatchState, error: unknown): void {
       const details = error instanceof Error ? error.message : String(error);
       console.error(`SPORTS_WATCH_EXECUTION_FAILED event=${match.eventSlug} details=${details}`);
-      last = {
+      last = sportsWatchExecutionErrorSummary(match, error);
+      activeMatches.delete(match.eventSlug);
+      pendingBuys.delete(match.eventSlug);
+      refillEventSlugs.delete(match.eventSlug);
+    }
+
+    function sportsWatchExecutionErrorSummary(match: MatchState, error: unknown): Record<string, unknown> {
+      const details = error instanceof Error ? error.message : String(error);
+      return {
         mode: args.mode,
         status: "execution_error",
         action: "NO_TRADE",
@@ -484,9 +532,6 @@ async function runSportsWatch(
         eventSlug: match.eventSlug,
         details
       };
-      activeMatches.delete(match.eventSlug);
-      pendingBuys.delete(match.eventSlug);
-      refillEventSlugs.delete(match.eventSlug);
     }
 
     async function fetchActiveMatchSnapshot(match: MatchState): Promise<MatchState | null> {
@@ -586,6 +631,23 @@ async function fetchWorldCupEventRefs(deps: CliDependencies): Promise<WorldCupEv
     return (await deps.fetchWorldCupEventSlugs()).map((eventSlug) => ({ eventSlug }));
   }
   return fetchOpenWorldCupEventRefs();
+}
+
+function cachedStrategyMarketFetcher(
+  fetcher: (eventSlug: string) => Promise<StrategyMarket[]>
+): (eventSlug: string) => Promise<StrategyMarket[]> {
+  const cache = new Map<string, Promise<StrategyMarket[]>>();
+  return (eventSlug: string) => {
+    let promise = cache.get(eventSlug);
+    if (!promise) {
+      promise = fetcher(eventSlug).catch((error) => {
+        cache.delete(eventSlug);
+        throw error;
+      });
+      cache.set(eventSlug, promise);
+    }
+    return promise;
+  };
 }
 
 function sportsUpdateOptions(args: ParsedArgs, env: Record<string, string | undefined>): { auditFile?: string; proxyUrl?: string } {
@@ -893,6 +955,52 @@ export async function fetchCandidateOrderbooks(
   return results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 }
 
+interface DepthAuditInput {
+  match: MatchState;
+  markets: readonly StrategyMarket[];
+  orderbooks: readonly OrderbookSnapshot[];
+  thresholds: DecisionThresholds;
+  decision: TradeDecision;
+}
+
+async function writeDepthAudit(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  input: DepthAuditInput
+): Promise<void> {
+  const file = resolveDepthAuditFile(args, env);
+  if (!file) return;
+
+  const record = {
+    timestamp: new Date().toISOString(),
+    mode: args.mode,
+    eventSlug: input.match.eventSlug,
+    match: input.match,
+    thresholds: input.thresholds,
+    candidates: depthAuditCandidates(input.match, input.markets, input.thresholds),
+    orderbooks: input.orderbooks,
+    decision: input.decision
+  };
+
+  try {
+    await mkdir(dirname(file), { recursive: true });
+    await appendFile(file, `${JSON.stringify(record)}\n`, "utf8");
+  } catch (error) {
+    console.error(`DEPTH_AUDIT_FAILED file=${file} details=${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function depthAuditCandidates(
+  match: MatchState,
+  markets: readonly StrategyMarket[],
+  thresholds: DecisionThresholds
+): SelectedStrategyMarket[] {
+  return selectLossRequiresCandidates(match, markets, {
+    entryWindowMinutes: thresholds.entryWindowMinutes,
+    allowLockedOutsideEntryWindow: true
+  });
+}
+
 async function resolveStake(
   args: ParsedArgs,
   match: MatchState,
@@ -939,6 +1047,14 @@ function shouldUseLiveBalance(args: ParsedArgs, env: Record<string, string | und
 function resolveLedgerFile(args: ParsedArgs, env: Record<string, string | undefined>): string | undefined {
   if (args.ledgerFile) return args.ledgerFile;
   if (args.mode === "live" || args.mode === "status") return env.POLY_LEDGER_FILE ?? "data/live-ledger.json";
+  return undefined;
+}
+
+function resolveDepthAuditFile(args: ParsedArgs, env: Record<string, string | undefined>): string | undefined {
+  if (args.depthAuditFile) return args.depthAuditFile;
+  if (env.POLY_DEPTH_AUDIT_FILE) return env.POLY_DEPTH_AUDIT_FILE;
+  if ((env.NODE_ENV ?? process.env.NODE_ENV) === "test") return undefined;
+  if (args.mode === "live" && booleanEnv(env.POLY_DEPTH_AUDIT_ENABLED) !== false) return "data/live-depth-audit.ndjson";
   return undefined;
 }
 
@@ -1052,6 +1168,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.instantBuyNetReturn) parsed.instantBuyNetReturn = numberArg(raw.instantBuyNetReturn, "--instant-buy-net-return");
   if (raw.candidateCompareWaitMs) parsed.candidateCompareWaitMs = numberArg(raw.candidateCompareWaitMs, "--candidate-compare-wait-ms");
   if (raw.liveAuditFile) parsed.liveAuditFile = raw.liveAuditFile;
+  if (raw.depthAuditFile) parsed.depthAuditFile = raw.depthAuditFile;
   if (raw.maxEntryPrice) parsed.maxEntryPrice = numberArg(raw.maxEntryPrice, "--max-entry-price");
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
   if (raw.minimumNotional) parsed.minimumNotional = numberArg(raw.minimumNotional, "--minimum-notional");

@@ -22,6 +22,7 @@ coverage/
 *.log
 data/live-ledger.json
 data/live-sports-audit.ndjson
+data/live-depth-audit.ndjson
 
 # local git worktrees
 .worktrees/

@@ -67,10 +67,10 @@ const sportsLiveMock = vi.hoisted(() => {
 });
 
 const eventPageMock = vi.hoisted(() => ({
-  fetchEventMatchState: vi.fn(async () => {
+  fetchEventMatchState: vi.fn(async (): Promise<MatchState> => {
     throw new Error("match page polling should not be used");
   }),
-  fetchEventStrategyMarkets: vi.fn(async () => {
+  fetchEventStrategyMarkets: vi.fn(async (): Promise<StrategyMarket[]> => {
     throw new Error("market polling should not be used");
   })
 }));
@@ -1206,6 +1206,198 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup live watch executes the default buy path without a dry-run refetch", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-fast-live-default-"));
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-fast-live-default-2026-06-30";
+    eventPageMock.fetchEventStrategyMarkets.mockImplementation(async (): Promise<StrategyMarket[]> => [
+      totalMarket(eventSlug, "Fast", "Live", 6.5, "fast-live-under")
+    ]);
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Fast", "Live", 2, 2);
+    }
+    const executeLive = vi.fn(async (decision) => ({
+      mode: "live" as const,
+      status: "filled" as const,
+      orderId: "fast-live-default",
+      tokenId: decision.tokenId,
+      price: decision.bestAsk,
+      shares: decision.shares,
+      notional: decision.notional,
+      fee: decision.estimatedFee,
+      estimatedPayout: decision.shares,
+      estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+    }));
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--stake", "10",
+      "--ledger-file", ledgerFile,
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Fast", awayTeam: "Live" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      executeLive
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "live",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        eventSlug,
+        tokenId: "fast-live-under"
+      }
+    });
+    expect(executeLive).toHaveBeenCalledTimes(1);
+    expect(eventPageMock.fetchEventStrategyMarkets).toHaveBeenCalledTimes(1);
+    expect(clobMock.fetchOrderbook).toHaveBeenCalledTimes(1);
+  });
+
+  test("worldcup watch reuses event market discovery across active locked rescans", async () => {
+    const eventSlug = "fifwc-market-cache-locked-2026-06-30";
+    const overToken = "market-cache-under-over";
+    eventPageMock.fetchEventStrategyMarkets.mockImplementation(async (): Promise<StrategyMarket[]> => [
+      totalMarket(eventSlug, "Market", "Cache", 0.5, "market-cache-under")
+    ]);
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.98, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug,
+        homeTeam: "Market",
+        awayTeam: "Cache",
+        homeGoals: 0,
+        awayGoals: 0,
+        minute: 60,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 60 * 60
+      };
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--stake", "10",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Market", awayTeam: "Cache" }],
+      watchSportsUpdates: async () => updates(),
+      fetchMatchState: async () => ({
+        eventSlug,
+        homeTeam: "Market",
+        awayTeam: "Cache",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 60,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 60 * 60 + 1
+      }),
+      fetchVerifiedClock: async () => {
+        throw new Error("locked active rescan should not need verified clock");
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug,
+        tokenId: overToken
+      }
+    });
+    expect(eventPageMock.fetchEventStrategyMarkets).toHaveBeenCalledTimes(1);
+    expect(clobMock.fetchOrderbook).toHaveBeenCalledTimes(1);
+  });
+
+  test("writes depth audit records with candidate books and decisions for replay", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-depth-audit-"));
+    const marketsFile = join(dir, "markets.json");
+    const depthAuditFile = join(dir, "depth.ndjson");
+    const eventSlug = "fifwc-depth-audit-2026-06-30";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Depth", "Audit", 6.5, "depth-audit-under-a"),
+      totalMarket(eventSlug, "Depth", "Audit", 7.5, "depth-audit-under-b")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [{ price: 0.95, size: 7 }],
+      asks: tokenId === "depth-audit-under-b"
+        ? [{ price: 0.97, size: 3 }, { price: 0.98, size: 2 }]
+        : [{ price: 0.98, size: 4 }]
+    }));
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--event-slug", eventSlug,
+      "--markets-file", marketsFile,
+      "--depth-audit-file", depthAuditFile,
+      "--stake", "10"
+    ], {}, {
+      fetchMatchState: async () => tailMatch(eventSlug, "Depth", "Audit", 2, 2),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    const lines = (await readFile(depthAuditFile, "utf8")).trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      mode: "paper",
+      eventSlug,
+      match: {
+        homeGoals: 2,
+        awayGoals: 2
+      },
+      thresholds: {
+        minimumNetReturn: 0.005,
+        minimumNotional: 1,
+        maxNotional: 10
+      },
+      decision: {
+        action: "BUY",
+        bestAsk: 0.97
+      }
+    });
+    expect(record).toHaveProperty("timestamp", expect.any(String));
+    expect(record).toHaveProperty("candidates", expect.arrayContaining([
+      expect.objectContaining({ tokenId: "depth-audit-under-a", lossRequiresGoals: 3 }),
+      expect.objectContaining({ tokenId: "depth-audit-under-b", lossRequiresGoals: 4 })
+    ]));
+    expect(record).toHaveProperty("orderbooks", expect.arrayContaining([
+      expect.objectContaining({
+        tokenId: "depth-audit-under-a",
+        asks: [{ price: 0.98, size: 4 }]
+      }),
+      expect.objectContaining({
+        tokenId: "depth-audit-under-b",
+        asks: [{ price: 0.97, size: 3 }, { price: 0.98, size: 2 }]
+      })
+    ]));
+  });
+
   test("worldcup live watch keeps running after one event execution error", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-live-exec-error-"));
     const marketsFile = join(dir, "markets.json");
@@ -1423,10 +1615,9 @@ describe("CLI", () => {
     await writeFile(marketsFile, JSON.stringify([
       totalMarket(eventSlug, "Locked", "Refill", 0.5, "locked-refill-under")
     ]));
-    let bookCalls = 0;
+    const executed: Array<{ eventSlug: string; tokenId: string; notional: number; price: number }> = [];
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
-      bookCalls += 1;
-      const price = bookCalls <= 2 ? 0.91 : bookCalls <= 4 ? 0.92 : 0.995;
+      const price = executed.length === 0 ? 0.91 : executed.length === 1 ? 0.92 : 0.995;
       return {
         tokenId,
         bids: [],
@@ -1439,7 +1630,6 @@ describe("CLI", () => {
     }
     const balances = [30, 30, 20, 20, 4, 4];
     let balanceCalls = 0;
-    const executed: Array<{ eventSlug: string; tokenId: string; notional: number; price: number }> = [];
 
     const result = await runCli([
       "--mode", "live",
