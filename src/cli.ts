@@ -13,7 +13,7 @@ import { PaperExecutor } from "./execution/paper-executor.js";
 import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type MarketSettlementStatus, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
 import { LiveLedger, isActiveLedgerStatus, isLockedStrategy } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
-import { fetchEventMatchState, fetchEventStrategyMarkets } from "./polymarket/event-page.js";
+import { fetchEventMatchState, fetchEventStrategyMarkets, hasLockedGoalStrategyMarkets } from "./polymarket/event-page.js";
 import { Scores365ClockProvider, type Scores365GoalSignal } from "./polymarket/scores365-clock.js";
 import { SportsLiveProvider } from "./polymarket/sports-live.js";
 import { fetchOpenWorldCupEventRefs, type WorldCupEventRef } from "./polymarket/worldcup-events.js";
@@ -1165,7 +1165,7 @@ async function nextSportsWatchInput(
 }
 
 function rememberClockPollMatch(activeMatches: Map<string, MatchState>, match: MatchState): void {
-  if (match.period !== "2H" || !match.isLive || match.ended === true) {
+  if (!isLiveLockedScoreMatch(match)) {
     activeMatches.delete(match.eventSlug);
     return;
   }
@@ -1338,10 +1338,15 @@ function cachedStrategyMarketFetcher(
   return (eventSlug: string) => {
     let promise = cache.get(eventSlug);
     if (!promise) {
-      promise = fetcher(eventSlug).catch((error) => {
-        cache.delete(eventSlug);
-        throw error;
-      });
+      promise = fetcher(eventSlug)
+        .then((markets) => {
+          if (!hasLockedGoalStrategyMarkets(markets)) cache.delete(eventSlug);
+          return markets;
+        })
+        .catch((error) => {
+          cache.delete(eventSlug);
+          throw error;
+        });
       cache.set(eventSlug, promise);
     }
     return promise;

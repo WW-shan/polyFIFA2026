@@ -10,17 +10,26 @@ export async function fetchEventSpreadMarkets(eventSlug: string): Promise<Spread
 }
 
 export async function fetchEventStrategyMarkets(eventSlug: string): Promise<StrategyMarket[]> {
+  let primaryMarkets: StrategyMarket[] = [];
   let primaryError: unknown;
   try {
     const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
-    const markets = findStrategyMarketsFromSportsPageHtml(html, eventSlug);
-    if (markets.length > 0) return markets;
+    primaryMarkets = findStrategyMarketsFromSportsPageHtml(html, eventSlug);
+    if (hasLockedGoalStrategyMarkets(primaryMarkets)) return primaryMarkets;
   } catch (error) {
     primaryError = error;
   }
 
-  const fallbackMarkets = await fetchGammaEventStrategyMarkets(eventSlug);
-  if (fallbackMarkets.length > 0 || !primaryError) return fallbackMarkets;
+  let fallbackMarkets: StrategyMarket[];
+  try {
+    fallbackMarkets = await fetchGammaEventStrategyMarkets(eventSlug);
+  } catch (error) {
+    if (primaryMarkets.length > 0) return primaryMarkets;
+    if (primaryError) throw primaryError;
+    throw error;
+  }
+  const markets = dedupeMarkets([...primaryMarkets, ...fallbackMarkets]);
+  if (markets.length > 0 || !primaryError) return markets;
   throw primaryError;
 }
 
@@ -53,6 +62,14 @@ export function findStrategyMarketsFromSportsPageHtml(html: string, eventSlug: s
   }
 
   return dedupeMarkets(markets);
+}
+
+export function hasLockedGoalStrategyMarkets(markets: readonly StrategyMarket[]): boolean {
+  return markets.some((market) =>
+    market.marketType === "total"
+    || market.marketType === "team_total"
+    || market.marketType === "btts"
+  );
 }
 
 export function extractNextInitialState(html: string): string {

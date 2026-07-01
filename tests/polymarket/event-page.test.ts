@@ -112,6 +112,97 @@ describe("event page initial state parsing", () => {
     ]);
   });
 
+  test("merges Gamma event markets when the sports page only has non-locked strategy markets", async () => {
+    const eventSlug = "fifwc-mex-ecu-2026-06-30";
+    const partialState = deflateSync(JSON.stringify({
+      markets: [
+        {
+          eventSlug,
+          slug: `${eventSlug}-ecuador`,
+          question: "Will Ecuador win on 2026-06-30?",
+          conditionId: "cond-ecuador",
+          clobTokenIds: "[\"ecuador-yes\",\"ecuador-no\"]",
+          outcomes: "[\"Yes\",\"No\"]",
+          sportsMarketType: "moneyline"
+        }
+      ]
+    })).toString("base64");
+    const html = `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialState: partialState } } })}</script></html>`;
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(html, { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        slug: eventSlug,
+        markets: [
+          {
+            eventSlug,
+            slug: `${eventSlug}-ecuador`,
+            question: "Will Ecuador win on 2026-06-30?",
+            conditionId: "cond-ecuador",
+            clobTokenIds: "[\"ecuador-yes\",\"ecuador-no\"]",
+            outcomes: "[\"Yes\",\"No\"]",
+            sportsMarketType: "moneyline"
+          },
+          {
+            eventSlug,
+            slug: `${eventSlug}-total-0pt5`,
+            question: "Mexico vs. Ecuador: O/U 0.5",
+            conditionId: "cond-total",
+            clobTokenIds: "[\"total-over\",\"total-under\"]",
+            outcomes: "[\"Over\",\"Under\"]",
+            sportsMarketType: "totals"
+          },
+          {
+            eventSlug,
+            slug: `${eventSlug}-mexico-team-total-0pt5`,
+            question: "Mexico vs. Ecuador: Mexico O/U 0.5",
+            conditionId: "cond-team-total",
+            clobTokenIds: "[\"team-over\",\"team-under\"]",
+            outcomes: "[\"Over\",\"Under\"]",
+            sportsMarketType: "totals"
+          }
+        ]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    const markets = await fetchEventStrategyMarkets(eventSlug);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: `${eventSlug}-ecuador`, marketType: "moneyline" }));
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: `${eventSlug}-total-0pt5`, marketType: "total", line: 0.5 }));
+    expect(markets).toContainEqual(expect.objectContaining({ marketSlug: `${eventSlug}-mexico-team-total-0pt5`, marketType: "team_total", team: "Mexico", line: 0.5 }));
+    expect(markets.filter((market) => market.conditionId === "cond-ecuador")).toHaveLength(1);
+  });
+
+  test("keeps partial sports page markets when Gamma fallback is unavailable", async () => {
+    const eventSlug = "fifwc-partial-gamma-down-2026-07-01";
+    const partialState = deflateSync(JSON.stringify({
+      markets: [
+        {
+          eventSlug,
+          slug: `${eventSlug}-home`,
+          question: "Will Partial win on 2026-07-01?",
+          conditionId: "cond-partial-home",
+          clobTokenIds: "[\"home-yes\",\"home-no\"]",
+          outcomes: "[\"Yes\",\"No\"]",
+          sportsMarketType: "moneyline"
+        }
+      ]
+    })).toString("base64");
+    const html = `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialState: partialState } } })}</script></html>`;
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(html, { status: 200 }))
+      .mockRejectedValueOnce(new Error("gamma down"));
+
+    const markets = await fetchEventStrategyMarkets(eventSlug);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(markets).toEqual([
+      expect.objectContaining({
+        marketSlug: `${eventSlug}-home`,
+        marketType: "moneyline"
+      })
+    ]);
+  });
+
   test("extracts strategy markets from compressed Next flight data when NEXT_DATA is absent", async () => {
     const eventSlug = "fifwc-strong-weak-2026-06-23";
     const flightState = {

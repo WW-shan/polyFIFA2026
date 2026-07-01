@@ -72,7 +72,10 @@ const eventPageMock = vi.hoisted(() => ({
   }),
   fetchEventStrategyMarkets: vi.fn(async (): Promise<StrategyMarket[]> => {
     throw new Error("market polling should not be used");
-  })
+  }),
+  hasLockedGoalStrategyMarkets: vi.fn((markets: readonly StrategyMarket[]): boolean => markets.some((market) =>
+    market.marketType === "total" || market.marketType === "team_total" || market.marketType === "btts"
+  ))
 }));
 
 const clobMock = vi.hoisted(() => ({
@@ -87,7 +90,8 @@ vi.mock("../src/polymarket/sports-live.js", () => ({
 
 vi.mock("../src/polymarket/event-page.js", () => ({
   fetchEventMatchState: eventPageMock.fetchEventMatchState,
-  fetchEventStrategyMarkets: eventPageMock.fetchEventStrategyMarkets
+  fetchEventStrategyMarkets: eventPageMock.fetchEventStrategyMarkets,
+  hasLockedGoalStrategyMarkets: eventPageMock.hasLockedGoalStrategyMarkets
 }));
 
 vi.mock("../src/polymarket/clob.js", () => ({
@@ -131,6 +135,7 @@ afterEach(() => {
   sportsLiveMock.reset();
   eventPageMock.fetchEventMatchState.mockClear();
   eventPageMock.fetchEventStrategyMarkets.mockClear();
+  eventPageMock.hasLockedGoalStrategyMarkets.mockClear();
   clobMock.fetchOrderbook.mockReset();
 });
 
@@ -797,6 +802,138 @@ describe("CLI", () => {
         strategy: "total_over_locked",
         locked: true,
         notional: expect.closeTo(20, 8)
+      }
+    });
+  });
+
+  test("worldcup watch refreshes incomplete market cache so first-half locked goals can trade", async () => {
+    const eventSlug = "fifwc-first-half-partial-cache-2026-07-01";
+    const overToken = "first-half-partial-cache-over";
+    const partialMarkets: StrategyMarket[] = [{
+      eventSlug,
+      marketSlug: `${eventSlug}-away-win`,
+      question: "Will Cache win on 2026-07-01?",
+      conditionId: `cond-${eventSlug}-away-win`,
+      outcomes: ["Yes", "No"],
+      clobTokenIds: ["away-yes", "away-no"],
+      marketType: "moneyline"
+    }];
+    const completeMarkets = [
+      totalMarket(eventSlug, "Partial", "Cache", 0.5, "first-half-partial-cache")
+    ];
+    eventPageMock.fetchEventStrategyMarkets
+      .mockResolvedValueOnce(partialMarkets)
+      .mockResolvedValue(completeMarkets);
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      yield {
+        eventSlug,
+        homeTeam: "Partial",
+        awayTeam: "Cache",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 28,
+        period: "1H",
+        isLive: true,
+        elapsedSeconds: 28 * 60
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--stake", "100",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Partial", awayTeam: "Cache" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "filled",
+        eventSlug,
+        tokenId: overToken,
+        strategy: "total_over_locked",
+        locked: true
+      }
+    });
+    expect(eventPageMock.fetchEventStrategyMarkets).toHaveBeenCalledTimes(2);
+  });
+
+  test("worldcup watch actively rescans first-half matches for locked opportunities between sports updates", async () => {
+    const eventSlug = "fifwc-locked-active-first-half-2026-07-01";
+    const overToken = "locked-active-first-half-over";
+    eventPageMock.fetchEventStrategyMarkets.mockImplementation(async (): Promise<StrategyMarket[]> => [
+      totalMarket(eventSlug, "Active", "First Half", 0.5, "locked-active-first-half")
+    ]);
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.96, size: 100 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug,
+        homeTeam: "Active",
+        awayTeam: "First Half",
+        homeGoals: 0,
+        awayGoals: 0,
+        minute: 31,
+        period: "1H",
+        isLive: true,
+        elapsedSeconds: 31 * 60
+      };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--stake", "100",
+      "--interval-ms", "1",
+      "--max-iterations", "2"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Active", awayTeam: "First Half" }],
+      watchSportsUpdates: async () => updates(),
+      fetchMatchState: async () => ({
+        eventSlug,
+        homeTeam: "Active",
+        awayTeam: "First Half",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 31,
+        period: "1H",
+        isLive: true,
+        elapsedSeconds: 31 * 60 + 1
+      }),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals })
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 2,
+      last: {
+        status: "filled",
+        eventSlug,
+        tokenId: overToken,
+        strategy: "total_over_locked",
+        locked: true
       }
     });
   });
