@@ -89,6 +89,58 @@ describe("auto settlement", () => {
     }));
   });
 
+  test("sends official relayer auth headers when submitting a redeem batch", async () => {
+    const requests: Array<{ url: string; method: string; headers: Record<string, string> }> = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      requests.push({
+        url: String(url),
+        method: init?.method ?? "GET",
+        headers: init?.headers as Record<string, string>
+      });
+      if (String(url).includes("/nonce")) {
+        return new Response(JSON.stringify({ nonce: "1" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (String(url).includes("/submit")) {
+        return new Response(JSON.stringify({ transactionID: "tx-auth", state: "STATE_NEW" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    try {
+      const result = await settleRedeemablePositions({
+        enabled: true,
+        walletAddress,
+        ownerAddress,
+        privateKey: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        relayerUrl: "https://relayer-v2.polymarket.com",
+        chainId: 137,
+        rpcUrl: "http://rpc.example",
+        intervalMs: 60_000,
+        deadlineSeconds: 600,
+        sizeThreshold: 0,
+        relayerApiKey: "rk",
+        relayerApiKeyAddress: ownerAddress
+      }, {
+        fetchRedeemablePositions: async () => [{ conditionId: conditionA, size: 5, negativeRisk: false }],
+        isApprovedForAll: async () => true
+      });
+
+      expect(result).toMatchObject({ status: "submitted", transactionID: "tx-auth" });
+      const nonceRequest = requests.find((request) => request.url.includes("/nonce"));
+      const submitRequest = requests.find((request) => request.url.includes("/submit"));
+      expect(nonceRequest?.headers).toMatchObject({
+        RELAYER_API_KEY: "rk",
+        RELAYER_API_KEY_ADDRESS: ownerAddress
+      });
+      expect(submitRequest?.headers).toMatchObject({
+        RELAYER_API_KEY: "rk",
+        RELAYER_API_KEY_ADDRESS: ownerAddress
+      });
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   test("marks active ledger entries redeemed when a resolved winning token is already gone", async () => {
     const markRedeemedConditionIds = vi.fn(async () => {});
     const result = await settleRedeemablePositions({

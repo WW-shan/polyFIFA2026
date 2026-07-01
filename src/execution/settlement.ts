@@ -517,10 +517,14 @@ function relayerHeaders(
 ): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (input.relayerApiKey) {
+    headers.RELAYER_API_KEY = input.relayerApiKey;
     headers.POLY_RELAYER_API_KEY = input.relayerApiKey;
     headers["X-API-KEY"] = input.relayerApiKey;
   }
-  if (input.relayerApiKeyAddress) headers.POLY_RELAYER_API_KEY_ADDRESS = input.relayerApiKeyAddress;
+  if (input.relayerApiKeyAddress) {
+    headers.RELAYER_API_KEY_ADDRESS = input.relayerApiKeyAddress;
+    headers.POLY_RELAYER_API_KEY_ADDRESS = input.relayerApiKeyAddress;
+  }
   if (input.builderApiKey && input.builderApiSecret && input.builderPassphrase) {
     Object.assign(headers, builderHeaders({
       key: input.builderApiKey,
