@@ -737,14 +737,24 @@ async function runSportsWatch(
     }
 
     async function fetchLockedGoalSignalCheck(match: MatchState, previousMatch: MatchState | undefined): Promise<Scores365GoalSignal | null> {
+      const deadline = Date.now() + LOCKED_SCORE_CONFIRM_TIMEOUT_MS;
+      const scoreFallback = fetchExternalScore(match, events, clockOptions)
+        .then((patch) => scorePatchToGoalSignal(patch, match))
+        .catch(() => null);
       try {
-        return await Promise.race([
+        const signal = await Promise.race([
           fetchLockedGoalSignal(match, previousMatch, events, clockOptions).catch(() => null),
           sleep(LOCKED_SCORE_CONFIRM_TIMEOUT_MS).then(() => null)
         ]);
+        if (signal) return signal;
       } catch {
-        return null;
+        // Fall through to the faster score-only source below.
       }
+      const remainingMs = Math.max(0, deadline - Date.now());
+      return Promise.race([
+        scoreFallback,
+        sleep(remainingMs).then(() => null)
+      ]);
     }
 
     async function assessLockedOrderbookDelta(

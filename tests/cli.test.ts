@@ -1091,6 +1091,75 @@ describe("CLI", () => {
     expect(calls.get(teamOverToken)).toBeGreaterThanOrEqual(3);
   });
 
+  test("worldcup live watch can use a fast 365 score-only fallback when full goal events lag", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-score-fallback-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-score-fallback-2026-07-01";
+    const overToken = "locked-score-fallback-total-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Score", "Fallback", 0.5, "locked-score-fallback-total"),
+      teamTotalMarket(eventSlug, "Score", "Fallback", "Score", 0.5, "locked-score-fallback-team")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 20 / 0.95 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Score", "Fallback", 0, 0);
+      yield tailMatch(eventSlug, "Score", "Fallback", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Score", awayTeam: "Fallback" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      fetchLockedGoalSignal: async () => null,
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-score-fallback",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "filled",
+        eventSlug,
+        tokenId: overToken,
+        strategy: "total_over_locked",
+        locked: true
+      }
+    });
+  });
+
   test("worldcup live watch blocks locked incidents when cheap liquidity grows after the goal", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-growth-"));
     const marketsFile = join(dir, "markets.json");
