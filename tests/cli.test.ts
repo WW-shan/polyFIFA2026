@@ -2446,6 +2446,75 @@ describe("CLI", () => {
     ]));
   });
 
+  test("writes depth audit records when an early live match has no locked candidates", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-depth-audit-early-"));
+    const marketsFile = join(dir, "markets.json");
+    const depthAuditFile = join(dir, "depth.ndjson");
+    const eventSlug = "fifwc-depth-audit-early-2026-07-01";
+    await writeFile(marketsFile, JSON.stringify([{
+      eventSlug,
+      marketSlug: `${eventSlug}-away-win`,
+      question: "Will Audit win on 2026-07-01?",
+      conditionId: `cond-${eventSlug}-away-win`,
+      outcomes: ["Yes", "No"],
+      clobTokenIds: ["audit-yes", "audit-no"],
+      marketType: "moneyline"
+    } satisfies StrategyMarket]));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug,
+        homeTeam: "Early",
+        awayTeam: "Audit",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 22,
+        period: "1H",
+        isLive: true,
+        elapsedSeconds: 22 * 60
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--depth-audit-file", depthAuditFile,
+      "--stake", "100",
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {}, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Early", awayTeam: "Audit" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      mode: "paper",
+      status: "watch_complete",
+      iterations: 1,
+      last: {
+        status: "no_trade",
+        reason: "MATCH_NOT_LATE_ENOUGH",
+        eventSlug
+      }
+    });
+    const [line] = (await readFile(depthAuditFile, "utf8")).trim().split("\n");
+    const record = JSON.parse(line!) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      mode: "paper",
+      eventSlug,
+      candidates: [],
+      orderbooks: [],
+      decision: {
+        action: "NO_TRADE",
+        reason: "MATCH_NOT_LATE_ENOUGH",
+        eventSlug
+      }
+    });
+  });
+
   test("worldcup live watch keeps running after one event execution error", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-live-exec-error-"));
     const marketsFile = join(dir, "markets.json");

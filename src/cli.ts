@@ -184,12 +184,22 @@ async function runSinglePass(
         allowLockedOutsideEntryWindow: true
       }).filter((candidate) => candidate.locked === true);
       if (lockedCandidates.length === 0) {
-        return ok(summary(args.mode, {
+        const decision: NoTradeDecision = {
           action: "NO_TRADE",
           reason: "MATCH_NOT_LATE_ENOUGH",
           eventSlug: match.eventSlug,
           details: `${tailWindow.source}: ${tailWindow.details}`
-        }));
+        };
+        if (match.homeGoals + match.awayGoals > 0) {
+          await writeDepthAudit(args, env, {
+            match,
+            markets,
+            orderbooks: [],
+            thresholds: unresolvedStakeAuditThresholds(args),
+            decision
+          });
+        }
+        return ok(summary(args.mode, decision));
       }
     }
 
@@ -1836,6 +1846,16 @@ function thresholdOverridesFromArgs(args: ParsedArgs): Partial<Omit<DecisionThre
   if (args.minimumNotional !== undefined) overrides.minimumNotional = args.minimumNotional;
   if (args.entryWindowMinutes !== undefined) overrides.entryWindowMinutes = args.entryWindowMinutes;
   return overrides;
+}
+
+function unresolvedStakeAuditThresholds(args: ParsedArgs): DecisionThresholds {
+  return {
+    entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes,
+    maxEntryPrice: args.maxEntryPrice ?? DEFAULT_THRESHOLDS.maxEntryPrice,
+    minimumNetReturn: args.minimumNetReturn ?? DEFAULT_THRESHOLDS.minimumNetReturn,
+    minimumNotional: args.minimumNotional ?? DEFAULT_THRESHOLDS.minimumNotional,
+    maxNotional: args.stake ?? 0
+  };
 }
 
 function thresholdOverridesWithMinimumNetReturn(
