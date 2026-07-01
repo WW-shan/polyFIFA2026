@@ -1007,7 +1007,7 @@ describe("CLI", () => {
     );
   });
 
-  test("worldcup live watch limits a locked incident to stale S0/S1/S2 cheap liquidity", async () => {
+  test("worldcup live watch limits a locked incident to stable S1/S2 cheap liquidity", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-pass-"));
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
@@ -1160,7 +1160,89 @@ describe("CLI", () => {
     });
   });
 
-  test("worldcup live watch blocks locked incidents when cheap liquidity grows after the goal", async () => {
+  test("worldcup live watch allows confirmed post-goal liquidity when price does not retrace", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-post-goal-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-delta-post-goal-2026-07-02";
+    const totalOverToken = "locked-delta-post-goal-total-over";
+    const teamOverToken = "locked-delta-post-goal-team-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Post", "Goal", 0.5, "locked-delta-post-goal-total"),
+      teamTotalMarket(eventSlug, "Post", "Goal", "Post", 0.5, "locked-delta-post-goal-team")
+    ]));
+    const calls = new Map<string, number>();
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
+      const call = calls.get(tokenId) ?? 0;
+      calls.set(tokenId, call + 1);
+      return {
+        tokenId,
+        bids: [],
+        asks: call === 0 ? [] : [{ price: 0.98, size: 10 / 0.98 }]
+      };
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Post", "Goal", 0, 0);
+      yield tailMatch(eventSlug, "Post", "Goal", 1, 0);
+    }
+    const executed: Array<{ notional: number; legs?: Array<{ tokenId: string; notional: number }> }> = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Post", awayTeam: "Goal" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 246,
+        scoreMatchesSports: true,
+        hasMatchingGoal: true,
+        hasNoGoalSignal: false,
+        hasVarReviewSignal: false,
+        details: ["365 normal goal"]
+      }),
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        const execution: { notional: number; legs?: Array<{ tokenId: string; notional: number }> } = {
+          notional: decision.notional
+        };
+        if (decision.legs) execution.legs = decision.legs.map((leg) => ({ tokenId: leg.tokenId, notional: leg.notional }));
+        executed.push(execution);
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-delta-post-goal",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]!.notional).toBeCloseTo(20, 8);
+    expect(executed[0]!.legs?.map((leg) => leg.tokenId)).toEqual(
+      expect.arrayContaining([totalOverToken, teamOverToken])
+    );
+  });
+
+  test("worldcup live watch caps confirmed growing liquidity to stable S1/S2 notional", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-growth-"));
     const marketsFile = join(dir, "markets.json");
     const eventSlug = "fifwc-locked-delta-growth-2026-06-27";
@@ -1183,7 +1265,7 @@ describe("CLI", () => {
       yield tailMatch(eventSlug, "Delta", "Growth", 0, 0);
       yield tailMatch(eventSlug, "Delta", "Growth", 1, 0);
     }
-    const executed: Array<{ tokenId: string; notional: number }> = [];
+    const executed: Array<{ tokenId: string; notional: number; legs?: Array<{ tokenId: string; notional: number }> }> = [];
 
     const result = await runCli([
       "--mode", "live",
@@ -1212,7 +1294,12 @@ describe("CLI", () => {
       }),
       readPusdBalance: async () => 100,
       executeLive: async (decision) => {
-        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        const execution: { tokenId: string; notional: number; legs?: Array<{ tokenId: string; notional: number }> } = {
+          tokenId: decision.tokenId,
+          notional: decision.notional
+        };
+        if (decision.legs) execution.legs = decision.legs.map((leg) => ({ tokenId: leg.tokenId, notional: leg.notional }));
+        executed.push(execution);
         return {
           mode: "live",
           status: "filled",
@@ -1229,13 +1316,15 @@ describe("CLI", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(executed).toEqual([]);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]!.notional).toBeCloseTo(10, 8);
     expect(JSON.parse(result.stdout)).toMatchObject({
       status: "watch_complete",
       last: {
-        status: "no_trade",
-        reason: "NO_ELIGIBLE_STRATEGY",
-        details: expect.stringContaining("cheap liquidity grew")
+        status: "filled",
+        eventSlug,
+        strategy: "total_over_locked",
+        locked: true
       }
     });
   });

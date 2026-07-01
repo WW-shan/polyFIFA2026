@@ -4,7 +4,7 @@
 
 **Goal:** Ship balanced fast locked-goal buying: 365 event/PBP guard, orderbook delta guard, no old unconfirmed return tiers, and verified live-route tests.
 
-**Architecture:** Add a 365 locked-goal signal parser to the existing `Scores365ClockProvider`, keep pre-goal orderbook snapshots in the watch loop, and pass a guard context into locked risk assessment. The guard returns the existing `capFraction` plus an optional absolute stale-liquidity `stakeLimit` so downstream sizing remains centralized.
+**Architecture:** Add a 365 locked-goal signal parser to the existing `Scores365ClockProvider`, keep pre-goal orderbook snapshots in the watch loop, and pass a guard context into locked risk assessment. The guard returns the existing `capFraction` plus an optional absolute stable post-goal liquidity `stakeLimit` so downstream sizing remains centralized.
 
 **Tech Stack:** TypeScript, Vitest, existing CLI/watch loop, Polymarket CLOB orderbooks, 365Scores public web/game/PBP endpoints.
 
@@ -37,9 +37,9 @@
 - Modify: `src/cli.ts`
 - Test: `tests/cli.test.ts`
 
-- [ ] Add failing tests for stale-liquidity pass, cheap-quantity growth block, and best-ask retrace block.
+- [ ] Add failing tests for stable post-goal liquidity pass, growth capped to S1/S2 liquidity, and best-ask retrace block.
 - [ ] Cache one-goal-ahead locked token orderbooks as S0.
-- [ ] Fetch S1/S2 concurrently enough for the guard and derive stale notional from `min(S0, S1, S2)`.
+- [ ] Fetch S1/S2 concurrently enough for the guard and derive tradable notional from stable post-goal liquidity `min(S1, S2)`.
 - [ ] Return a guard stake limit to the existing sizing path.
 
 ### Task 4: Full Verification And Deploy

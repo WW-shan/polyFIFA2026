@@ -793,6 +793,7 @@ async function runSportsWatch(
       }
 
       let staleNotional = 0;
+      let stablePostGoalNotional = 0;
       const details: string[] = [];
       for (const tokenId of decisionTokens) {
         const s0 = freshCachedOrderbook(lockedOrderbookCache, tokenId)?.orderbook;
@@ -805,30 +806,28 @@ async function runSportsWatch(
         const m0 = lockedOrderbookMetrics(s0, context.thresholds.minimumNetReturn);
         const m1 = lockedOrderbookMetrics(s1, context.thresholds.minimumNetReturn);
         const m2 = lockedOrderbookMetrics(s2, context.thresholds.minimumNetReturn);
-        if (m1.cheapNotional > m0.cheapNotional + LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL) {
-          return lockedGuardSkip(match, `locked score guard rejected because cheap liquidity grew for ${tokenId} from ${m0.cheapNotional} to ${m1.cheapNotional}`);
-        }
-        if (m2.cheapNotional > m0.cheapNotional + LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL) {
-          return lockedGuardSkip(match, `locked score guard rejected because cheap liquidity grew for ${tokenId} from ${m0.cheapNotional} to ${m2.cheapNotional}`);
-        }
         if (m1.bestAsk !== undefined && m2.bestAsk !== undefined && m2.bestAsk < m1.bestAsk - LOCKED_ORDERBOOK_RETRACE_PRICE_TOLERANCE) {
           return lockedGuardSkip(match, `locked score guard rejected because best ask retraced for ${tokenId} from ${m1.bestAsk} to ${m2.bestAsk}`);
         }
 
-        const tokenStale = Math.min(m0.cheapNotional, m1.cheapNotional, m2.cheapNotional);
+        const tokenStablePostGoal = Math.min(m1.cheapNotional, m2.cheapNotional);
+        const tokenStale = Math.min(m0.cheapNotional, tokenStablePostGoal);
         staleNotional += tokenStale;
-        details.push(`${tokenId} stale=${roundForDetails(tokenStale)} S0=${roundForDetails(m0.cheapNotional)} S1=${roundForDetails(m1.cheapNotional)} S2=${roundForDetails(m2.cheapNotional)}`);
+        stablePostGoalNotional += tokenStablePostGoal;
+        const grewFromS0 = m1.cheapNotional > m0.cheapNotional + LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL
+          || m2.cheapNotional > m0.cheapNotional + LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL;
+        details.push(`${tokenId} stablePostGoal=${roundForDetails(tokenStablePostGoal)} stale=${roundForDetails(tokenStale)} S0=${roundForDetails(m0.cheapNotional)} S1=${roundForDetails(m1.cheapNotional)} S2=${roundForDetails(m2.cheapNotional)}${grewFromS0 ? " grewFromS0" : ""}`);
       }
 
-      if (requireOrderbookDelta && staleNotional < context.thresholds.minimumNotional) {
-        return lockedGuardSkip(match, `locked score guard rejected because stale liquidity ${staleNotional} is below minimum ${context.thresholds.minimumNotional}`);
+      if (requireOrderbookDelta && stablePostGoalNotional < context.thresholds.minimumNotional) {
+        return lockedGuardSkip(match, `locked score guard rejected because stable post-goal liquidity ${stablePostGoalNotional} is below minimum ${context.thresholds.minimumNotional}`);
       }
 
       const result: { action: "USE"; details: string; stakeLimit?: number } = {
         action: "USE",
         details: `orderbook delta passed (${details.join("; ")})`
       };
-      if (staleNotional > 0) result.stakeLimit = staleNotional;
+      if (stablePostGoalNotional > 0) result.stakeLimit = stablePostGoalNotional;
       return result;
     }
 
