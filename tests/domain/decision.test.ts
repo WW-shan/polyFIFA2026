@@ -163,6 +163,27 @@ describe("buildTradeDecision", () => {
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
   });
 
+  test("allows locked candidates at 0.80 or above", () => {
+    const decision = buildTradeDecision(match, {
+      ...selected,
+      strategy: "total_over_locked",
+      outcome: "Over",
+      lossRequiresGoals: 999,
+      locked: true
+    }, book([[0.85, 10_000]]), {
+      ...thresholds,
+      maxEntryPrice: 0.995,
+      minimumNetReturn: 0.005
+    });
+
+    expect(decision).toMatchObject({
+      action: "BUY",
+      bestAsk: 0.85,
+      strategy: "total_over_locked",
+      locked: true
+    });
+  });
+
   test("rejects a locked total-over candidate when the current score has not locked the market", () => {
     const tokenId = "col-total-over";
     const decision = buildTradeDecision({

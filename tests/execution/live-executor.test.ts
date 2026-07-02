@@ -533,6 +533,94 @@ describe("LiveExecutor", () => {
     expect(placeLimitBuy).not.toHaveBeenCalled();
   });
 
+  test("allows a locked live leg refreshed at 0.80 or above", async () => {
+    const decision = {
+      ...buyDecision,
+      marketSlug: "fifwc-bel-sen-2026-07-01-total-4pt5",
+      question: "Belgium vs. Senegal: O/U 4.5",
+      tokenId: "bel-sen-over-4p5",
+      conditionId: "cond-bel-sen-total-4p5",
+      outcome: "Over",
+      line: 4.5,
+      strategy: "total_over_locked",
+      lossRequiresGoals: 999,
+      locked: true,
+      bestAsk: 0.85,
+      shares: 50,
+      notional: 42.5,
+      estimatedFee: 0.19125,
+      estimatedNetReturn: 0.176,
+      legs: [
+        {
+          eventSlug: "fifwc-bel-sen-2026-07-01",
+          marketSlug: "fifwc-bel-sen-2026-07-01-total-4pt5",
+          question: "Belgium vs. Senegal: O/U 4.5",
+          tokenId: "bel-sen-over-4p5",
+          conditionId: "cond-bel-sen-total-4p5",
+          outcome: "Over",
+          line: 4.5,
+          strategy: "total_over_locked",
+          lossRequiresGoals: 999,
+          locked: true,
+          price: 0.85,
+          availableSize: 50,
+          shares: 50,
+          notional: 42.5,
+          estimatedFee: 0.19125,
+          estimatedNetReturn: 0.176,
+          tickSize: "0.01",
+          negRisk: false
+        }
+      ]
+    } as BuyTradeDecision;
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => ({
+      mode: "live",
+      status: "filled",
+      orderId: `live-${order.tokenId}`,
+      tokenId: order.tokenId,
+      price: order.price,
+      shares: order.size,
+      notional: order.notional,
+      fee: order.estimatedFee,
+      estimatedPayout: order.size,
+      estimatedProfit: order.size - order.notional - order.estimatedFee
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(decision, {
+      orderType: "FAK",
+      refreshOrderbook: async () => ({
+        tokenId: "bel-sen-over-4p5",
+        bids: [],
+        asks: [{ price: 0.85, size: 100 }]
+      }),
+      minimumNotional: 1,
+      minimumNetReturn: 0.005,
+      maxEntryPrice: 0.999999
+    });
+
+    expect(result).toMatchObject({
+      mode: "live",
+      status: "filled",
+      tokenId: "bel-sen-over-4p5",
+      price: 0.85
+    });
+    expect(placeLimitBuy).toHaveBeenCalledWith(expect.objectContaining({
+      tokenId: "bel-sen-over-4p5",
+      price: 0.85
+    }));
+  });
+
   test("combines same-token ask levels into one refreshed live order", async () => {
     const decision = {
       ...buyDecision,

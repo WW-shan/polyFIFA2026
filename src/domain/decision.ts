@@ -16,7 +16,7 @@ import type {
 export type TradeLevel = Omit<BuyTradeLeg, "shares" | "notional" | "estimatedFee">;
 
 // Low prices on "locked" legs usually indicate stale or mismatched score data.
-const LOCKED_ENTRY_PRICE_FLOOR = 0.9;
+const LOCKED_ENTRY_PRICE_FLOOR = 0.8;
 
 export function buildTradeDecision(
   match: MatchState,

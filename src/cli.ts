@@ -1305,7 +1305,7 @@ function lockedOrderbookMetrics(orderbook: OrderbookSnapshot, minimumNetReturn: 
     .sort((a, b) => a.price - b.price);
   const bestAsk = validAsks[0]?.price;
   const cheapNotional = validAsks
-    .filter((ask) => ask.price >= 0.9 && safeNetReturnRate(ask.price) >= minimumNetReturn)
+    .filter((ask) => ask.price >= 0.8 && safeNetReturnRate(ask.price) >= minimumNetReturn)
     .reduce((total, ask) => total + ask.price * ask.size, 0);
   return bestAsk === undefined ? { cheapNotional } : { bestAsk, cheapNotional };
 }
