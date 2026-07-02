@@ -6,9 +6,9 @@
 
 ## Signals
 
-- **Hard block:** PM rollback, 365 score conflict without a matching goal signal, 365 event/PBP no-goal or disallowed VAR, active VAR/no-goal language, orderbook retrace, or related-market desync.
+- **Hard block:** PM rollback, 365 score conflict without a matching goal signal, 365 event/PBP no-goal or disallowed VAR, active VAR/no-goal language, 365 post-regulation/extra-time scoring events, orderbook retrace, implausibly low locked asks that would be crossed by a limit buy, or related-market desync.
 - **Source pass:** 365 score matches or contains a matching normal goal event/PBP, with no no-goal/VAR-cancel signal. Missing 365 confirmation is not enough to buy in default mode.
-- **Market pass:** A pre-goal S0 cache exists for the same token(s), immediate S1 and delayed S2 books show stable profitable liquidity, and best ask does not move down in a way that indicates retrace. Cheap liquidity appearing after the score change is allowed when the score source confirms the goal and the S1-to-S2 price does not retrace.
+- **Market pass:** A pre-goal S0 cache exists for the same token(s), immediate S1 and delayed S2 books show stable profitable liquidity, and best ask does not move down in a way that indicates retrace. Cheap liquidity appearing after the score change is allowed when the score source confirms the goal and the S1-to-S2 price does not retrace, but a locked buy is skipped if the refreshed book contains lower implausible asks that the limit order would cross.
 - **Related pass:** At least two related locked markets for the same score incident are visible when such markets exist, so one isolated cheap market does not trigger a buy by itself.
 
 ## Trading
@@ -27,5 +27,5 @@
 ## Testing
 
 - Parser tests cover 365 normal goal and Goal Disallowed/VAR/PBP no-goal signals.
-- CLI tests cover removal of old high/medium unconfirmed buying, 365 no-goal blocking, stable-liquidity pass, confirmed post-goal liquidity pass, retrace blocking, and two-match isolation.
+- CLI tests cover removal of old high/medium unconfirmed buying, 365 no-goal blocking, post-regulation goal blocking, stable-liquidity pass, confirmed post-goal liquidity pass, retrace blocking, and two-match isolation.
 - Stress tests run locked refill and two-match live chains.

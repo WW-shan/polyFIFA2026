@@ -1673,6 +1673,80 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup watch hard-blocks a locked buy when 365 reports a post-regulation goal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-post-regulation-"));
+    const marketsFile = join(dir, "markets.json");
+    const eventSlug = "fifwc-locked-post-regulation-2026-07-02";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Extra", "Time", 4.5, "locked-post-regulation-total")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.95, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Extra", "Time", 2, 2);
+      yield tailMatch(eventSlug, "Extra", "Time", 3, 2);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", join(dir, "ledger.json"),
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Extra", awayTeam: "Time" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      fetchLockedGoalSignal: async (match) => ({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+        scores365GameId: 321,
+        scoreMatchesSports: true,
+        hasMatchingGoal: true,
+        hasNoGoalSignal: false,
+        hasVarReviewSignal: false,
+        hasPostRegulationGoalSignal: true,
+        details: ["365 event post-regulation goal at 120+5"]
+      }),
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-post-regulation",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("post-regulation")
+      }
+    });
+  });
+
   test("worldcup live watch gives the next score increase a fresh 20 percent locked incident budget", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-next-incident-"));
     const marketsFile = join(dir, "markets.json");

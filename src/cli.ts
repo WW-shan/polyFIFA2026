@@ -685,7 +685,7 @@ async function runSportsWatch(
         };
       }
 
-      if (signal.hasNoGoalSignal || signal.hasVarReviewSignal) {
+      if (signal.hasNoGoalSignal || signal.hasVarReviewSignal || signal.hasPostRegulationGoalSignal) {
         const details = signal.details.join("; ");
         return {
           action: "SKIP",

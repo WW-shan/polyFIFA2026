@@ -214,6 +214,7 @@ function refreshedExecutableNotional(
 ): { notional: number; price: number } | null {
   const minimumNetReturn = options.minimumNetReturn ?? 0.005;
   const maxEntryPrice = options.maxEntryPrice ?? 0.999999;
+  if (leg.locked === true && hasImplausiblyLowAsk(orderbook)) return null;
   const asks = orderbook.asks
     .filter((ask) => Number.isFinite(ask.price)
       && Number.isFinite(ask.size)
@@ -239,6 +240,16 @@ function refreshedExecutableNotional(
   }
 
   return notional > 0 && price > 0 ? { notional, price } : null;
+}
+
+function hasImplausiblyLowAsk(orderbook: OrderbookSnapshot): boolean {
+  return orderbook.asks.some((ask) =>
+    Number.isFinite(ask.price)
+    && Number.isFinite(ask.size)
+    && ask.price > 0
+    && ask.price < LOCKED_ENTRY_PRICE_FLOOR
+    && ask.size > 0
+  );
 }
 
 function tradeResultToLeg(result: TradeResult): TradeResultLeg {

@@ -138,6 +138,59 @@ describe("365Scores live clock", () => {
     expect(signal?.details.join(" ")).toContain("normal goal");
   });
 
+  test("flags a matching 365Scores goal after regular time", () => {
+    const signal = extract365ScoresGoalSignal({
+      game: {
+        id: 4749272,
+        homeCompetitor: { id: 2373, name: "Belgium", score: 3 },
+        awayCompetitor: { id: 5102, name: "Senegal", score: 2 },
+        events: [
+          {
+            competitorId: 2373,
+            gameTime: 86,
+            addedTime: 0,
+            eventType: { id: 1, name: "Goal", subTypeName: "Field Goal" }
+          },
+          {
+            competitorId: 2373,
+            gameTime: 89,
+            addedTime: 0,
+            eventType: { id: 1, name: "Goal", subTypeName: "Field Goal" }
+          },
+          {
+            competitorId: 2373,
+            gameTime: 120,
+            addedTime: 5,
+            eventType: { id: 1, name: "Goal", subTypeName: "Penalty" }
+          }
+        ]
+      }
+    }, {
+      ...match,
+      eventSlug: "fifwc-bel-sen-2026-07-01",
+      homeTeam: "Belgium",
+      awayTeam: "Senegal",
+      homeGoals: 3,
+      awayGoals: 2
+    }, {
+      ...match,
+      eventSlug: "fifwc-bel-sen-2026-07-01",
+      homeTeam: "Belgium",
+      awayTeam: "Senegal",
+      homeGoals: 2,
+      awayGoals: 2
+    });
+
+    expect(signal).toMatchObject({
+      homeGoals: 3,
+      awayGoals: 2,
+      scoreMatchesSports: true,
+      hasMatchingGoal: true,
+      hasPostRegulationGoalSignal: true
+    });
+    expect(signal?.details.join(" ")).toContain("post-regulation");
+  });
+
   test("detects 365Scores Goal Disallowed Var and PBP no-goal as a hard block", () => {
     const signal = extract365ScoresGoalSignal({
       game: {

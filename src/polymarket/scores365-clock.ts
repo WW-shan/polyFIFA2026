@@ -34,6 +34,7 @@ export interface Scores365GoalSignal extends Scores365ScorePatch {
   hasMatchingGoal: boolean;
   hasNoGoalSignal: boolean;
   hasVarReviewSignal: boolean;
+  hasPostRegulationGoalSignal?: boolean;
   details: string[];
 }
 
@@ -106,6 +107,7 @@ export function extract365ScoresGoalSignal(raw: unknown, match: MatchState, prev
   const hasNoGoalSignal = eventSignals.hasNoGoalSignal || pbpSignals.hasNoGoalSignal;
   const hasVarReviewSignal = !hasNoGoalSignal && (eventSignals.hasVarReviewSignal || pbpSignals.hasVarReviewSignal);
   const hasMatchingGoal = !hasNoGoalSignal && (eventSignals.hasMatchingGoal || pbpSignals.hasMatchingGoal);
+  const hasPostRegulationGoalSignal = eventSignals.hasPostRegulationGoalSignal || pbpSignals.hasPostRegulationGoalSignal;
 
   return {
     ...scorePatch,
@@ -113,6 +115,7 @@ export function extract365ScoresGoalSignal(raw: unknown, match: MatchState, prev
     hasMatchingGoal,
     hasNoGoalSignal,
     hasVarReviewSignal,
+    hasPostRegulationGoalSignal,
     details: details.length > 0 ? details : ["365 goal signal contained score only"]
   };
 }
@@ -224,6 +227,7 @@ interface GoalTextSignals {
   hasMatchingGoal: boolean;
   hasNoGoalSignal: boolean;
   hasVarReviewSignal: boolean;
+  hasPostRegulationGoalSignal: boolean;
   details: string[];
 }
 
@@ -232,6 +236,7 @@ function inspect365Events(events: unknown, expectedCompetitors: Set<number>): Go
     hasMatchingGoal: false,
     hasNoGoalSignal: false,
     hasVarReviewSignal: false,
+    hasPostRegulationGoalSignal: false,
     details: []
   };
   if (!Array.isArray(events)) return signals;
@@ -261,6 +266,13 @@ function inspect365Events(events: unknown, expectedCompetitors: Set<number>): Go
     if (eventTypeId === 1 && expectedSide && !isNoGoalText(normalized)) {
       signals.hasMatchingGoal = true;
       signals.details.push(`365 event normal goal: ${compactText(text)}`);
+      const gameTime = numberValue(item.gameTime);
+      if (gameTime !== undefined && gameTime > 90) {
+        signals.hasPostRegulationGoalSignal = true;
+        const addedTime = numberValue(item.addedTime);
+        const displayTime = addedTime && addedTime > 0 ? `${gameTime}+${addedTime}` : String(gameTime);
+        signals.details.push(`365 event post-regulation goal at ${displayTime}`);
+      }
     }
   }
   return signals;
@@ -271,6 +283,7 @@ function inspect365PlayByPlay(playByPlay: unknown, match: MatchState, previousMa
     hasMatchingGoal: false,
     hasNoGoalSignal: false,
     hasVarReviewSignal: false,
+    hasPostRegulationGoalSignal: false,
     details: []
   };
   for (const message of playByPlayMessages(playByPlay)) {
