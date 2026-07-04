@@ -2,7 +2,7 @@ import type { BuyTradeLeg, OrderbookSnapshot, TradeDecision, TradeResult, TradeR
 import { netReturnRate, sportsTakerFeePerShare } from "../domain/fees.js";
 import { signPoly1271Order } from "./poly1271-signature.js";
 
-const LOCKED_ENTRY_PRICE_FLOOR = 0.8;
+const LOCKED_ENTRY_PRICE_FLOOR = 0.85;
 
 export type LiveOrderType = "FOK" | "FAK";
 export type LiveErrorCode =

@@ -212,8 +212,8 @@ function randomStages(random: () => number): Stage[] {
 }
 
 function fillStage(random: () => number): Stage {
-  const decisionPrice = randomPrice(random, 0.8, 0.985);
-  const refreshPrice = randomPrice(random, 0.8, 0.9935);
+  const decisionPrice = randomPrice(random, 0.85, 0.985);
+  const refreshPrice = randomPrice(random, 0.85, 0.9935);
   const decisionNotional = 2 + random() * 20;
   const refreshNotional = decisionNotional * (0.5 + random() * 1.5);
   return {
@@ -225,7 +225,7 @@ function fillStage(random: () => number): Stage {
 }
 
 function staleStage(random: () => number): Stage {
-  const decisionPrice = randomPrice(random, 0.8, 0.985);
+  const decisionPrice = randomPrice(random, 0.85, 0.985);
   return {
     decisionPrice,
     decisionSize: (2 + random() * 20) / decisionPrice,
@@ -235,8 +235,8 @@ function staleStage(random: () => number): Stage {
 }
 
 function tinyRefreshStage(random: () => number): Stage {
-  const decisionPrice = randomPrice(random, 0.8, 0.985);
-  const refreshPrice = randomPrice(random, 0.8, 0.9935);
+  const decisionPrice = randomPrice(random, 0.85, 0.985);
+  const refreshPrice = randomPrice(random, 0.85, 0.9935);
   return {
     decisionPrice,
     decisionSize: (2 + random() * 20) / decisionPrice,
@@ -297,7 +297,7 @@ function book(tokenId: string, price: number, size: number): OrderbookSnapshot {
 }
 
 function isProfitableLockedPrice(price: number): boolean {
-  return price >= 0.8 && price < 1 && netReturnRate(price) >= MIN_RETURN;
+  return price >= 0.85 && price < 1 && netReturnRate(price) >= MIN_RETURN;
 }
 
 function seededRandom(seed: number): () => number {

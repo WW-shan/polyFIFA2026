@@ -1537,7 +1537,7 @@ describe("CLI", () => {
     });
   });
 
-  test("worldcup live watch skips unconfirmed low-return locked incidents", async () => {
+  test("worldcup live watch allows high-price stable locked fallback when 365 goal signal is unavailable", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-low-"));
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
@@ -1552,6 +1552,7 @@ describe("CLI", () => {
       asks: [{ price: 0.99, size: 10_000 }]
     }));
     async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Risk", "Low", 0, 0);
       yield tailMatch(eventSlug, "Risk", "Low", 1, 0);
     }
 
@@ -1563,7 +1564,7 @@ describe("CLI", () => {
       "--ledger-file", ledgerFile,
       "--balance-buffer", "5",
       "--interval-ms", "0",
-      "--max-iterations", "1"
+      "--max-iterations", "2"
     ], {
       POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
     }, {
@@ -1589,13 +1590,82 @@ describe("CLI", () => {
     });
 
     expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([{ tokenId: "locked-risk-low-total-over", notional: expect.any(Number) }]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "filled",
+        eventSlug,
+        decision: {
+          locked: true,
+          bestAsk: 0.99
+        }
+      }
+    });
+  });
+
+  test("worldcup live watch blocks locked fallback when a sub-floor ask is in front", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-subfloor-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-risk-subfloor-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Risk", "Subfloor", 0.5, "locked-risk-subfloor-total")
+    ]));
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [
+        { price: 0.84, size: 100 },
+        { price: 0.99, size: 10_000 }
+      ]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Risk", "Subfloor", 0, 0);
+      yield tailMatch(eventSlug, "Risk", "Subfloor", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Risk", awayTeam: "Subfloor" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      readPusdBalance: async () => 100 - executed.reduce((total, trade) => total + trade.notional, 0),
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: `locked-risk-subfloor-${executed.length}`,
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
     expect(executed).toEqual([]);
     expect(JSON.parse(result.stdout)).toMatchObject({
       status: "watch_complete",
       last: {
         status: "no_trade",
-        reason: "NO_ELIGIBLE_STRATEGY",
-        details: expect.stringContaining("locked score guard")
+        details: expect.stringContaining("below locked floor")
       }
     });
   });

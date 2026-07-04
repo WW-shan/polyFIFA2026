@@ -100,7 +100,7 @@ export function extract365ScoresGoalSignal(raw: unknown, match: MatchState, prev
   const homeCompetitor = isRecord(game.homeCompetitor) ? game.homeCompetitor : null;
   const awayCompetitor = isRecord(game.awayCompetitor) ? game.awayCompetitor : null;
   const expectedCompetitors = expectedScoringCompetitorIds(match, previousMatch, homeCompetitor, awayCompetitor);
-  const eventSignals = inspect365Events(game.events, expectedCompetitors);
+  const eventSignals = inspect365Events(game.events, expectedCompetitors, game);
   const pbpSignals = inspect365PlayByPlay(playByPlaySource(raw, game), match, previousMatch);
   details.push(...eventSignals.details, ...pbpSignals.details);
 
@@ -231,7 +231,7 @@ interface GoalTextSignals {
   details: string[];
 }
 
-function inspect365Events(events: unknown, expectedCompetitors: Set<number>): GoalTextSignals {
+function inspect365Events(events: unknown, expectedCompetitors: Set<number>, game: Record<string, unknown>): GoalTextSignals {
   const signals: GoalTextSignals = {
     hasMatchingGoal: false,
     hasNoGoalSignal: false,
@@ -266,16 +266,34 @@ function inspect365Events(events: unknown, expectedCompetitors: Set<number>): Go
     if (eventTypeId === 1 && expectedSide && !isNoGoalText(normalized)) {
       signals.hasMatchingGoal = true;
       signals.details.push(`365 event normal goal: ${compactText(text)}`);
-      const gameTime = numberValue(item.gameTime);
-      if (gameTime !== undefined && gameTime > 90) {
+      if (isPostRegulation365GoalEvent(item, game)) {
         signals.hasPostRegulationGoalSignal = true;
+        const gameTime = numberValue(item.gameTime);
         const addedTime = numberValue(item.addedTime);
-        const displayTime = addedTime && addedTime > 0 ? `${gameTime}+${addedTime}` : String(gameTime);
+        const displayTime = gameTime !== undefined && addedTime && addedTime > 0 ? `${gameTime}+${addedTime}` : String(gameTime ?? "");
         signals.details.push(`365 event post-regulation goal at ${displayTime}`);
       }
     }
   }
   return signals;
+}
+
+function isPostRegulation365GoalEvent(item: Record<string, unknown>, game: Record<string, unknown>): boolean {
+  const gameTime = numberValue(item.gameTime);
+  if (gameTime !== undefined && gameTime > 105) return true;
+  const text = [
+    stringValue(item.periodName),
+    stringValue(item.period),
+    stringValue(item.statusText),
+    stringValue(item.shortStatusText),
+    stringValue(item.gameTimeDisplay),
+    stringValue(game.periodName),
+    stringValue(game.period),
+    stringValue(game.statusText),
+    stringValue(game.shortStatusText),
+    stringValue(game.gameTimeDisplay)
+  ].join(" ").toLowerCase();
+  return /\b(extra time|overtime|after extra time|aet|1st extra|2nd extra)\b/.test(text);
 }
 
 function inspect365PlayByPlay(playByPlay: unknown, match: MatchState, previousMatch?: MatchState): GoalTextSignals {

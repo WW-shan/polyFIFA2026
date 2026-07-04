@@ -123,6 +123,8 @@ const LOCKED_ORDERBOOK_DELTA_DELAY_MS = 750;
 const LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL = 0.5;
 const LOCKED_ORDERBOOK_RETRACE_PRICE_TOLERANCE = 0.01;
 const LOCKED_ORDERBOOK_CACHE_TTL_MS = 5 * 60_000;
+const LOCKED_ENTRY_PRICE_FLOOR = 0.85;
+const LOCKED_UNCONFIRMED_FALLBACK_MIN_PRICE = 0.98;
 
 export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
@@ -674,13 +676,29 @@ async function runSportsWatch(
 
       const signal = await fetchLockedGoalSignalCheck(match, context.previousMatch);
       if (!signal) {
+        const marketGuard = await assessLockedOrderbookDelta(match, decision, context);
+        if (marketGuard.action === "SKIP") return marketGuard;
+        if (!isHighPriceLockedFallbackDecision(decision)) {
+          return {
+            action: "SKIP",
+            decision: {
+              action: "NO_TRADE",
+              reason: "NO_ELIGIBLE_STRATEGY",
+              eventSlug: match.eventSlug,
+              details: `locked score guard rejected because 365 goal signal was unavailable and locked price is below market fallback floor ${LOCKED_UNCONFIRMED_FALLBACK_MIN_PRICE}`
+            }
+          };
+        }
+        if (marketGuard.staleNotional < context.thresholds.minimumNotional) {
+          return lockedGuardSkip(match, `locked score guard rejected because stale locked liquidity ${marketGuard.staleNotional} is below minimum ${context.thresholds.minimumNotional}`);
+        }
         return {
-          action: "SKIP",
-          decision: {
-            action: "NO_TRADE",
-            reason: "NO_ELIGIBLE_STRATEGY",
-            eventSlug: match.eventSlug,
-            details: "locked score guard rejected because 365 goal signal was unavailable"
+          action: "USE",
+          assessment: {
+            capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
+            minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
+            ...(marketGuard.stakeLimit !== undefined ? { stakeLimit: marketGuard.stakeLimit } : {}),
+            details: `locked score guard passed without 365 goal signal via high-price market fallback ${match.homeGoals}-${match.awayGoals}; ${marketGuard.details}`
           }
         };
       }
@@ -761,13 +779,18 @@ async function runSportsWatch(
       match: MatchState,
       decision: Extract<TradeDecision, { action: "BUY" }>,
       context: LockedScoreRiskContext,
-      signal: Scores365GoalSignal
-    ): Promise<{ action: "USE"; details: string; stakeLimit?: number } | { action: "SKIP"; decision: NoTradeDecision }> {
+      signal?: Scores365GoalSignal
+    ): Promise<{ action: "USE"; details: string; stakeLimit?: number; staleNotional: number; stablePostGoalNotional: number } | { action: "SKIP"; decision: NoTradeDecision }> {
       const candidates = newLockedCandidates(match, context.markets, context.thresholds.entryWindowMinutes, context.previousMatch);
       const relatedTokens = new Set(candidates.map((candidate) => candidate.tokenId));
       const decisionTokens = lockedDecisionTokenIds(decision);
       if (decisionTokens.length === 0) {
-        return { action: "USE", details: "no locked decision token to delta-check" };
+        return {
+          action: "USE",
+          details: "no locked decision token to delta-check",
+          staleNotional: 0,
+          stablePostGoalNotional: 0
+        };
       }
 
       const relatedSeenInS1 = candidates.filter((candidate) => context.orderbooks.some((book) => book.tokenId === candidate.tokenId));
@@ -777,10 +800,10 @@ async function runSportsWatch(
 
       const missingS0 = decisionTokens.filter((tokenId) => !freshCachedOrderbook(lockedOrderbookCache, tokenId));
       if (missingS0.length > 0) {
-        if (requireOrderbookDelta || !signal.scoreMatchesSports) {
+        if (requireOrderbookDelta || !signal?.scoreMatchesSports) {
           return lockedGuardSkip(match, `locked score guard rejected because no pre-goal orderbook cache existed for ${missingS0.join(",")}`);
         }
-        return { action: "USE", details: `score-confirmed fallback without S0 delta cache for ${missingS0.join(",")}` };
+        return { action: "USE", details: `score-confirmed fallback without S0 delta cache for ${missingS0.join(",")}`, staleNotional: 0, stablePostGoalNotional: 0 };
       }
 
       await sleep(lockedOrderbookDeltaDelayMs(env));
@@ -806,6 +829,10 @@ async function runSportsWatch(
         const m0 = lockedOrderbookMetrics(s0, context.thresholds.minimumNetReturn);
         const m1 = lockedOrderbookMetrics(s1, context.thresholds.minimumNetReturn);
         const m2 = lockedOrderbookMetrics(s2, context.thresholds.minimumNetReturn);
+        const subFloorAsk = minDefined(m1.subFloorAsk, m2.subFloorAsk);
+        if (subFloorAsk !== undefined) {
+          return lockedGuardSkip(match, `locked score guard rejected because post-goal orderbook has ask ${subFloorAsk} below locked floor ${LOCKED_ENTRY_PRICE_FLOOR} for ${tokenId}`);
+        }
         if (m1.bestAsk !== undefined && m2.bestAsk !== undefined && m2.bestAsk < m1.bestAsk - LOCKED_ORDERBOOK_RETRACE_PRICE_TOLERANCE) {
           return lockedGuardSkip(match, `locked score guard rejected because best ask retraced for ${tokenId} from ${m1.bestAsk} to ${m2.bestAsk}`);
         }
@@ -819,13 +846,15 @@ async function runSportsWatch(
         details.push(`${tokenId} stablePostGoal=${roundForDetails(tokenStablePostGoal)} stale=${roundForDetails(tokenStale)} S0=${roundForDetails(m0.cheapNotional)} S1=${roundForDetails(m1.cheapNotional)} S2=${roundForDetails(m2.cheapNotional)}${grewFromS0 ? " grewFromS0" : ""}`);
       }
 
-      if (requireOrderbookDelta && stablePostGoalNotional < context.thresholds.minimumNotional) {
+      if ((requireOrderbookDelta || !signal?.scoreMatchesSports) && stablePostGoalNotional < context.thresholds.minimumNotional) {
         return lockedGuardSkip(match, `locked score guard rejected because stable post-goal liquidity ${stablePostGoalNotional} is below minimum ${context.thresholds.minimumNotional}`);
       }
 
-      const result: { action: "USE"; details: string; stakeLimit?: number } = {
+      const result: { action: "USE"; details: string; stakeLimit?: number; staleNotional: number; stablePostGoalNotional: number } = {
         action: "USE",
-        details: `orderbook delta passed (${details.join("; ")})`
+        details: `orderbook delta passed (${details.join("; ")})`,
+        staleNotional,
+        stablePostGoalNotional
       };
       if (stablePostGoalNotional > 0) result.stakeLimit = stablePostGoalNotional;
       return result;
@@ -1279,6 +1308,15 @@ function lockedDecisionTokenIds(decision: Extract<TradeDecision, { action: "BUY"
     .map((leg) => leg.tokenId))];
 }
 
+function isHighPriceLockedFallbackDecision(decision: Extract<TradeDecision, { action: "BUY" }>): boolean {
+  const legs = decision.legs?.length ? decision.legs : [decision];
+  const prices = legs
+    .filter((leg) => leg.locked === true)
+    .map((leg) => "price" in leg ? leg.price : leg.bestAsk)
+    .filter(isFiniteNumber);
+  return prices.length > 0 && prices.every((price) => price >= LOCKED_UNCONFIRMED_FALLBACK_MIN_PRICE);
+}
+
 function freshCachedOrderbook(cache: Map<string, CachedOrderbook>, tokenId: string, now = Date.now()): CachedOrderbook | undefined {
   const cached = cache.get(tokenId);
   if (!cached) return undefined;
@@ -1295,7 +1333,7 @@ function pruneLockedOrderbookCache(cache: Map<string, CachedOrderbook>, now = Da
   }
 }
 
-function lockedOrderbookMetrics(orderbook: OrderbookSnapshot, minimumNetReturn: number): { bestAsk?: number; cheapNotional: number } {
+function lockedOrderbookMetrics(orderbook: OrderbookSnapshot, minimumNetReturn: number): { bestAsk?: number; subFloorAsk?: number; cheapNotional: number } {
   const validAsks = orderbook.asks
     .filter((ask) => Number.isFinite(ask.price)
       && Number.isFinite(ask.size)
@@ -1304,10 +1342,15 @@ function lockedOrderbookMetrics(orderbook: OrderbookSnapshot, minimumNetReturn: 
       && ask.size > 0)
     .sort((a, b) => a.price - b.price);
   const bestAsk = validAsks[0]?.price;
+  const subFloorAsk = validAsks.find((ask) => ask.price < LOCKED_ENTRY_PRICE_FLOOR)?.price;
   const cheapNotional = validAsks
-    .filter((ask) => ask.price >= 0.8 && safeNetReturnRate(ask.price) >= minimumNetReturn)
+    .filter((ask) => ask.price >= LOCKED_ENTRY_PRICE_FLOOR && safeNetReturnRate(ask.price) >= minimumNetReturn)
     .reduce((total, ask) => total + ask.price * ask.size, 0);
-  return bestAsk === undefined ? { cheapNotional } : { bestAsk, cheapNotional };
+  return {
+    ...(bestAsk === undefined ? {} : { bestAsk }),
+    ...(subFloorAsk === undefined ? {} : { subFloorAsk }),
+    cheapNotional
+  };
 }
 
 function safeNetReturnRate(price: number): number {

@@ -163,7 +163,39 @@ describe("buildTradeDecision", () => {
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
   });
 
-  test("allows locked candidates at 0.80 or above", () => {
+  test("rejects locked candidates below 0.85", () => {
+    const decision = buildTradeDecision(match, {
+      ...selected,
+      strategy: "total_over_locked",
+      outcome: "Over",
+      lossRequiresGoals: 999,
+      locked: true
+    }, book([[0.84, 10_000]]), {
+      ...thresholds,
+      maxEntryPrice: 0.995,
+      minimumNetReturn: 0.005
+    });
+
+    expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+  });
+
+  test("rejects locked candidates when a sub-floor ask is in front of executable depth", () => {
+    const decision = buildTradeDecision(match, {
+      ...selected,
+      strategy: "total_over_locked",
+      outcome: "Over",
+      lossRequiresGoals: 999,
+      locked: true
+    }, book([[0.84, 10], [0.99, 10_000]]), {
+      ...thresholds,
+      maxEntryPrice: 0.995,
+      minimumNetReturn: 0.005
+    });
+
+    expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+  });
+
+  test("allows locked candidates at 0.85 or above", () => {
     const decision = buildTradeDecision(match, {
       ...selected,
       strategy: "total_over_locked",

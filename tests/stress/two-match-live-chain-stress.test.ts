@@ -41,7 +41,7 @@ describe("two-match full live chain stress coverage", () => {
           expect(order.notional, `${spec.name} ${order.tokenId}`).toBeGreaterThanOrEqual(MIN_NOTIONAL - EPSILON);
           expect(netReturnRate(order.price), `${spec.name} ${order.tokenId}`).toBeGreaterThanOrEqual(MIN_RETURN - EPSILON);
           if (order.tokenId === fixture.lockedOverToken) {
-            expect(order.price, spec.name).toBeGreaterThanOrEqual(0.8);
+            expect(order.price, spec.name).toBeGreaterThanOrEqual(0.85);
           }
 
           if (spec.rejectTailTeamPost && order.tokenId === fixture.tailTeamUnderToken) {

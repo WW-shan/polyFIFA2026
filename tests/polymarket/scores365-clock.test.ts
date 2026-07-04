@@ -191,6 +191,49 @@ describe("365Scores live clock", () => {
     expect(signal?.details.join(" ")).toContain("post-regulation");
   });
 
+  test("does not flag a normal stoppage-time goal as post-regulation", () => {
+    const signal = extract365ScoresGoalSignal({
+      game: {
+        id: 4749272,
+        statusText: "2nd Half",
+        gameTimeDisplay: "90+2'",
+        homeCompetitor: { id: 2373, name: "Belgium", score: 3 },
+        awayCompetitor: { id: 5102, name: "Senegal", score: 2 },
+        events: [
+          {
+            competitorId: 2373,
+            gameTime: 92,
+            addedTime: 2,
+            eventType: { id: 1, name: "Goal", subTypeName: "Field Goal" }
+          }
+        ]
+      }
+    }, {
+      ...match,
+      eventSlug: "fifwc-bel-sen-2026-07-01",
+      homeTeam: "Belgium",
+      awayTeam: "Senegal",
+      homeGoals: 3,
+      awayGoals: 2
+    }, {
+      ...match,
+      eventSlug: "fifwc-bel-sen-2026-07-01",
+      homeTeam: "Belgium",
+      awayTeam: "Senegal",
+      homeGoals: 2,
+      awayGoals: 2
+    });
+
+    expect(signal).toMatchObject({
+      homeGoals: 3,
+      awayGoals: 2,
+      scoreMatchesSports: true,
+      hasMatchingGoal: true,
+      hasPostRegulationGoalSignal: false
+    });
+    expect(signal?.details.join(" ")).not.toContain("post-regulation");
+  });
+
   test("detects 365Scores Goal Disallowed Var and PBP no-goal as a hard block", () => {
     const signal = extract365ScoresGoalSignal({
       game: {
