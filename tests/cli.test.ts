@@ -1160,13 +1160,11 @@ describe("CLI", () => {
     });
   });
 
-  test("worldcup live watch allows confirmed post-goal liquidity when price does not retrace", async () => {
+  test("worldcup live watch blocks confirmed post-goal liquidity that did not exist in S0", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-post-goal-"));
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
     const eventSlug = "fifwc-locked-delta-post-goal-2026-07-02";
-    const totalOverToken = "locked-delta-post-goal-total-over";
-    const teamOverToken = "locked-delta-post-goal-team-over";
     await writeFile(marketsFile, JSON.stringify([
       totalMarket(eventSlug, "Post", "Goal", 0.5, "locked-delta-post-goal-total"),
       teamTotalMarket(eventSlug, "Post", "Goal", "Post", 0.5, "locked-delta-post-goal-team")
@@ -1235,11 +1233,15 @@ describe("CLI", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(executed).toHaveLength(1);
-    expect(executed[0]!.notional).toBeCloseTo(20, 8);
-    expect(executed[0]!.legs?.map((leg) => leg.tokenId)).toEqual(
-      expect.arrayContaining([totalOverToken, teamOverToken])
-    );
+    expect(executed).toEqual([]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "watch_complete",
+      last: {
+        status: "no_trade",
+        reason: "NO_ELIGIBLE_STRATEGY",
+        details: expect.stringContaining("grew from pre-goal")
+      }
+    });
   });
 
   test("worldcup live watch caps confirmed growing liquidity to stable S1/S2 notional", async () => {

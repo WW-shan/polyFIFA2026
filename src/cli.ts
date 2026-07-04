@@ -839,6 +839,9 @@ async function runSportsWatch(
 
         const tokenStablePostGoal = Math.min(m1.cheapNotional, m2.cheapNotional);
         const tokenStale = Math.min(m0.cheapNotional, tokenStablePostGoal);
+        if (tokenStablePostGoal > m0.cheapNotional + LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL) {
+          return lockedGuardSkip(match, `locked score guard rejected because stable cheap liquidity grew from pre-goal S0=${roundForDetails(m0.cheapNotional)} to ${roundForDetails(tokenStablePostGoal)} for ${tokenId}`);
+        }
         staleNotional += tokenStale;
         stablePostGoalNotional += tokenStablePostGoal;
         const grewFromS0 = m1.cheapNotional > m0.cheapNotional + LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL
