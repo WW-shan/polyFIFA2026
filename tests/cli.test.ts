@@ -1160,7 +1160,7 @@ describe("CLI", () => {
     });
   });
 
-  test("worldcup live watch blocks confirmed post-goal liquidity that did not exist in S0", async () => {
+  test("worldcup live watch allows confirmed high-price post-goal liquidity that did not exist in S0", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-delta-post-goal-"));
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
@@ -1233,13 +1233,15 @@ describe("CLI", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(executed).toEqual([]);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]!.notional).toBeCloseTo(20, 8);
     expect(JSON.parse(result.stdout)).toMatchObject({
       status: "watch_complete",
       last: {
-        status: "no_trade",
-        reason: "NO_ELIGIBLE_STRATEGY",
-        details: expect.stringContaining("grew from pre-goal")
+        status: "filled",
+        eventSlug,
+        strategy: "total_over_locked",
+        locked: true
       }
     });
   });

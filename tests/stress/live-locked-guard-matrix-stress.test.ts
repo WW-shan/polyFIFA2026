@@ -188,6 +188,20 @@ function guardCases(): GuardCase[] {
       expectedMaxNotional: 20
     },
     {
+      name: "no 365 signal buys high-price new stable post-goal liquidity",
+      signalMode: "none",
+      plan: {
+        pre: [],
+        post: [{ price: 0.99, size: 20 / 0.99 }],
+        verify: [{ price: 0.99, size: 20 / 0.99 }],
+        refresh: [{ price: 0.99, size: 20 / 0.99 }]
+      },
+      expectedLastStatus: "filled",
+      expectedPostedOrders: 1,
+      expectedOrderPrice: 0.99,
+      expectedMaxNotional: 20
+    },
+    {
       name: "no 365 signal skips medium 0.97 fallback",
       signalMode: "none",
       plan: stablePlan(0.97),
@@ -276,7 +290,7 @@ function guardCases(): GuardCase[] {
       expectedDetails: "best ask retraced"
     },
     {
-      name: "new cheap liquidity growth in S1 and S2 blocks as non-stale",
+      name: "confirmed high-price new cheap liquidity in S1 and S2 can buy",
       signalMode: "confirmed",
       plan: {
         pre: [{ price: 0.99, size: 2 / 0.99 }],
@@ -284,9 +298,10 @@ function guardCases(): GuardCase[] {
         verify: [{ price: 0.99, size: 20 / 0.99 }],
         refresh: [{ price: 0.99, size: 20 / 0.99 }]
       },
-      expectedLastStatus: "no_trade",
-      expectedPostedOrders: 0,
-      expectedDetails: "grew from pre-goal"
+      expectedLastStatus: "filled",
+      expectedPostedOrders: 1,
+      expectedOrderPrice: 0.99,
+      expectedMaxNotional: 20
     },
     {
       name: "tiny stable liquidity below minimum notional blocks",
