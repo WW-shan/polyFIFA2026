@@ -18,6 +18,8 @@ export interface LedgerTradeEntry {
   price: number;
   shares: number;
   notional: number;
+  legs?: TradeResult["legs"];
+  raw?: unknown;
 }
 
 export class LiveLedger {
@@ -69,6 +71,14 @@ export class LiveLedger {
   }
 
   async markRedeemedByConditionIds(conditionIds: readonly string[]): Promise<void> {
+    await this.markConditionIds(conditionIds, "redeemed");
+  }
+
+  async markLostByConditionIds(conditionIds: readonly string[]): Promise<void> {
+    await this.markConditionIds(conditionIds, "lost");
+  }
+
+  private async markConditionIds(conditionIds: readonly string[], status: "redeemed" | "lost"): Promise<void> {
     const conditionSet = new Set(conditionIds.map((conditionId) => conditionId.toLowerCase()));
     if (conditionSet.size === 0) return;
     const entries = await this.readEntries();
@@ -76,7 +86,7 @@ export class LiveLedger {
     const updated = entries.map((entry) => {
       if (!conditionSet.has(entry.conditionId.toLowerCase()) || !isActiveLedgerStatus(entry.status)) return entry;
       changed = true;
-      return { ...entry, status: "redeemed" as const };
+      return { ...entry, status };
     });
     if (!changed) return;
     await mkdir(dirname(this.filePath), { recursive: true });
@@ -99,6 +109,8 @@ export class LiveLedger {
       notional: result.notional
     };
     if (decision.strategy) entry.strategy = decision.strategy;
+    if (result.legs !== undefined) entry.legs = result.legs;
+    if (result.raw !== undefined) entry.raw = result.raw;
     await this.recordTrade(entry);
   }
 }

@@ -86,6 +86,7 @@ interface LockedScoreRiskAssessment {
   minimumNetReturn: number;
   details: string;
   stakeLimit?: number;
+  lockedScoreGuard?: LockedScoreGuardAudit;
 }
 
 interface LockedScoreRiskContext {
@@ -103,7 +104,42 @@ interface CachedOrderbook {
 
 type LockedScoreRiskResult =
   | { action: "USE"; assessment: LockedScoreRiskAssessment }
-  | { action: "SKIP"; decision: NoTradeDecision };
+  | { action: "SKIP"; decision: NoTradeDecision; lockedScoreGuard?: LockedScoreGuardAudit };
+
+interface LockedOrderbookMetrics {
+  bestAsk?: number;
+  subFloorAsk?: number;
+  cheapNotional: number;
+}
+
+interface LockedScoreGuardSnapshotAudit {
+  tokenId: string;
+  s0?: OrderbookSnapshot;
+  s1?: OrderbookSnapshot;
+  s2?: OrderbookSnapshot;
+  metrics?: {
+    s0: LockedOrderbookMetrics;
+    s1: LockedOrderbookMetrics;
+    s2: LockedOrderbookMetrics;
+  };
+}
+
+interface LockedScoreGuardAudit {
+  decisionTokenIds: string[];
+  snapshots: LockedScoreGuardSnapshotAudit[];
+  signal?: {
+    homeGoals: number;
+    awayGoals: number;
+    scoreMatchesSports: boolean;
+    hasMatchingGoal: boolean;
+    hasNoGoalSignal: boolean;
+    hasVarReviewSignal: boolean;
+    hasPostRegulationGoalSignal?: boolean;
+    details: string[];
+  };
+  staleNotional?: number;
+  stablePostGoalNotional?: number;
+}
 
 interface CurrentScoreIncidentState extends LockedScoreIncident {
   homeGoals: number;
@@ -117,14 +153,13 @@ type ScoreIncidentContext =
 
 const MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS = 1000;
 const SPORTS_WATCH_RECONNECT_INTERVAL_MS = 1000;
-const LOCKED_SCORE_CONFIRM_TIMEOUT_MS = 750;
+const DEFAULT_LOCKED_SCORE_CONFIRM_TIMEOUT_MS = 900;
 const LOCKED_INCIDENT_BANKROLL_FRACTION = 0.2;
 const LOCKED_ORDERBOOK_DELTA_DELAY_MS = 750;
 const LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL = 0.5;
 const LOCKED_ORDERBOOK_RETRACE_PRICE_TOLERANCE = 0.01;
 const LOCKED_ORDERBOOK_CACHE_TTL_MS = 5 * 60_000;
 const LOCKED_ENTRY_PRICE_FLOOR = 0.85;
-const LOCKED_UNCONFIRMED_FALLBACK_MIN_PRICE = 0.98;
 
 export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
@@ -307,6 +342,7 @@ async function runSinglePass(
       });
       return ok(summary(args.mode, decision));
     }
+    let lockedScoreGuardAudit: LockedScoreGuardAudit | undefined;
     if (decision.locked === true && options.assessLockedScoreRisk) {
       const risk = await options.assessLockedScoreRisk(match, decision, {
         ...(options.lockedIncidentPreviousMatch ? { previousMatch: options.lockedIncidentPreviousMatch } : {}),
@@ -316,6 +352,7 @@ async function runSinglePass(
         fetchOrderbook: deps.fetchOrderbook ?? fetchOrderbook
       });
       if (risk.action === "SKIP") {
+        lockedScoreGuardAudit = risk.lockedScoreGuard;
         const suppressedDecision = tailWindow.eligible
           ? runDecision(decisionStake, thresholdOverrides, true)
           : risk.decision;
@@ -325,12 +362,14 @@ async function runSinglePass(
             markets,
             orderbooks,
             thresholds,
-            decision: risk.decision
+            decision: risk.decision,
+            ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
           });
           return ok(summary(args.mode, risk.decision));
         }
         decision = suppressedDecision;
       } else {
+        lockedScoreGuardAudit = risk.assessment.lockedScoreGuard;
         const incidentRiskStakeLimit = lockedIncidentHasNewCandidate && options.lockedIncidentStakeLimit
           ? await options.lockedIncidentStakeLimit(risk.assessment.capFraction)
           : undefined;
@@ -348,7 +387,8 @@ async function runSinglePass(
             markets,
             orderbooks,
             thresholds,
-            decision: exhaustedDecision
+            decision: exhaustedDecision,
+            ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
           });
           return ok(summary(args.mode, exhaustedDecision));
         }
@@ -361,7 +401,8 @@ async function runSinglePass(
               markets,
               orderbooks,
               thresholds,
-              decision
+              decision,
+              ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
             });
             return ok(summary(args.mode, decision));
           }
@@ -376,7 +417,8 @@ async function runSinglePass(
               markets,
               orderbooks,
               thresholds,
-              decision
+              decision,
+              ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
             });
             return ok(summary(args.mode, decision));
           }
@@ -391,7 +433,8 @@ async function runSinglePass(
         markets,
         orderbooks,
         thresholds,
-        decision: postRiskDuplicateDecision
+        decision: postRiskDuplicateDecision,
+        ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
       });
       return ok(summary(args.mode, postRiskDuplicateDecision));
     }
@@ -401,7 +444,8 @@ async function runSinglePass(
       markets,
       orderbooks,
       thresholds,
-      decision
+      decision,
+      ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
     });
     const trade = args.mode === "paper"
       ? await new PaperExecutor().execute(decision)
@@ -678,24 +722,14 @@ async function runSportsWatch(
       if (!signal) {
         const marketGuard = await assessLockedOrderbookDelta(match, decision, context);
         if (marketGuard.action === "SKIP") return marketGuard;
-        if (!isHighPriceLockedFallbackDecision(decision)) {
-          return {
-            action: "SKIP",
-            decision: {
-              action: "NO_TRADE",
-              reason: "NO_ELIGIBLE_STRATEGY",
-              eventSlug: match.eventSlug,
-              details: `locked score guard rejected because 365 goal signal was unavailable and locked price is below market fallback floor ${LOCKED_UNCONFIRMED_FALLBACK_MIN_PRICE}`
-            }
-          };
-        }
         return {
           action: "USE",
           assessment: {
             capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
             minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
             ...(marketGuard.stakeLimit !== undefined ? { stakeLimit: marketGuard.stakeLimit } : {}),
-            details: `locked score guard passed without 365 goal signal via high-price market fallback ${match.homeGoals}-${match.awayGoals}; ${marketGuard.details}`
+            ...(marketGuard.lockedScoreGuard ? { lockedScoreGuard: marketGuard.lockedScoreGuard } : {}),
+            details: `locked score guard passed without 365 goal signal via orderbook delta ${match.homeGoals}-${match.awayGoals}; ${marketGuard.details}`
           }
         };
       }
@@ -735,6 +769,7 @@ async function runSportsWatch(
             capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
             minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
             ...(marketGuard.stakeLimit !== undefined ? { stakeLimit: marketGuard.stakeLimit } : {}),
+            ...(marketGuard.lockedScoreGuard ? { lockedScoreGuard: marketGuard.lockedScoreGuard } : {}),
             details: `locked score guard passed ${match.homeGoals}-${match.awayGoals}; ${signal.details.join("; ")}; ${marketGuard.details}`
           }
         };
@@ -752,24 +787,12 @@ async function runSportsWatch(
     }
 
     async function fetchLockedGoalSignalCheck(match: MatchState, previousMatch: MatchState | undefined): Promise<Scores365GoalSignal | null> {
-      const deadline = Date.now() + LOCKED_SCORE_CONFIRM_TIMEOUT_MS;
-      const scoreFallback = fetchExternalScore(match, events, clockOptions)
-        .then((patch) => scorePatchToGoalSignal(patch, match))
-        .catch(() => null);
-      try {
-        const signal = await Promise.race([
-          fetchLockedGoalSignal(match, previousMatch, events, clockOptions).catch(() => null),
-          sleep(LOCKED_SCORE_CONFIRM_TIMEOUT_MS).then(() => null)
-        ]);
-        if (signal) return signal;
-      } catch {
-        // Fall through to the faster score-only source below.
-      }
-      const remainingMs = Math.max(0, deadline - Date.now());
-      return Promise.race([
-        scoreFallback,
-        sleep(remainingMs).then(() => null)
-      ]);
+      return firstUsableGoalSignal([
+        fetchLockedGoalSignal(match, previousMatch, events, clockOptions).catch(() => null),
+        fetchExternalScore(match, events, clockOptions)
+          .then((patch) => scorePatchToGoalSignal(patch, match))
+          .catch(() => null)
+      ], lockedScoreConfirmTimeoutMs(env));
     }
 
     async function assessLockedOrderbookDelta(
@@ -777,30 +800,38 @@ async function runSportsWatch(
       decision: Extract<TradeDecision, { action: "BUY" }>,
       context: LockedScoreRiskContext,
       signal?: Scores365GoalSignal
-    ): Promise<{ action: "USE"; details: string; stakeLimit?: number; staleNotional: number; stablePostGoalNotional: number } | { action: "SKIP"; decision: NoTradeDecision }> {
+    ): Promise<{ action: "USE"; details: string; stakeLimit?: number; staleNotional: number; stablePostGoalNotional: number; lockedScoreGuard?: LockedScoreGuardAudit } | { action: "SKIP"; decision: NoTradeDecision; lockedScoreGuard?: LockedScoreGuardAudit }> {
       const candidates = newLockedCandidates(match, context.markets, context.thresholds.entryWindowMinutes, context.previousMatch);
       const relatedTokens = new Set(candidates.map((candidate) => candidate.tokenId));
       const decisionTokens = lockedDecisionTokenIds(decision);
+      const lockedScoreGuard = lockedScoreGuardAudit(decisionTokens, signal);
       if (decisionTokens.length === 0) {
         return {
           action: "USE",
           details: "no locked decision token to delta-check",
           staleNotional: 0,
-          stablePostGoalNotional: 0
+          stablePostGoalNotional: 0,
+          lockedScoreGuard
         };
       }
 
       const relatedSeenInS1 = candidates.filter((candidate) => context.orderbooks.some((book) => book.tokenId === candidate.tokenId));
       if (candidates.length >= 2 && relatedSeenInS1.length < 2) {
-        return lockedGuardSkip(match, `locked score guard rejected because related markets did not move together (${relatedSeenInS1.length}/${candidates.length} present)`);
+        return lockedGuardSkip(match, `locked score guard rejected because related markets did not move together (${relatedSeenInS1.length}/${candidates.length} present)`, lockedScoreGuard);
       }
 
       const missingS0 = decisionTokens.filter((tokenId) => !freshCachedOrderbook(lockedOrderbookCache, tokenId));
       if (missingS0.length > 0) {
         if (requireOrderbookDelta || !signal?.scoreMatchesSports) {
-          return lockedGuardSkip(match, `locked score guard rejected because no pre-goal orderbook cache existed for ${missingS0.join(",")}`);
+          for (const tokenId of decisionTokens) {
+            const s1 = context.orderbooks.find((book) => book.tokenId === tokenId);
+            const snapshot: LockedScoreGuardSnapshotAudit = { tokenId };
+            if (s1) snapshot.s1 = s1;
+            lockedScoreGuard.snapshots.push(snapshot);
+          }
+          return lockedGuardSkip(match, `locked score guard rejected because no pre-goal orderbook cache existed for ${missingS0.join(",")}`, lockedScoreGuard);
         }
-        return { action: "USE", details: `score-confirmed fallback without S0 delta cache for ${missingS0.join(",")}`, staleNotional: 0, stablePostGoalNotional: 0 };
+        return { action: "USE", details: `score-confirmed fallback without S0 delta cache for ${missingS0.join(",")}`, staleNotional: 0, stablePostGoalNotional: 0, lockedScoreGuard };
       }
 
       await sleep(lockedOrderbookDeltaDelayMs(env));
@@ -820,18 +851,30 @@ async function runSportsWatch(
         const s1 = context.orderbooks.find((book) => book.tokenId === tokenId);
         const s2 = s2ByToken.get(tokenId);
         if (!s0 || !s1 || !s2) {
-          return lockedGuardSkip(match, `locked score guard rejected because orderbook delta snapshots were incomplete for ${tokenId}`);
+          const snapshot: LockedScoreGuardSnapshotAudit = { tokenId };
+          if (s0) snapshot.s0 = s0;
+          if (s1) snapshot.s1 = s1;
+          if (s2) snapshot.s2 = s2;
+          lockedScoreGuard.snapshots.push(snapshot);
+          return lockedGuardSkip(match, `locked score guard rejected because orderbook delta snapshots were incomplete for ${tokenId}`, lockedScoreGuard);
         }
 
         const m0 = lockedOrderbookMetrics(s0, context.thresholds.minimumNetReturn);
         const m1 = lockedOrderbookMetrics(s1, context.thresholds.minimumNetReturn);
         const m2 = lockedOrderbookMetrics(s2, context.thresholds.minimumNetReturn);
+        lockedScoreGuard.snapshots.push({
+          tokenId,
+          s0,
+          s1,
+          s2,
+          metrics: { s0: m0, s1: m1, s2: m2 }
+        });
         const subFloorAsk = minDefined(m1.subFloorAsk, m2.subFloorAsk);
         if (subFloorAsk !== undefined) {
-          return lockedGuardSkip(match, `locked score guard rejected because post-goal orderbook has ask ${subFloorAsk} below locked floor ${LOCKED_ENTRY_PRICE_FLOOR} for ${tokenId}`);
+          return lockedGuardSkip(match, `locked score guard rejected because post-goal orderbook has ask ${subFloorAsk} below locked floor ${LOCKED_ENTRY_PRICE_FLOOR} for ${tokenId}`, lockedScoreGuard);
         }
         if (m1.bestAsk !== undefined && m2.bestAsk !== undefined && m2.bestAsk < m1.bestAsk - LOCKED_ORDERBOOK_RETRACE_PRICE_TOLERANCE) {
-          return lockedGuardSkip(match, `locked score guard rejected because best ask retraced for ${tokenId} from ${m1.bestAsk} to ${m2.bestAsk}`);
+          return lockedGuardSkip(match, `locked score guard rejected because best ask retraced for ${tokenId} from ${m1.bestAsk} to ${m2.bestAsk}`, lockedScoreGuard);
         }
 
         const tokenStablePostGoal = Math.min(m1.cheapNotional, m2.cheapNotional);
@@ -843,21 +886,24 @@ async function runSportsWatch(
         details.push(`${tokenId} stablePostGoal=${roundForDetails(tokenStablePostGoal)} stale=${roundForDetails(tokenStale)} S0=${roundForDetails(m0.cheapNotional)} S1=${roundForDetails(m1.cheapNotional)} S2=${roundForDetails(m2.cheapNotional)}${grewFromS0 ? " grewFromS0" : ""}`);
       }
 
+      lockedScoreGuard.staleNotional = staleNotional;
+      lockedScoreGuard.stablePostGoalNotional = stablePostGoalNotional;
       if ((requireOrderbookDelta || !signal?.scoreMatchesSports) && stablePostGoalNotional < context.thresholds.minimumNotional) {
-        return lockedGuardSkip(match, `locked score guard rejected because stable post-goal liquidity ${stablePostGoalNotional} is below minimum ${context.thresholds.minimumNotional}`);
+        return lockedGuardSkip(match, `locked score guard rejected because stable post-goal liquidity ${stablePostGoalNotional} is below minimum ${context.thresholds.minimumNotional}`, lockedScoreGuard);
       }
 
-      const result: { action: "USE"; details: string; stakeLimit?: number; staleNotional: number; stablePostGoalNotional: number } = {
+      const result: { action: "USE"; details: string; stakeLimit?: number; staleNotional: number; stablePostGoalNotional: number; lockedScoreGuard?: LockedScoreGuardAudit } = {
         action: "USE",
         details: `orderbook delta passed (${details.join("; ")})`,
         staleNotional,
         stablePostGoalNotional
       };
       if (stablePostGoalNotional > 0) result.stakeLimit = stablePostGoalNotional;
+      result.lockedScoreGuard = lockedScoreGuard;
       return result;
     }
 
-    function lockedGuardSkip(match: MatchState, details: string): { action: "SKIP"; decision: NoTradeDecision } {
+    function lockedGuardSkip(match: MatchState, details: string, lockedScoreGuard?: LockedScoreGuardAudit): { action: "SKIP"; decision: NoTradeDecision; lockedScoreGuard?: LockedScoreGuardAudit } {
       return {
         action: "SKIP",
         decision: {
@@ -865,7 +911,8 @@ async function runSportsWatch(
           reason: "NO_ELIGIBLE_STRATEGY",
           eventSlug: match.eventSlug,
           details
-        }
+        },
+        ...(lockedScoreGuard ? { lockedScoreGuard } : {})
       };
     }
 
@@ -1284,6 +1331,26 @@ function scorePatchToGoalSignal(patch: Partial<MatchState> | null, match: MatchS
   };
 }
 
+function lockedScoreGuardAudit(decisionTokenIds: readonly string[], signal?: Scores365GoalSignal): LockedScoreGuardAudit {
+  const audit: LockedScoreGuardAudit = {
+    decisionTokenIds: [...decisionTokenIds],
+    snapshots: []
+  };
+  if (signal) {
+    audit.signal = {
+      homeGoals: signal.homeGoals,
+      awayGoals: signal.awayGoals,
+      scoreMatchesSports: signal.scoreMatchesSports,
+      hasMatchingGoal: signal.hasMatchingGoal,
+      hasNoGoalSignal: signal.hasNoGoalSignal,
+      hasVarReviewSignal: signal.hasVarReviewSignal,
+      ...(signal.hasPostRegulationGoalSignal !== undefined ? { hasPostRegulationGoalSignal: signal.hasPostRegulationGoalSignal } : {}),
+      details: [...signal.details]
+    };
+  }
+  return audit;
+}
+
 function newLockedCandidates(
   match: MatchState,
   markets: readonly StrategyMarket[],
@@ -1303,15 +1370,6 @@ function lockedDecisionTokenIds(decision: Extract<TradeDecision, { action: "BUY"
   return [...new Set(legs
     .filter((leg) => leg.locked === true)
     .map((leg) => leg.tokenId))];
-}
-
-function isHighPriceLockedFallbackDecision(decision: Extract<TradeDecision, { action: "BUY" }>): boolean {
-  const legs = decision.legs?.length ? decision.legs : [decision];
-  const prices = legs
-    .filter((leg) => leg.locked === true)
-    .map((leg) => "price" in leg ? leg.price : leg.bestAsk)
-    .filter(isFiniteNumber);
-  return prices.length > 0 && prices.every((price) => price >= LOCKED_UNCONFIRMED_FALLBACK_MIN_PRICE);
 }
 
 function freshCachedOrderbook(cache: Map<string, CachedOrderbook>, tokenId: string, now = Date.now()): CachedOrderbook | undefined {
@@ -1361,6 +1419,43 @@ function safeNetReturnRate(price: number): number {
 function lockedOrderbookDeltaDelayMs(env: Record<string, string | undefined>): number {
   if ((env.NODE_ENV ?? process.env.NODE_ENV) === "test") return 0;
   return numberEnv(env.POLY_LOCKED_ORDERBOOK_DELTA_DELAY_MS) ?? LOCKED_ORDERBOOK_DELTA_DELAY_MS;
+}
+
+function lockedScoreConfirmTimeoutMs(env: Record<string, string | undefined>): number {
+  return Math.max(1, numberEnv(env.POLY_LOCKED_SCORE_CONFIRM_TIMEOUT_MS) ?? DEFAULT_LOCKED_SCORE_CONFIRM_TIMEOUT_MS);
+}
+
+function firstUsableGoalSignal(
+  sources: Array<Promise<Scores365GoalSignal | null>>,
+  timeoutMs: number
+): Promise<Scores365GoalSignal | null> {
+  if (sources.length === 0) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    let pending = sources.length;
+    const finish = (signal: Scores365GoalSignal | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(signal);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    for (const source of sources) {
+      source.then((signal) => {
+        if (settled) return;
+        if (signal) {
+          finish(signal);
+          return;
+        }
+        pending -= 1;
+        if (pending === 0) finish(null);
+      }, () => {
+        if (settled) return;
+        pending -= 1;
+        if (pending === 0) finish(null);
+      });
+    }
+  });
 }
 
 function roundForDetails(value: number): number {
@@ -1478,6 +1573,7 @@ function autoSettlementMonitor(
     const ledger = new LiveLedger(ledgerFile);
     monitorDeps.readActiveLedgerEntries = () => ledger.readActiveEntries();
     monitorDeps.markRedeemedConditionIds = (conditionIds) => ledger.markRedeemedByConditionIds(conditionIds);
+    monitorDeps.markLostConditionIds = (conditionIds) => ledger.markLostByConditionIds(conditionIds);
   }
   monitorDeps.onError = deps.onSettlementError ?? ((error) => {
     console.error(`AUTO_REDEEM_FAILED: ${error instanceof Error ? error.message : String(error)}`);
@@ -1742,6 +1838,7 @@ interface DepthAuditInput {
   orderbooks: readonly OrderbookSnapshot[];
   thresholds: DecisionThresholds;
   decision: TradeDecision;
+  lockedScoreGuard?: LockedScoreGuardAudit;
 }
 
 async function writeDepthAudit(
@@ -1760,7 +1857,8 @@ async function writeDepthAudit(
     thresholds: input.thresholds,
     candidates: depthAuditCandidates(input.match, input.markets, input.thresholds),
     orderbooks: input.orderbooks,
-    decision: input.decision
+    decision: input.decision,
+    ...(input.lockedScoreGuard ? { lockedScoreGuard: input.lockedScoreGuard } : {})
   };
 
   try {

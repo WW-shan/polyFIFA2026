@@ -197,6 +197,18 @@ function teamTotalMarket(eventSlug: string, homeTeam: string, awayTeam: string, 
   };
 }
 
+function bttsMarket(eventSlug: string, homeTeam: string, awayTeam: string, noTokenId: string): StrategyMarket {
+  return {
+    eventSlug,
+    marketSlug: `${eventSlug}-btts`,
+    question: `${homeTeam} vs. ${awayTeam}: Both Teams to Score`,
+    conditionId: `cond-${eventSlug}-btts`,
+    outcomes: ["Yes", "No"],
+    clobTokenIds: [`${noTokenId}-yes`, noTokenId],
+    marketType: "btts"
+  };
+}
+
 describe("CLI", () => {
   test("paper mode prints a filled JSON trade result", async () => {
     const result = await runCli([
@@ -1608,6 +1620,216 @@ describe("CLI", () => {
     });
   });
 
+  test("worldcup live watch uses fast score-only fallback without waiting for slow 365 goal events", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-fast-score-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-fast-score-2026-07-06";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Fast", "Score", 0.5, "locked-fast-score-total")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.97, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Fast", "Score", 0, 0);
+      yield tailMatch(eventSlug, "Fast", "Score", 1, 0);
+    }
+    const executed: Array<{ tokenId: string; notional: number }> = [];
+    const startedAt = Date.now();
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Fast", awayTeam: "Score" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => new Promise((resolve) => setTimeout(() => resolve({
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals
+      }), 10)),
+      fetchLockedGoalSignal: async () => new Promise(() => undefined),
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        executed.push({ tokenId: decision.tokenId, notional: decision.notional });
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-fast-score",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(300);
+    expect(executed).toHaveLength(1);
+  });
+
+  test("worldcup live watch allows stable unconfirmed locked liquidity above the locked floor", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-unconfirmed-floor-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-unconfirmed-floor-2026-07-06";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Floor", "Pass", 0.5, "locked-unconfirmed-floor-total"),
+      teamTotalMarket(eventSlug, "Floor", "Pass", "Floor", 0.5, "locked-unconfirmed-floor-team")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.97, size: 10_000 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Floor", "Pass", 0, 0);
+      yield tailMatch(eventSlug, "Floor", "Pass", 1, 0);
+    }
+    const executed: Array<{ notional: number; legs?: Array<{ tokenId: string; price: number }> }> = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Floor", awayTeam: "Pass" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      fetchLockedGoalSignal: async () => null,
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        const execution: { notional: number; legs?: Array<{ tokenId: string; price: number }> } = {
+          notional: decision.notional
+        };
+        if (decision.legs) execution.legs = decision.legs.map((leg) => ({ tokenId: leg.tokenId, price: leg.price }));
+        executed.push(execution);
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-unconfirmed-floor",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]!.notional).toBeCloseTo(20, 8);
+    expect(executed[0]!.legs?.every((leg) => leg.price >= 0.85)).toBe(true);
+  });
+
+  test("worldcup live watch buys Mexico-style BTTS and team-total locked legs when 365 is unavailable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-mixed-mexico-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-locked-mixed-mexico-2026-07-06";
+    const bttsYesToken = "locked-mixed-mexico-btts-no-yes";
+    const homeTeamTotalToken = "locked-mixed-mexico-home-team-under-over";
+    await writeFile(marketsFile, JSON.stringify([
+      bttsMarket(eventSlug, "Mexico", "England", "locked-mixed-mexico-btts-no"),
+      teamTotalMarket(eventSlug, "Mexico", "England", "Mexico", 0.5, "locked-mixed-mexico-home-team-under")
+    ]));
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
+      if (tokenId === bttsYesToken) {
+        return { tokenId, bids: [], asks: [{ price: 0.98, size: 1_147 }] };
+      }
+      if (tokenId === homeTeamTotalToken) {
+        return {
+          tokenId,
+          bids: [],
+          asks: [
+            { price: 0.95, size: 10 },
+            { price: 0.97, size: 32.93 },
+            { price: 0.98, size: 115 },
+            { price: 0.99, size: 182.46 }
+          ]
+        };
+      }
+      return { tokenId, bids: [], asks: [] };
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      const { remainingSeconds: _preRemainingSeconds, remainingSecondsSource: _preRemainingSecondsSource, ...pre } = tailMatch(eventSlug, "Mexico", "England", 0, 2);
+      const { remainingSeconds: _postRemainingSeconds, remainingSecondsSource: _postRemainingSecondsSource, ...post } = tailMatch(eventSlug, "Mexico", "England", 1, 2);
+      yield { ...pre, minute: 43, period: "1H" };
+      yield { ...post, minute: 43, period: "1H" };
+    }
+    const executed: Array<{ notional: number; legs?: Array<{ tokenId: string; price: number }> }> = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Mexico", awayTeam: "England" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      fetchLockedGoalSignal: async () => null,
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => {
+        const execution: { notional: number; legs?: Array<{ tokenId: string; price: number }> } = {
+          notional: decision.notional
+        };
+        if (decision.legs) execution.legs = decision.legs.map((leg) => ({ tokenId: leg.tokenId, price: leg.price }));
+        executed.push(execution);
+        return {
+          mode: "live",
+          status: "filled",
+          orderId: "locked-mixed-mexico",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: decision.shares,
+          notional: decision.notional,
+          fee: decision.estimatedFee,
+          estimatedPayout: decision.shares,
+          estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]!.notional).toBeCloseTo(20, 8);
+    expect(executed[0]!.legs?.map((leg) => leg.tokenId)).toEqual(
+      expect.arrayContaining([homeTeamTotalToken])
+    );
+    expect(executed[0]!.legs?.map((leg) => leg.price)).toEqual([0.95, 0.97]);
+  });
+
   test("worldcup live watch blocks locked fallback when a sub-floor ask is in front", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-locked-risk-subfloor-"));
     const marketsFile = join(dir, "markets.json");
@@ -2750,6 +2972,83 @@ describe("CLI", () => {
         asks: [{ price: 0.97, size: 3 }, { price: 0.98, size: 2 }]
       })
     ]));
+  });
+
+  test("writes locked guard S0 S1 S2 orderbook snapshots for replay", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-depth-audit-guard-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const depthAuditFile = join(dir, "depth.ndjson");
+    const eventSlug = "fifwc-depth-audit-guard-2026-07-06";
+    const overToken = "depth-audit-guard-total-over";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Guard", "Audit", 0.5, "depth-audit-guard-total")
+    ]));
+    const calls = new Map<string, number>();
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => {
+      const call = calls.get(tokenId) ?? 0;
+      calls.set(tokenId, call + 1);
+      const size = call === 0 ? 100 : call === 1 ? 80 : 60;
+      return {
+        tokenId,
+        bids: [{ price: 0.96, size: 3 + call }],
+        asks: [{ price: 0.97, size }]
+      };
+    });
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Guard", "Audit", 0, 0);
+      yield tailMatch(eventSlug, "Guard", "Audit", 1, 0);
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--ledger-file", ledgerFile,
+      "--depth-audit-file", depthAuditFile,
+      "--balance-buffer", "5",
+      "--interval-ms", "0",
+      "--max-iterations", "2"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Guard", awayTeam: "Audit" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      fetchLockedGoalSignal: async () => null,
+      readPusdBalance: async () => 100,
+      executeLive: async (decision) => ({
+        mode: "live",
+        status: "filled",
+        orderId: "depth-audit-guard",
+        tokenId: decision.tokenId,
+        price: decision.bestAsk,
+        shares: decision.shares,
+        notional: decision.notional,
+        fee: decision.estimatedFee,
+        estimatedPayout: decision.shares,
+        estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    const records = (await readFile(depthAuditFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    const buyRecord = records.find((record) => (record.decision as { action?: string }).action === "BUY");
+    expect(buyRecord).toMatchObject({
+      eventSlug,
+      lockedScoreGuard: {
+        decisionTokenIds: [overToken],
+        snapshots: [
+          {
+            tokenId: overToken,
+            s0: { asks: [{ price: 0.97, size: 100 }] },
+            s1: { asks: [{ price: 0.97, size: 80 }] },
+            s2: { asks: [{ price: 0.97, size: 60 }] }
+          }
+        ]
+      }
+    });
   });
 
   test("writes depth audit records when an early live match has no locked candidates", async () => {

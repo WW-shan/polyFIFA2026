@@ -70,6 +70,7 @@ export interface MarketSettlementStatus {
 export interface SettlementReconciliationResult {
   checkedEntries: number;
   redeemedConditions: string[];
+  lostConditions: string[];
 }
 
 export interface DepositWalletCall {
@@ -130,6 +131,7 @@ export interface SettlementDependencies {
   isApprovedForAll?: (owner: string, operator: string) => Promise<boolean>;
   submitDepositWalletBatch?: (input: SubmitDepositWalletBatchInput) => Promise<unknown>;
   markRedeemedConditionIds?: (conditionIds: readonly string[]) => Promise<void>;
+  markLostConditionIds?: (conditionIds: readonly string[]) => Promise<void>;
   readActiveLedgerEntries?: () => Promise<readonly SettlementLedgerEntry[]>;
   fetchMarketSettlementStatus?: (marketSlug: string, config: SettlementConfig) => Promise<MarketSettlementStatus | null>;
   readConditionalTokenBalance?: (walletAddress: string, tokenId: string, config: SettlementConfig) => Promise<bigint>;
@@ -286,30 +288,38 @@ export async function reconcileAlreadyRedeemedLedgerEntries(
   config: SettlementConfig,
   deps: SettlementDependencies = {}
 ): Promise<SettlementReconciliationResult> {
-  if (!config.enabled || !config.walletAddress || !deps.readActiveLedgerEntries || !deps.markRedeemedConditionIds) {
-    return { checkedEntries: 0, redeemedConditions: [] };
+  if (!config.enabled || !config.walletAddress || !deps.readActiveLedgerEntries) {
+    return { checkedEntries: 0, redeemedConditions: [], lostConditions: [] };
   }
 
   const entries = await deps.readActiveLedgerEntries();
   const fetchMarket = deps.fetchMarketSettlementStatus ?? fetchGammaMarketSettlementStatus;
   const readBalance = deps.readConditionalTokenBalance ?? readConditionalTokenBalance;
   const redeemedConditions = new Set<string>();
+  const lostConditions = new Set<string>();
 
   await Promise.all(entries.map(async (entry) => {
     try {
       if (!entry.marketSlug || !entry.tokenId || !entry.conditionId || !entry.outcome) return;
       const market = await fetchMarket(entry.marketSlug, config);
-      if (!market?.resolved || !isWinningOutcome(market, entry.outcome)) return;
-      const balance = await readBalance(config.walletAddress!, entry.tokenId, config);
-      if (balance === 0n) redeemedConditions.add(entry.conditionId);
+      if (!market?.resolved) return;
+      if (isWinningOutcome(market, entry.outcome)) {
+        if (!deps.markRedeemedConditionIds) return;
+        const balance = await readBalance(config.walletAddress!, entry.tokenId, config);
+        if (balance === 0n) redeemedConditions.add(entry.conditionId);
+        return;
+      }
+      if (isResolvedLosingOutcome(market, entry.outcome)) lostConditions.add(entry.conditionId);
     } catch {
       // Reconciliation is best-effort; normal redeem polling should continue.
     }
   }));
 
-  const conditionIds = [...redeemedConditions];
-  if (conditionIds.length > 0) await deps.markRedeemedConditionIds(conditionIds);
-  return { checkedEntries: entries.length, redeemedConditions: conditionIds };
+  const redeemedConditionIds = [...redeemedConditions];
+  const lostConditionIds = [...lostConditions];
+  if (redeemedConditionIds.length > 0) await deps.markRedeemedConditionIds?.(redeemedConditionIds);
+  if (lostConditionIds.length > 0) await deps.markLostConditionIds?.(lostConditionIds);
+  return { checkedEntries: entries.length, redeemedConditions: redeemedConditionIds, lostConditions: lostConditionIds };
 }
 
 export class AutoSettlementMonitor {
@@ -418,6 +428,11 @@ function normalizeMarketSettlementStatus(raw: unknown): MarketSettlementStatus |
 function isWinningOutcome(market: MarketSettlementStatus, outcome: string): boolean {
   const index = market.outcomes.findIndex((candidate) => candidate.trim().toLowerCase() === outcome.trim().toLowerCase());
   return index >= 0 && (market.outcomePrices[index] ?? 0) >= 0.999;
+}
+
+function isResolvedLosingOutcome(market: MarketSettlementStatus, outcome: string): boolean {
+  const index = market.outcomes.findIndex((candidate) => candidate.trim().toLowerCase() === outcome.trim().toLowerCase());
+  return index >= 0 && (market.outcomePrices[index] ?? 1) <= 0.001;
 }
 
 async function readConditionalTokenBalance(

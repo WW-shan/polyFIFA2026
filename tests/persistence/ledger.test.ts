@@ -35,6 +35,85 @@ describe("LiveLedger", () => {
     ]);
   });
 
+  test("records live result raw details for rejected orders", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-raw-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordResult({
+      action: "BUY",
+      eventSlug: "event-raw",
+      marketSlug: "market-raw",
+      question: "Raw vs. Error",
+      tokenId: "token-raw",
+      conditionId: "condition-raw",
+      outcome: "Over",
+      bestAsk: 0.98,
+      availableSize: 10,
+      shares: 1,
+      notional: 0.98,
+      estimatedFee: 0,
+      estimatedNetReturn: 0.01,
+      strategy: "team_total_over_locked",
+      locked: true,
+      legs: [{
+        eventSlug: "event-raw",
+        marketSlug: "market-raw",
+        question: "Raw vs. Error",
+        tokenId: "token-raw",
+        conditionId: "condition-raw",
+        outcome: "Over",
+        price: 0.98,
+        availableSize: 10,
+        shares: 1,
+        notional: 0.98,
+        estimatedFee: 0,
+        estimatedNetReturn: 0.01,
+        strategy: "team_total_over_locked",
+        lossRequiresGoals: 999,
+        locked: true
+      }]
+    }, {
+      mode: "live",
+      status: "rejected",
+      orderId: "live-rejected-token-raw",
+      tokenId: "token-raw",
+      price: 0.98,
+      shares: 0,
+      notional: 0,
+      fee: 0,
+      estimatedPayout: 0,
+      estimatedProfit: 0,
+      legs: [{
+        mode: "live",
+        status: "rejected",
+        orderId: "live-rejected-token-raw",
+        tokenId: "token-raw",
+        price: 0.98,
+        shares: 0,
+        notional: 0,
+        fee: 0,
+        estimatedPayout: 0,
+        estimatedProfit: 0,
+        raw: { code: "LIVE_ORDER_REJECTED", message: "order couldn't be fully filled" }
+      }]
+    });
+
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({
+        eventSlug: "event-raw",
+        status: "rejected",
+        legs: [
+          expect.objectContaining({
+            raw: expect.objectContaining({
+              message: "order couldn't be fully filled"
+            })
+          })
+        ]
+      })
+    ]);
+  });
+
   test("detects active event trades across tokens", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-ledger-"));
     const file = join(dir, "ledger.json");
@@ -217,6 +296,34 @@ describe("LiveLedger", () => {
     expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
       expect.objectContaining({ eventSlug: "event-1", status: "redeemed" }),
       expect.objectContaining({ eventSlug: "event-2", status: "filled" })
+    ]);
+  });
+
+  test("marks lost condition ids inactive after resolution", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-lost-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-06-23T10:00:00.000Z",
+      mode: "live",
+      status: "filled",
+      eventSlug: "event-lost",
+      marketSlug: "market-lost",
+      tokenId: "token-lost",
+      conditionId: "condition-lost",
+      outcome: "Over",
+      orderId: "order-lost",
+      price: 0.97,
+      shares: 1,
+      notional: 0.97
+    });
+
+    await ledger.markLostByConditionIds(["condition-lost"]);
+
+    expect(await ledger.hasActiveEventTrade("event-lost")).toBe(false);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ eventSlug: "event-lost", status: "lost" })
     ]);
   });
 });

@@ -202,12 +202,13 @@ function guardCases(): GuardCase[] {
       expectedMaxNotional: 20
     },
     {
-      name: "no 365 signal skips medium 0.97 fallback",
+      name: "no 365 signal buys stable 0.97 liquidity above locked floor",
       signalMode: "none",
       plan: stablePlan(0.97),
-      expectedLastStatus: "no_trade",
-      expectedPostedOrders: 0,
-      expectedDetails: "fallback floor"
+      expectedLastStatus: "filled",
+      expectedPostedOrders: 1,
+      expectedOrderPrice: 0.97,
+      expectedMaxNotional: 20
     },
     {
       name: "no 365 signal skips without pre-goal S0 cache",
