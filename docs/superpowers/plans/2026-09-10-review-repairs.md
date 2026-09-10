@@ -120,4 +120,6 @@ expect(streamedAndInMemoryOutputs).toEqual(eachOther);
 - [x] Run `npm test`, `npm run typecheck`, `git diff --check`.
 - [x] Run a finite public collector on a small explicit scope, export twice into distinct outputs and verify row counts, deterministic data, quality, canceled close and no surviving process.
 - [x] Update docs/sports-collector.md, README and a durable finding-to-regression verification matrix; correct previous unsupported completion claims.
-- [ ] Commit intentionally and fast-forward local main after final checks. No remote push or long-running deployment.
+- [x] Commit intentionally and fast-forward local main after final checks. No remote push or long-running deployment.
+
+Completed locally as `f63a7a5`. The merged main branch passed all 710 tests and TypeScript checks; public samples remain in `data/collector/review-20260911/` and `data/collector/review-20260911-final/`.
