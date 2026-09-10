@@ -9,6 +9,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "cli": "tsx src/cli.ts",
+    "collect": "tsx src/collector/cli.ts collect",
+    "collect:export": "tsx src/collector/cli.ts export",
     "paper:fixture": "tsx src/cli.ts --mode paper --match-file tests/fixtures/matches/spain-5-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json --stake 97",
     "live:status": "tsx src/cli.ts --mode status",
     "live:watch:worldcup": "tsx src/cli.ts --mode live --watch true --worldcup true --order-type FAK",

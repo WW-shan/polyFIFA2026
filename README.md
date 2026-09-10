@@ -36,6 +36,15 @@ npm test
 npm run typecheck
 ```
 
+## Public Sports Collector
+
+The standalone collector preserves public Gamma metadata, CLOB book/trade frames, Sports score frames, HTTP snapshots, connection epochs, and receipt clocks for later research. It does not use trading credentials or place orders. See `docs/sports-collector.md` for scope, quality rules, and export commands.
+
+```bash
+npm run collect -- --duration-seconds 60 --event-slugs <one-public-event-slug>
+npm run collect:export -- --run-dir data/collector/<runId>
+```
+
 ## Paper Acceptance Run
 
 The fixture command proves the full automated path: identify latest strategy -> check orderbook -> submit paper trade -> output filled result.

@@ -23,6 +23,7 @@ coverage/
 data/live-ledger.json
 data/live-sports-audit.ndjson
 data/live-depth-audit.ndjson
+data/collector/
 
 # local git worktrees
 .worktrees/
