@@ -327,6 +327,20 @@ describe("sports catalog discovery", () => {
     const recordingError = new Error("disk failure");
     await expect(discoverSportsEvents({}, { request: async () => [], onPage: () => { throw recordingError; } })).rejects.toBe(recordingError);
   });
+
+  test("audits a completed request only once when the page consumer fails", async () => {
+    const audits: Parameters<NonNullable<CatalogDependencies["onRequest"]>>[0][] = [];
+    const failure = new Error("journal unavailable");
+    await expect(discoverSportsEvents({}, {
+      request: async () => [],
+      onRequest: (request) => audits.push(request),
+      onPage: () => { throw failure; }
+    })).rejects.toBe(failure);
+
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ requestStartedAt: expect.any(String), requestEndedAt: expect.any(String), response: [] });
+    expect(audits[0]).not.toHaveProperty("error");
+  });
 });
 
 describe("single collector event lookup", () => {

@@ -35,11 +35,21 @@ export async function fetchEventStrategyMarkets(eventSlug: string): Promise<Stra
 
 export async function fetchEventMatchState(eventSlug: string): Promise<MatchState> {
   const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
-  const payload = extractNextInitialState(html);
-  const state = decodeInitialStatePayload(payload);
-  const match = findMatchState(state, eventSlug);
-  if (!match) throw new Error(`MATCH_STATE_NOT_FOUND: ${eventSlug}`);
-  return match;
+  let legacyError: unknown;
+  try {
+    const state = decodeInitialStatePayload(extractNextInitialState(html));
+    const match = findMatchState(state, eventSlug);
+    if (match) return match;
+  } catch (error) {
+    legacyError = error;
+  }
+  const flightStates = extractNextFlightCompressedStates(html);
+  for (const state of flightStates) {
+    const match = findMatchState(state, eventSlug);
+    if (match) return match;
+  }
+  if (flightStates.length === 0 && legacyError) throw legacyError;
+  throw new Error(`MATCH_STATE_NOT_FOUND: ${eventSlug}`);
 }
 
 async function fetchGammaEventStrategyMarkets(eventSlug: string): Promise<StrategyMarket[]> {
@@ -111,8 +121,9 @@ export function extractNextFlightCompressedStates(html: string): unknown[] {
 export function findSpreadMarkets(state: unknown, eventSlug?: string): SpreadMarket[] {
   const markets: SpreadMarket[] = [];
 
-  walk(state, (value) => {
-    const market = normalizeSpreadMarket(value, eventSlug);
+  walkMarketRecords(state, isIsolatedMarketInput(state) ? eventSlug : undefined, (value, owner) => {
+    if (eventSlug && owner !== eventSlug) return;
+    const market = normalizeSpreadMarket(value, owner);
     if (market) markets.push(market);
   });
 
@@ -122,8 +133,9 @@ export function findSpreadMarkets(state: unknown, eventSlug?: string): SpreadMar
 export function findStrategyMarkets(state: unknown, eventSlug?: string): StrategyMarket[] {
   const markets: StrategyMarket[] = [];
 
-  walk(state, (value) => {
-    const market = normalizeStrategyMarket(value, eventSlug);
+  walkMarketRecords(state, isIsolatedMarketInput(state) ? eventSlug : undefined, (value, owner) => {
+    if (eventSlug && owner !== eventSlug) return;
+    const market = normalizeStrategyMarket(value, owner);
     if (market) markets.push(market);
   });
 
@@ -173,7 +185,7 @@ export function normalizeStrategyMarket(value: unknown, eventSlug?: string): Str
   const conditionId = stringValue(value.conditionId ?? value.condition_id);
   const outcomes = stringArray(value.outcomes);
   const clobTokenIds = stringArray(value.clobTokenIds ?? value.clob_token_ids ?? value.tokenIds);
-  const resolvedEventSlug = stringValue(value.eventSlug ?? value.event_slug ?? value.gameSlug) ?? eventSlug;
+  const resolvedEventSlug = mergeEventOwners(eventSlug, marketEventOwner(value));
 
   if (!question || !marketSlug || !conditionId || !resolvedEventSlug) return null;
   if (eventSlug && resolvedEventSlug !== eventSlug) return null;
@@ -216,7 +228,7 @@ export function normalizeSpreadMarket(value: unknown, eventSlug?: string): Sprea
   const conditionId = stringValue(value.conditionId ?? value.condition_id);
   const outcomes = stringArray(value.outcomes);
   const clobTokenIds = stringArray(value.clobTokenIds ?? value.clob_token_ids ?? value.tokenIds);
-  const resolvedEventSlug = stringValue(value.eventSlug ?? value.event_slug ?? value.gameSlug) ?? eventSlug;
+  const resolvedEventSlug = mergeEventOwners(eventSlug, marketEventOwner(value));
   const parsedLine = numberValue(value.line ?? value.spreadLine ?? value.spread) ?? (question ? parseSpreadLine(question) : null);
 
   if (!question || !marketSlug || !conditionId || !resolvedEventSlug || parsedLine === null) return null;
@@ -444,6 +456,113 @@ function decodeBase64Url(value: string): Buffer {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
   const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
   return Buffer.from(normalized + padding, "base64");
+}
+
+// Undefined is unowned; null is conflicting evidence and must never fall back to the request.
+type EventOwner = string | undefined | null;
+
+function mergeEventOwners(...owners: EventOwner[]): EventOwner {
+  let resolved: EventOwner;
+  for (const owner of owners) {
+    if (owner === null || (owner && resolved && owner !== resolved)) return null;
+    if (owner) resolved = owner;
+  }
+  return resolved;
+}
+
+function explicitEventOwner(value: Record<string, unknown>): EventOwner {
+  return mergeEventOwners(
+    stringValue(value.eventSlug), stringValue(value.event_slug), stringValue(value.gameSlug),
+    isRecord(value.event) ? eventRecordOwner(value.event) : stringValue(value.event)
+  );
+}
+
+function eventRecordOwner(value: Record<string, unknown>): EventOwner {
+  return mergeEventOwners(explicitEventOwner(value), stringValue(value.slug), stringValue(value.ticker));
+}
+
+function marketEventOwner(value: Record<string, unknown>): EventOwner {
+  const owners: EventOwner[] = [explicitEventOwner(value)];
+  if (Array.isArray(value.events)) {
+    for (const event of value.events) {
+      owners.push(isRecord(event) ? eventRecordOwner(event) : stringValue(event));
+    }
+  } else if (isRecord(value.events)) {
+    for (const [key, event] of Object.entries(value.events)) {
+      owners.push(eventMapKeyOwner(key));
+      if (isRecord(event)) owners.push(eventRecordOwner(event));
+    }
+  }
+  return mergeEventOwners(...owners);
+}
+
+function eventMapKeyOwner(key: string): string | undefined {
+  // Gamma can also key records by numeric IDs; those are not event slugs.
+  return /^\d+$/.test(key) ? undefined : stringValue(key);
+}
+
+function queryEventOwner(queryKey: unknown): EventOwner {
+  if (!Array.isArray(queryKey)) return undefined;
+  const eventIndex = queryKey.findIndex((part) => typeof part === "string" && /^(?:events?|eventBySlug|event-by-slug)$/i.test(part));
+  if (eventIndex < 0) return undefined;
+  const owners: EventOwner[] = [];
+  for (const part of queryKey.slice(eventIndex + 1)) {
+    if (isRecord(part)) owners.push(eventRecordOwner(part));
+  }
+  const slug = queryKey[eventIndex + 1] === "slug" ? queryKey[eventIndex + 2] : queryKey[eventIndex + 1];
+  if (typeof slug === "string" && !/^(?:all|live|list|slug|\d+)$/i.test(slug)) owners.push(slug);
+  return mergeEventOwners(...owners);
+}
+
+function isMarketRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && !Array.isArray(value)
+    && (value.conditionId !== undefined || value.condition_id !== undefined);
+}
+
+function isIsolatedMarketInput(value: unknown): boolean {
+  if (isMarketRecord(value)) return true;
+  if (Array.isArray(value)) return value.every(isMarketRecord);
+  return isRecord(value) && Array.isArray(value.markets) && value.markets.every(isMarketRecord)
+    && Object.entries(value).every(([key, item]) => key === "markets" || !isRecord(item));
+}
+
+function walkMarketRecords(
+  value: unknown,
+  inheritedOwner: EventOwner,
+  visit: (value: Record<string, unknown>, owner: string | undefined) => void
+): void {
+  if (Array.isArray(value)) {
+    for (const item of value) walkMarketRecords(item, inheritedOwner, visit);
+    return;
+  }
+  if (!isRecord(value)) return;
+
+  const market = isMarketRecord(value);
+  const owner = mergeEventOwners(
+    inheritedOwner,
+    market ? marketEventOwner(value) : eventRecordOwner(value),
+    queryEventOwner(value.queryKey)
+  );
+  if (market) {
+    if (owner !== null) visit(value, owner);
+    return;
+  }
+
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "events" && Array.isArray(item)) {
+      // An event collection starts independent event scopes, even inside page/series metadata.
+      walkMarketRecords(item, undefined, visit);
+    } else if (key === "events" && isRecord(item)) {
+      for (const [eventKey, event] of Object.entries(item)) {
+        walkMarketRecords(event, eventMapKeyOwner(eventKey), visit);
+      }
+    } else if (key === "queries" && isRecord(item)) {
+      walkMarketRecords(item, undefined, visit);
+    } else {
+      // Wrappers preserve both known ownership and conflicts until a new event boundary.
+      walkMarketRecords(item, owner, visit);
+    }
+  }
 }
 
 function walk(value: unknown, visit: (value: unknown) => void): void {

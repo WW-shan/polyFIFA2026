@@ -1,4 +1,5 @@
-import { ProxyAgent } from "undici";
+import type { Dispatcher } from "undici";
+import { createOwnedTransport } from "./owned-transport.js";
 
 export interface HttpOptions {
   timeoutMs?: number;
@@ -6,14 +7,11 @@ export interface HttpOptions {
   headers?: Record<string, string>;
   method?: string;
   body?: string;
+  signal?: AbortSignal;
 }
 
-let cachedProxyUrl: string | undefined;
-let cachedDispatcher: ProxyAgent | undefined;
-
 export async function fetchJson<T = unknown>(url: string, options: HttpOptions = {}): Promise<T> {
-  const response = await fetchWithTimeout(url, options);
-  return (await response.json()) as T;
+  return fetchWithTimeout(url, options, async (response) => (await response.json()) as T);
 }
 
 export async function postJson<T = unknown>(url: string, body: string, options: HttpOptions = {}): Promise<T> {
@@ -25,40 +23,50 @@ export async function postJson<T = unknown>(url: string, body: string, options: 
 }
 
 export async function fetchText(url: string, options: HttpOptions = {}): Promise<string> {
-  const response = await fetchWithTimeout(url, options);
-  return response.text();
+  return fetchWithTimeout(url, options, (response) => response.text());
 }
 
-async function fetchWithTimeout(url: string, options: HttpOptions): Promise<Response> {
+async function fetchWithTimeout<T>(url: string, options: HttpOptions, readBody: (response: Response) => Promise<T>): Promise<T> {
+  options.signal?.throwIfAborted();
+  const transport = createOwnedTransport({ proxyUrl: options.proxyUrl });
   const controller = new AbortController();
+  const destroyOnAbort = () => { void transport.destroy().catch(() => {}); };
+  controller.signal.addEventListener("abort", destroyOnAbort, { once: true });
+  const abortFromCaller = () => controller.abort(options.signal?.reason);
+  options.signal?.addEventListener("abort", abortFromCaller, { once: true });
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+  let response: Response | undefined;
+  let failed = false;
 
   try {
-    const response = await fetch(url, {
+    response = await fetch(url, {
       headers: options.headers,
       method: options.method,
       body: options.body,
       signal: controller.signal,
-      dispatcher: dispatcherFor(options.proxyUrl ?? proxyFromEnv())
-    } as RequestInit & { dispatcher?: ProxyAgent });
+      dispatcher: transport.dispatcher
+    } as RequestInit & { dispatcher: Dispatcher });
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText} for ${url}`);
     }
-    return response;
+    const result = await readBody(response);
+    controller.signal.throwIfAborted();
+    return result;
+  } catch (error) {
+    failed = true;
+    const reason: unknown = controller.signal.aborted ? controller.signal.reason : error;
+    // Abort closes a pending fetch/body; cancel also releases unconsumed error responses.
+    controller.abort(reason);
+    if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
+    throw reason;
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromCaller);
+    controller.signal.removeEventListener("abort", destroyOnAbort);
+    // Successful requests also release their private pool. Preserve the
+    // original caller/timeout error if cleanup reports a secondary failure.
+    if (failed) await transport.destroy().catch(() => {});
+    else await transport.destroy();
   }
-}
-
-function proxyFromEnv(): string | undefined {
-  return process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? process.env.https_proxy ?? process.env.http_proxy;
-}
-
-function dispatcherFor(proxyUrl: string | undefined): ProxyAgent | undefined {
-  if (!proxyUrl) return undefined;
-  if (cachedDispatcher && cachedProxyUrl === proxyUrl) return cachedDispatcher;
-  cachedProxyUrl = proxyUrl;
-  cachedDispatcher = new ProxyAgent(proxyUrl);
-  return cachedDispatcher;
 }

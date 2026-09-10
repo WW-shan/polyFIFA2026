@@ -1,471 +1,383 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { listJournalSegments } from "./journal.js";
-import type { CollectorMarket, JournalRecord } from "./types.js";
-
-export type ReplayJournalRecord = JournalRecord;
-
-export interface ReplaySequenceGap {
-  expected: number;
-  actual: number;
-}
-
-export interface ReplayQuality {
-  sequenceGaps: ReplaySequenceGap[];
-  incompleteFinalLines: number;
-  malformedLines: number;
-  invalidBookUpdates: number;
-  connectionInvalidations: number;
-  unknownFrames: number;
-  outOfOrderMessages: number;
-}
-
-export interface ReplayLevel {
-  price: string;
-  size: string;
-}
-
-export interface ReplayMarketMapping {
-  tokenId: string;
-  eventId?: string;
-  eventSlug?: string;
-  gameId?: string;
-  marketId?: string;
-  marketSlug?: string;
-  conditionId?: string;
-  outcome?: string;
-  question?: string;
-}
-
-export interface ReplaySportsRow {
-  sequence: number;
-  receivedAt: string;
-  receivedAtMs: number;
-  data: unknown;
-  keys: string[];
-}
-
-export interface ReplayTradeRow {
-  sequence: number;
-  receivedAt: string;
-  receivedAtMs: number;
-  connectionId?: string;
-  tokenId?: string;
-  price?: string;
-  size?: string;
-  side?: string;
-  data: Record<string, unknown>;
-}
-
-export interface ReplayQuoteRow {
-  sequence: number;
-  receivedAt: string;
-  receivedAtMs: number;
-  connectionId: string;
-  tokenId: string;
-  bids: ReplayLevel[];
-  asks: ReplayLevel[];
-  marketId?: string;
-  marketSlug?: string;
-  eventId?: string;
-  eventSlug?: string;
-  gameId?: string;
-  outcome?: string;
-  sportsSequence?: number;
-  sportsReceivedAt?: string;
-  sportsAgeMs?: number;
-}
-
-export interface ReplayResult {
-  quotes: ReplayQuoteRow[];
-  trades: ReplayTradeRow[];
-  sports: ReplaySportsRow[];
-  markets: ReplayMarketMapping[];
-  quality: ReplayQuality;
-}
-
-export interface JournalReadResult extends ReplayResult {
-  records: ReplayJournalRecord[];
-  segments: string[];
-}
+import { assertJournalRecord, scanJournal } from "./journal-reader.js";
+import { arrayValue, assetId, decimal, frameType, heartbeat, identifier, level, levelMap, objectValue, parsedJson, sortedLevels, textValue, timestamp } from "./replay-values.js";
+import { emptyReplayQuality, type JournalReadResult, type ReplayBatch, type ReplayJournalRecord, type ReplayLevel, type ReplayMarketMapping, type ReplayOptions, type ReplayQuoteRow, type ReplayResult, type ReplaySportsRow, type ReplayTradeRow } from "./replay-types.js";
+export type * from "./replay-types.js";
 
 interface BookState {
   connectionId: string;
   tokenId: string;
-  bids: Map<string, string>;
-  asks: Map<string, string>;
+  bids: Map<string, ReplayLevel>;
+  asks: Map<string, ReplayLevel>;
   valid: boolean;
+  timestamp?: bigint;
 }
-
-interface SportsState extends ReplaySportsRow {
-  keys: string[];
+interface SportsState {
+  row: ReplaySportsRow;
+  monotonicNs: bigint;
+  identities: Map<string, string>;
 }
+const knownNonDepthEvents = new Set(["tick_size_change", "best_bid_ask", "new_market"]);
 
-function emptyQuality(): ReplayQuality {
-  return {
-    sequenceGaps: [],
-    incompleteFinalLines: 0,
-    malformedLines: 0,
-    invalidBookUpdates: 0,
-    connectionInvalidations: 0,
-    unknownFrames: 0,
-    outOfOrderMessages: 0
-  };
+function identities(value: Record<string, unknown>): Map<string, string> {
+  const keys = new Map<string, string>();
+  for (const [key, aliases] of [
+    ["event", ["eventSlug", "slug"]],
+    ["game", ["gameId", "game_id"]],
+    ["sportradar", ["sportradarGameId", "sportradar_game_id"]]
+  ] as const) {
+    for (const alias of aliases) {
+      const id = identifier(value[alias]);
+      if (id !== undefined) { keys.set(key, id); break; }
+    }
+  }
+  return keys;
 }
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+function mappingIdentities(mapping: ReplayMarketMapping): Map<string, string> {
+  return identities({ eventSlug: mapping.eventSlug, gameId: mapping.gameId, sportradarGameId: mapping.sportradarGameId });
 }
-
-function stringValue(value: unknown): string | undefined {
-  if (typeof value === "string" && value.length > 0) return value;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  return undefined;
+function copyField(target: Record<string, unknown>, key: string, value: unknown): void {
+  const id = identifier(value);
+  if (id !== undefined) target[key] = id;
 }
-
-function arrayValue(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function level(value: unknown): ReplayLevel | null {
-  const raw = objectValue(value);
-  if (!raw) return null;
-  const price = stringValue(raw.price);
-  const size = stringValue(raw.size);
-  if (price === undefined || size === undefined) return null;
-  return { price, size };
-}
-
-function isZero(value: string): boolean {
-  const number = Number(value);
-  return Number.isFinite(number) && number === 0;
-}
-
-function sortedLevels(levels: Map<string, string>, direction: "asc" | "desc"): ReplayLevel[] {
-  return [...levels.entries()]
-    .map(([price, size]) => ({ price, size }))
-    .sort((left, right) => {
-      const delta = Number(left.price) - Number(right.price);
-      return direction === "asc" ? delta : -delta;
-    });
-}
-
-function tokenId(raw: Record<string, unknown>): string | undefined {
-  return stringValue(raw.asset_id ?? raw.assetId ?? raw.token_id ?? raw.tokenId);
-}
-
-function connectionTokenKey(connectionId: string, assetId: string): string {
-  return `${connectionId}\u0000${assetId}`;
-}
-
-function parseFrames(data: unknown): Record<string, unknown>[] {
-  const parsed = typeof data === "string" ? (() => {
-    try { return JSON.parse(data) as unknown; } catch { return null; }
-  })() : data;
-  if (Array.isArray(parsed)) return parsed.map(objectValue).filter((value): value is Record<string, unknown> => value !== null);
-  const object = objectValue(parsed);
-  return object ? [object] : [];
-}
-
-function eventType(frame: Record<string, unknown>): string {
-  return String(frame.event_type ?? frame.eventType ?? frame.type ?? "").toLowerCase();
-}
-
-function applyMetadata(data: unknown, markets: Map<string, ReplayMarketMapping>): void {
-  const raw = objectValue(data);
-  const normalized = objectValue(raw?.normalized) ?? raw;
-  if (!normalized) return;
-  const eventId = stringValue(normalized.eventId ?? normalized.id);
-  const eventSlug = stringValue(normalized.eventSlug ?? normalized.slug);
-  const gameId = stringValue(normalized.gameId ?? objectValue(normalized.eventMetadata)?.gameId);
-  for (const marketValue of arrayValue(normalized.markets)) {
-    const market = objectValue(marketValue);
+function metadataMappings(data: unknown): ReplayMarketMapping[] {
+  const wrapper = objectValue(data);
+  const event = objectValue(wrapper?.normalized) ?? objectValue(wrapper?.event) ?? wrapper;
+  if (!event) return [];
+  const rawEvent = objectValue(event.raw) ?? event;
+  const results: ReplayMarketMapping[] = [];
+  for (const item of arrayValue(event.markets)) {
+    const market = objectValue(item);
     if (!market) continue;
-    const marketId = stringValue(market.marketId ?? market.id);
-    const marketSlug = stringValue(market.marketSlug ?? market.slug);
-    const conditionId = stringValue(market.conditionId);
-    const question = stringValue(market.question);
-    const outcomes = arrayValue(market.outcomes).map(stringValue);
-    const tokenIds = arrayValue(market.tokenIds ?? market.clobTokenIds).map(stringValue);
-    for (let index = 0; index < tokenIds.length; index += 1) {
-      const token = tokenIds[index];
-      if (!token) continue;
-      const mapping: ReplayMarketMapping = { tokenId: token };
-      if (eventId !== undefined) mapping.eventId = eventId;
-      if (eventSlug !== undefined) mapping.eventSlug = eventSlug;
-      if (gameId !== undefined) mapping.gameId = gameId;
-      if (marketId !== undefined) mapping.marketId = marketId;
-      if (marketSlug !== undefined) mapping.marketSlug = marketSlug;
-      if (conditionId !== undefined) mapping.conditionId = conditionId;
-      if (question !== undefined) mapping.question = question;
-      const outcome = outcomes[index];
-      if (outcome !== undefined) mapping.outcome = outcome;
-      markets.set(token, mapping);
+    const raw = objectValue(market.raw) ?? market;
+    const tokens = arrayValue(market.tokenIds ?? market.clobTokenIds).map(identifier);
+    const outcomes = arrayValue(market.outcomes).map(textValue);
+    if (tokens.length === 0 || tokens.length !== outcomes.length || tokens.some(token => token === undefined)) continue;
+    for (let index = 0; index < tokens.length; index += 1) {
+      const mapping: Record<string, unknown> = { tokenId: tokens[index]!, data: raw };
+      copyField(mapping, "eventId", event.eventId ?? event.id);
+      copyField(mapping, "eventSlug", event.eventSlug ?? event.slug);
+      copyField(mapping, "gameId", raw.gameId ?? event.gameId ?? rawEvent.gameId ?? objectValue(rawEvent.eventMetadata)?.gameId);
+      copyField(mapping, "sportradarGameId", rawEvent.sportradarGameId ?? objectValue(rawEvent.eventMetadata)?.sportradarGameId);
+      copyField(mapping, "marketId", market.marketId ?? market.id);
+      copyField(mapping, "marketSlug", market.marketSlug ?? market.slug);
+      copyField(mapping, "conditionId", market.conditionId);
+      copyField(mapping, "question", market.question);
+      copyField(mapping, "outcome", outcomes[index]);
+      results.push(mapping as unknown as ReplayMarketMapping);
     }
   }
+  return results;
 }
 
-function dataKeys(data: unknown): string[] {
-  const raw = objectValue(data);
-  if (!raw) return [];
-  const keys = new Set<string>();
-  for (const field of ["eventSlug", "slug", "gameId", "game_id", "sportradarGameId", "sportradar_game_id"]) {
-    const value = stringValue(raw[field]);
-    if (value !== undefined) keys.add(`${field}:${value}`);
+/** Mutable current state only; each batch belongs to one received frame and can be written immediately. */
+export class JournalReplay {
+  readonly quality = emptyReplayQuality();
+  private readonly books = new Map<string, Map<string, BookState>>();
+  private readonly connections = new Map<string, boolean>();
+  private readonly subscriptions = new Map<string, Set<string>>();
+  private readonly mappings = new Map<string, ReplayMarketMapping>();
+  private readonly sportsByKey = new Map<string, SportsState>();
+  private previousSequence = 0;
+  private previousMonotonic = 0n;
+  private runId: string | undefined;
+  private readonly staleAfterMs: number;
+
+  constructor(options: ReplayOptions = {}) {
+    this.staleAfterMs = options.sportsStaleAfterMs ?? 60_000;
+    if (!Number.isFinite(this.staleAfterMs) || this.staleAfterMs < 0) throw new Error("REPLAY_OPTIONS_INVALID: sportsStaleAfterMs");
   }
-  return [...keys];
-}
+  get markets(): ReplayMarketMapping[] { return [...this.mappings.values()]; }
 
-function parseSports(record: ReplayJournalRecord): SportsState {
-  const data = typeof record.data === "string" ? (() => {
-    try { return JSON.parse(record.data) as unknown; } catch { return record.data; }
-  })() : record.data;
-  return {
-    sequence: record.sequence,
-    receivedAt: record.receivedAt,
-    receivedAtMs: record.receivedAtMs,
-    data,
-    keys: dataKeys(data)
-  };
-}
-
-function attachContext(quote: ReplayQuoteRow, mapping: ReplayMarketMapping | undefined, sports: SportsState | undefined): void {
-  if (mapping) {
-    if (mapping.marketId !== undefined) quote.marketId = mapping.marketId;
-    if (mapping.marketSlug !== undefined) quote.marketSlug = mapping.marketSlug;
-    if (mapping.eventId !== undefined) quote.eventId = mapping.eventId;
-    if (mapping.eventSlug !== undefined) quote.eventSlug = mapping.eventSlug;
-    if (mapping.gameId !== undefined) quote.gameId = mapping.gameId;
-    if (mapping.outcome !== undefined) quote.outcome = mapping.outcome;
-  }
-  if (sports) {
-    quote.sportsSequence = sports.sequence;
-    quote.sportsReceivedAt = sports.receivedAt;
-    quote.sportsAgeMs = Math.max(0, quote.receivedAtMs - sports.receivedAtMs);
-  }
-}
-
-function relatedSports(mapping: ReplayMarketMapping | undefined, latest: SportsState | undefined, byKey: Map<string, SportsState>): SportsState | undefined {
-  if (mapping) {
-    for (const [field, value] of [["eventSlug", mapping.eventSlug], ["gameId", mapping.gameId]] as const) {
-      if (value !== undefined) {
-        const match = byKey.get(`${field}:${value}`);
-        if (match) return match;
+  invalidate(connectionId?: string): void {
+    let changed = false;
+    for (const [connection, states] of this.books) {
+      if (connectionId !== undefined && connectionId !== connection) continue;
+      for (const state of states.values()) {
+        if (state.valid) changed = true;
+        state.valid = false;
       }
     }
+    if (changed) this.quality.connectionInvalidations += 1;
+    if (connectionId === undefined) this.sportsByKey.clear();
   }
-  return latest;
-}
 
-function cloneStateQuote(record: ReplayJournalRecord, state: BookState, mapping: ReplayMarketMapping | undefined, sports: SportsState | undefined): ReplayQuoteRow {
-  const quote: ReplayQuoteRow = {
-    sequence: record.sequence,
-    receivedAt: record.receivedAt,
-    receivedAtMs: record.receivedAtMs,
-    connectionId: state.connectionId,
-    tokenId: state.tokenId,
-    bids: sortedLevels(state.bids, "desc"),
-    asks: sortedLevels(state.asks, "asc")
-  };
-  attachContext(quote, mapping, sports);
-  return quote;
-}
-
-function invalidateAll(states: Map<string, BookState>, quality: ReplayQuality): void {
-  for (const state of states.values()) state.valid = false;
-  quality.connectionInvalidations += 1;
-}
-
-function invalidateConnection(states: Map<string, BookState>, connectionId: string, quality: ReplayQuality): void {
-  let invalidated = false;
-  for (const state of states.values()) {
-    if (state.connectionId === connectionId) {
-      state.valid = false;
-      invalidated = true;
-    }
+  private invalidateToken(connection: string, token?: string): void {
+    if (!token) { this.invalidate(connection); return; }
+    const state = this.books.get(connection)?.get(token);
+    if (state?.valid) this.quality.connectionInvalidations += 1;
+    if (state) state.valid = false;
   }
-  if (invalidated) quality.connectionInvalidations += 1;
-}
 
-export function replayRecords(records: readonly ReplayJournalRecord[]): ReplayResult {
-  const quality = emptyQuality();
-  const quotes: ReplayQuoteRow[] = [];
-  const trades: ReplayTradeRow[] = [];
-  const sports: ReplaySportsRow[] = [];
-  const marketMap = new Map<string, ReplayMarketMapping>();
-  const states = new Map<string, BookState>();
-  const activeConnections = new Map<string, boolean>();
-  const latestSportsByKey = new Map<string, SportsState>();
-  let latestSports: SportsState | undefined;
-  let previousSequence = 0;
-
-  for (const record of records) {
-    if (record.sequence <= previousSequence) {
-      quality.outOfOrderMessages += 1;
-      throw new Error(`REPLAY_SEQUENCE_ORDER: ${record.sequence} after ${previousSequence}`);
+  accept(record: ReplayJournalRecord): ReplayBatch {
+    const combined: ReplayBatch = { quotes: [], trades: [], sports: [] };
+    for (const batch of this.replay(record)) {
+      combined.quotes.push(...batch.quotes);
+      combined.trades.push(...batch.trades);
+      combined.sports.push(...batch.sports);
     }
-    if (record.sequence > previousSequence + 1) {
-      quality.sequenceGaps.push({ expected: previousSequence + 1, actual: record.sequence });
-      invalidateAll(states, quality);
-    }
-    previousSequence = record.sequence;
+    return combined;
+  }
 
+  /** Consume each array element before reconstructing the next full-depth output. */
+  *replay(record: ReplayJournalRecord): Generator<ReplayBatch> {
+    assertJournalRecord(record);
+    if (this.runId !== undefined && this.runId !== record.runId) throw new Error("REPLAY_RUN_MISMATCH");
+    this.runId = record.runId;
+    if (record.sequence <= this.previousSequence) throw new Error("REPLAY_SEQUENCE_ORDER");
+    const monotonic = BigInt(record.monotonicNs);
+    if (monotonic < this.previousMonotonic) throw new Error("REPLAY_MONOTONIC_ORDER");
+    if (record.sequence !== this.previousSequence + 1) {
+      this.quality.sequenceGaps.push({ expected: this.previousSequence + 1, actual: record.sequence });
+      this.invalidate();
+    }
+    this.previousSequence = record.sequence;
+    this.previousMonotonic = monotonic;
     if (record.source === "gamma" && record.kind === "event_metadata") {
-      applyMetadata(record.data, marketMap);
-      continue;
+      for (const mapping of metadataMappings(record.data)) this.mappings.set(mapping.tokenId, mapping);
+    } else if (record.source === "collector") {
+      this.collectorRecord(record);
+    } else if (record.kind === "ws_message" && record.source === "sports") {
+      yield* this.sportsRecord(record);
+    } else if (record.kind === "ws_message" && record.source === "clob") {
+      yield* this.clobRecord(record);
     }
-    if (record.source === "sports" && record.kind === "ws_message") {
-      const row = parseSports(record);
-      sports.push(row);
-      latestSports = row;
-      for (const key of row.keys) latestSportsByKey.set(key, row);
-      continue;
-    }
-    if (record.source === "collector" && record.kind === "connection_open" && record.connectionId) {
-      activeConnections.set(record.connectionId, true);
-      continue;
-    }
-    if (record.source === "collector" && record.kind === "connection_close" && record.connectionId) {
-      activeConnections.set(record.connectionId, false);
-      invalidateConnection(states, record.connectionId, quality);
-      continue;
-    }
-    if (record.source !== "clob" || record.kind !== "ws_message" || !record.connectionId) continue;
+  }
 
-    const frames = parseFrames(record.data);
-    if (frames.length === 0) {
-      quality.unknownFrames += 1;
-      continue;
+  private collectorRecord(record: ReplayJournalRecord): void {
+    const connection = record.connectionId;
+    if (!connection) return;
+    if (record.kind === "connection_open") {
+      this.invalidate(connection);
+      this.books.delete(connection);
+      this.connections.set(connection, true);
+    } else if (["connection_close", "connection_timeout", "heartbeat_timeout", "connection_gap"].includes(record.kind)) {
+      this.invalidate(connection);
+      this.connections.set(connection, false);
+      this.books.delete(connection);
+      this.subscriptions.delete(connection);
+    } else if (record.kind === "subscription") {
+      const data = objectValue(record.data);
+      const ids = arrayValue(data?.assets_ids).map(identifier).filter((value): value is string => value !== undefined);
+      const tokens = this.subscriptions.get(connection) ?? new Set<string>();
+      if (data?.type === "market") {
+        this.invalidate(connection);
+        tokens.clear();
+      }
+      for (const id of ids) {
+        this.books.get(connection)?.delete(id);
+        if (data?.operation === "unsubscribe") tokens.delete(id);
+        else tokens.add(id);
+      }
+      this.subscriptions.set(connection, tokens);
     }
-    for (const frame of frames) {
-      const type = eventType(frame);
-      const asset = tokenId(frame);
-      if (type === "book" || (asset !== undefined && (Array.isArray(frame.bids) || Array.isArray(frame.asks)))) {
-        if (!asset) {
-          quality.invalidBookUpdates += 1;
-          continue;
-        }
-        const state: BookState = {
-          connectionId: record.connectionId,
-          tokenId: asset,
-          bids: new Map(),
-          asks: new Map(),
-          valid: true
-        };
-        for (const item of arrayValue(frame.bids)) {
-          const parsed = level(item);
-          if (parsed && !isZero(parsed.size)) state.bids.set(parsed.price, parsed.size);
-        }
-        for (const item of arrayValue(frame.asks)) {
-          const parsed = level(item);
-          if (parsed && !isZero(parsed.size)) state.asks.set(parsed.price, parsed.size);
-        }
-        states.set(connectionTokenKey(record.connectionId, asset), state);
-        activeConnections.set(record.connectionId, true);
-        quotes.push(cloneStateQuote(record, state, marketMap.get(asset), relatedSports(marketMap.get(asset), latestSports, latestSportsByKey)));
-        continue;
-      }
-      if (type === "price_change" || Array.isArray(frame.price_changes) || Array.isArray(frame.priceChanges)) {
-        const changes = arrayValue(frame.price_changes ?? frame.priceChanges);
-        const changedStates = new Set<BookState>();
-        for (const changeValue of changes) {
-          const change = objectValue(changeValue);
-          const changedToken = change ? tokenId(change) : undefined;
-          const price = change ? stringValue(change.price) : undefined;
-          const size = change ? stringValue(change.size) : undefined;
-          const side = change ? String(change.side ?? "").toUpperCase() : "";
-          const state = changedToken ? states.get(connectionTokenKey(record.connectionId, changedToken)) : undefined;
-          if (!state || !state.valid || activeConnections.get(record.connectionId) === false || !price || size === undefined || (side !== "BUY" && side !== "SELL" && side !== "BID" && side !== "ASK")) {
-            quality.invalidBookUpdates += 1;
-            continue;
-          }
-          const target = side === "BUY" || side === "BID" ? state.bids : state.asks;
-          if (isZero(size)) target.delete(price);
-          else target.set(price, size);
-          changedStates.add(state);
-        }
-        for (const state of changedStates) {
-          quotes.push(cloneStateQuote(record, state, marketMap.get(state.tokenId), relatedSports(marketMap.get(state.tokenId), latestSports, latestSportsByKey)));
-        }
-        continue;
-      }
-      if (type === "last_trade_price" || type === "trade" || type === "public_trade" || type === "trades") {
+  }
+
+  private *sportsRecord(record: ReplayJournalRecord): Generator<ReplayBatch> {
+    const parsed = parsedJson(record.data);
+    const frames = Array.isArray(parsed) ? parsed : [parsed ?? record.data];
+    for (const [index, data] of frames.entries()) {
+      const raw = objectValue(data);
+      const keys = raw ? identities(raw) : new Map<string, string>();
+      const row: ReplaySportsRow = {
+        sequence: record.sequence, receivedAt: record.receivedAt, receivedAtMs: record.receivedAtMs,
+        frameIndex: index, data, keys: [...keys].map(([key, id]) => key + ":" + id),
+        ...(record.connectionId ? { connectionId: record.connectionId } : {})
+      };
+      yield { quotes: [], trades: [], sports: [row] };
+      const hasScoreOrClock = raw && ["score", "homeScore", "awayScore", "elapsed", "clock", "gameTimeDisplay", "period"].some(key => raw[key] !== undefined);
+      if (heartbeat(data) || !hasScoreOrClock || this.connections.get(record.connectionId ?? "") === false) continue;
+      const state: SportsState = { row, monotonicNs: BigInt(record.monotonicNs), identities: keys };
+      for (const [key, id] of keys) this.sportsByKey.set(key + ":" + id, state);
+    }
+  }
+
+  private matchingSports(mapping: ReplayMarketMapping | undefined): SportsState | undefined {
+    if (!mapping) return undefined;
+    const expected = mappingIdentities(mapping);
+    let latest: SportsState | undefined;
+    for (const [key, id] of expected) {
+      const state = this.sportsByKey.get(key + ":" + id);
+      if (!state) continue;
+      if ([...expected].some(([field, value]) => state.identities.has(field) && state.identities.get(field) !== value)) continue;
+      if (!latest || state.row.sequence > latest.row.sequence || (state.row.sequence === latest.row.sequence && (state.row.frameIndex ?? 0) > (latest.row.frameIndex ?? 0))) latest = state;
+    }
+    return latest;
+  }
+
+  private quote(record: ReplayJournalRecord, state: BookState, frameIndex: number, observedTimestamp?: bigint): ReplayQuoteRow {
+    const mapping = this.mappings.get(state.tokenId);
+    const sports = this.matchingSports(mapping);
+    const row: ReplayQuoteRow = {
+      sequence: record.sequence, receivedAt: record.receivedAt, receivedAtMs: record.receivedAtMs,
+      connectionId: state.connectionId, frameIndex, tokenId: state.tokenId,
+      bids: sortedLevels(state.bids, true), asks: sortedLevels(state.asks, false),
+      sportsStatus: "missing", sportsClockStatus: "missing"
+    };
+    if (mapping) for (const key of ["eventId", "eventSlug", "gameId", "marketId", "marketSlug", "outcome"] as const) {
+      if (mapping[key] !== undefined) row[key] = mapping[key];
+    }
+    if (observedTimestamp !== undefined) row.serverTimestamp = String(observedTimestamp);
+    if (sports) {
+      row.sportsSequence = sports.row.sequence;
+      row.sportsFrameIndex = sports.row.frameIndex ?? 0;
+      row.sportsReceivedAt = sports.row.receivedAt;
+      row.sportsAgeMs = Number(BigInt(record.monotonicNs) - sports.monotonicNs) / 1_000_000;
+      row.sportsStatus = this.connections.get(sports.row.connectionId ?? "") === false ? "disconnected"
+        : row.sportsAgeMs > this.staleAfterMs ? "stale" : "matched";
+      const data = objectValue(sports.row.data);
+      if (data?.score !== undefined) row.sportsScore = data.score;
+      if (data?.period !== undefined) row.sportsPeriod = data.period;
+      const clock = data?.elapsed ?? data?.clock ?? data?.gameTimeDisplay;
+      if (clock !== undefined && clock !== null && clock !== "") { row.sportsClock = clock; row.sportsClockStatus = "present"; }
+    }
+    return row;
+  }
+
+  private *clobRecord(record: ReplayJournalRecord): Generator<ReplayBatch> {
+    const connection = record.connectionId;
+    if (!connection) { this.quality.invalidBookUpdates += 1; this.invalidate(); return; }
+    if (heartbeat(record.data)) return;
+    const parsed = parsedJson(record.data);
+    if (heartbeat(parsed)) return;
+    const rawFrames = Array.isArray(parsed) ? parsed : [parsed];
+    if (rawFrames.some(frame => !objectValue(frame))) {
+      this.quality.unknownFrames += 1;
+      this.invalidate(connection);
+      return;
+    }
+    for (const [index, item] of rawFrames.entries()) {
+      const batch: ReplayBatch = { quotes: [], trades: [], sports: [] };
+      const frame = objectValue(item)!;
+      const type = frameType(frame);
+      if (heartbeat(frame) || knownNonDepthEvents.has(type)) continue;
+      if (type === "book" || (!type && frame.bids !== undefined && frame.asks !== undefined)) {
+        this.bookFrame(record, frame, batch, index);
+      } else if (type === "price_change") {
+        this.changeFrame(record, frame, batch, index);
+      } else if (["last_trade_price", "trade", "public_trade"].includes(type)) {
+        const price = decimal(frame.price, true);
+        const size = decimal(frame.size ?? frame.amount);
+        const tokenId = assetId(frame);
+        if (!tokenId || !price || !size) { this.quality.unknownFrames += 1; continue; }
         const trade: ReplayTradeRow = {
-          sequence: record.sequence,
-          receivedAt: record.receivedAt,
-          receivedAtMs: record.receivedAtMs,
-          data: frame
+          sequence: record.sequence, receivedAt: record.receivedAt, receivedAtMs: record.receivedAtMs,
+          connectionId: connection, frameIndex: index, tokenId, price: price.raw, size: size.raw, data: frame
         };
-        const id = tokenId(frame);
-        const price = stringValue(frame.price);
-        const size = stringValue(frame.size ?? frame.amount);
-        const side = stringValue(frame.side);
-        if (id !== undefined) trade.tokenId = id;
-        if (price !== undefined) trade.price = price;
-        if (size !== undefined) trade.size = size;
-        if (side !== undefined) trade.side = side;
-        trade.connectionId = record.connectionId;
-        trades.push(trade);
-        continue;
+        if (textValue(frame.side)) trade.side = textValue(frame.side)!;
+        batch.trades.push(trade);
+      } else {
+        this.quality.unknownFrames += 1;
+        this.invalidateToken(connection, assetId(frame));
       }
-      quality.unknownFrames += 1;
+      if (batch.quotes.length || batch.trades.length) yield batch;
     }
   }
 
-  return { quotes, trades, sports, markets: [...marketMap.values()], quality };
+  private allowed(connection: string, token: string): boolean {
+    return this.connections.get(connection) !== false && (!this.subscriptions.has(connection) || this.subscriptions.get(connection)!.has(token));
+  }
+
+  private bookFrame(record: ReplayJournalRecord, frame: Record<string, unknown>, batch: ReplayBatch, index: number): void {
+    const connection = record.connectionId!;
+    const token = assetId(frame);
+    const bids = levelMap(frame.bids);
+    const asks = levelMap(frame.asks);
+    const sourceTime = timestamp(frame.timestamp);
+    if (!token || !bids || !asks || !this.allowed(connection, token) || (frame.timestamp !== undefined && sourceTime === undefined)) {
+      this.quality.invalidBookUpdates += 1; this.invalidateToken(connection, token); return;
+    }
+    const states = this.books.get(connection) ?? new Map<string, BookState>();
+    const previous = states.get(token);
+    if (previous?.timestamp !== undefined && sourceTime !== undefined && sourceTime < previous.timestamp) {
+      this.quality.outOfOrderMessages += 1; this.invalidateToken(connection, token); return;
+    }
+    const state: BookState = { connectionId: connection, tokenId: token, bids, asks, valid: true };
+    const watermark = sourceTime ?? previous?.timestamp;
+    if (watermark !== undefined) state.timestamp = watermark;
+    states.set(token, state);
+    this.books.set(connection, states);
+    batch.quotes.push(this.quote(record, state, index, sourceTime));
+  }
+
+  private changeFrame(record: ReplayJournalRecord, frame: Record<string, unknown>, batch: ReplayBatch, index: number): void {
+    const connection = record.connectionId!;
+    const changes = frame.price_changes ?? frame.priceChanges;
+    if (!Array.isArray(changes)) { this.quality.invalidBookUpdates += 1; this.invalidate(connection); return; }
+    const groups = new Map<string, Record<string, unknown>[]>();
+    for (const item of changes) {
+      const change = objectValue(item);
+      const token = change ? assetId(change) : undefined;
+      if (!change || !token) { this.quality.invalidBookUpdates += 1; this.invalidate(connection); return; }
+      const group = groups.get(token) ?? [];
+      group.push(change);
+      groups.set(token, group);
+    }
+    for (const [token, group] of groups) {
+      this.tokenChanges(record, frame, token, group, batch, index);
+    }
+  }
+
+  private tokenChanges(record: ReplayJournalRecord, frame: Record<string, unknown>, token: string, changes: Record<string, unknown>[], batch: ReplayBatch, index: number): void {
+    const connection = record.connectionId!;
+    const state = this.books.get(connection)?.get(token);
+    if (!state?.valid || !this.allowed(connection, token)) {
+      this.quality.invalidBookUpdates += 1;
+      this.invalidateToken(connection, token);
+      return;
+    }
+    const updates: Array<{ side: "bids" | "asks"; key: string; value: ReplayLevel }> = [];
+    let watermark = state.timestamp;
+    let observedTime: bigint | undefined;
+    for (const change of changes) {
+      const parsed = level(change);
+      const side = String(change?.side ?? "").toUpperCase();
+      const timeValue = change?.timestamp ?? frame.timestamp;
+      const sourceTime = timestamp(timeValue);
+      if (!parsed || !["BUY", "SELL", "BID", "ASK"].includes(side)
+        || (timeValue !== undefined && sourceTime === undefined)) {
+        this.quality.invalidBookUpdates += 1; this.invalidateToken(connection, token); return;
+      }
+      if (watermark !== undefined && sourceTime !== undefined && sourceTime < watermark) {
+        this.quality.outOfOrderMessages += 1; this.invalidateToken(connection, token); return;
+      }
+      if (sourceTime !== undefined) { watermark = sourceTime; observedTime = sourceTime; }
+      updates.push({ side: side === "BUY" || side === "BID" ? "bids" : "asks", ...parsed });
+    }
+    for (const update of updates) {
+      if (decimal(update.value.size)?.key === "0") state[update.side].delete(update.key);
+      else state[update.side].set(update.key, update.value);
+    }
+    if (watermark !== undefined) state.timestamp = watermark;
+    batch.quotes.push(this.quote(record, state, index, observedTime));
+  }
 }
 
-export async function readJournalRecords(runDirectory: string): Promise<JournalReadResult> {
-  const segments = await listJournalSegments(runDirectory);
-  const records: ReplayJournalRecord[] = [];
-  const quality = emptyQuality();
-  for (const segment of segments) {
-    const content = await readFile(join(runDirectory, segment), "utf8");
-    const lines = content.split("\n");
-    const hasFinalNewline = content.endsWith("\n");
-    if (content.length > 0 && !hasFinalNewline) quality.incompleteFinalLines += 1;
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index];
-      if (!line || (index === lines.length - 1 && hasFinalNewline)) continue;
-      try {
-        const parsed = JSON.parse(line) as ReplayJournalRecord;
-        if (!parsed || typeof parsed.sequence !== "number") throw new Error("invalid journal record");
-        records.push(parsed);
-      } catch {
-        quality.malformedLines += 1;
-      }
-    }
+export function replayRecords(records: readonly ReplayJournalRecord[], options: ReplayOptions = {}): ReplayResult {
+  const replay = new JournalReplay(options);
+  const result: ReplayResult = { quotes: [], trades: [], sports: [], markets: [], quality: replay.quality };
+  for (const record of records) {
+    const batch = replay.accept(record);
+    result.quotes.push(...batch.quotes);
+    result.trades.push(...batch.trades);
+    result.sports.push(...batch.sports);
   }
-  const replay = replayRecords(records);
-  replay.quality.incompleteFinalLines += quality.incompleteFinalLines;
-  replay.quality.malformedLines += quality.malformedLines;
-  return { ...replay, records, segments };
-}
-
-export const loadJournal = readJournalRecords;
-
-export function marketMappingFromEvent(event: CollectorEventLike): ReplayMarketMapping[] {
-  const result: ReplayMarketMapping[] = [];
-  for (const market of event.markets ?? []) {
-    for (let index = 0; index < market.tokenIds.length; index += 1) {
-      const mapping: ReplayMarketMapping = { tokenId: market.tokenIds[index]! };
-      if (event.eventId !== undefined) mapping.eventId = event.eventId;
-      if (event.eventSlug !== undefined) mapping.eventSlug = event.eventSlug;
-      if (event.gameId !== undefined) mapping.gameId = event.gameId;
-      if (market.marketId !== undefined) mapping.marketId = market.marketId;
-      if (market.marketSlug !== undefined) mapping.marketSlug = market.marketSlug;
-      if (market.conditionId !== undefined) mapping.conditionId = market.conditionId;
-      const outcome = market.outcomes[index];
-      if (outcome !== undefined) mapping.outcome = outcome;
-      result.push(mapping);
-    }
-  }
+  result.markets = replay.markets;
   return result;
 }
 
-interface CollectorEventLike {
-  eventId?: string;
-  eventSlug?: string;
-  gameId?: string;
-  markets?: Array<Pick<CollectorMarket, "tokenIds" | "outcomes"> & Partial<Pick<CollectorMarket, "marketId" | "marketSlug" | "conditionId">>>;
+export async function readJournalRecords(runDirectory: string, options: ReplayOptions = {}): Promise<JournalReadResult> {
+  const replay = new JournalReplay(options);
+  const result: JournalReadResult = { quotes: [], trades: [], sports: [], markets: [], quality: replay.quality, records: [], segments: [] };
+  result.segments = await scanJournal(runDirectory, record => {
+    const batch = replay.accept(record);
+    result.records.push(record);
+    result.quotes.push(...batch.quotes);
+    result.trades.push(...batch.trades);
+    result.sports.push(...batch.sports);
+  }, replay.quality, () => replay.invalidate(), options);
+  result.markets = replay.markets;
+  return result;
 }
+
+export const loadJournal = readJournalRecords;
+export function marketMappingFromEvent(event: unknown): ReplayMarketMapping[] { return metadataMappings(event); }

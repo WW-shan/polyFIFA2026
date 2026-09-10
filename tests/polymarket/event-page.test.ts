@@ -3,16 +3,257 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   decodeInitialStatePayload,
   extractNextInitialState,
+  fetchEventMatchState,
   fetchEventStrategyMarkets,
   findMatchState,
   findSpreadMarkets,
   findStrategyMarkets,
+  findStrategyMarketsFromSportsPageHtml,
+  normalizeSpreadMarket,
+  normalizeStrategyMarket,
   parseSpreadLine
 } from "../../src/polymarket/event-page.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+const requestedSlug = "fifwc-esp-ksa-2026-06-21";
+const foreignSlug = "fifwc-fra-irq-2026-06-22";
+
+function eventMarkets(prefix: string) {
+  return [
+    {
+      slug: `${prefix}-total-2pt5`,
+      question: "Home vs. Away: O/U 2.5",
+      conditionId: `${prefix}-total-condition`,
+      outcomes: ["Over", "Under"],
+      clobTokenIds: [`${prefix}-over`, `${prefix}-under`],
+      sportsMarketType: "totals"
+    },
+    {
+      slug: `${prefix}-spread`,
+      question: "Spread: Home (-2.5)",
+      conditionId: `${prefix}-spread-condition`,
+      outcomes: ["Home", "Away"],
+      clobTokenIds: [`${prefix}-home`, `${prefix}-away`],
+      sportsMarketType: "spreads"
+    }
+  ];
+}
+
+describe("market event ownership (T6)", () => {
+  const ownEvent = { slug: requestedSlug, markets: eventMarkets("own") };
+  const foreignEvent = { slug: foreignSlug, markets: eventMarkets("foreign") };
+  test.each([
+    { name: "events map", state: { events: { [requestedSlug]: ownEvent, [foreignSlug]: foreignEvent } } },
+    { name: "events array", state: { events: [foreignEvent, ownEvent] } },
+    { name: "root event array", state: [foreignEvent, ownEvent] },
+    { name: "map keys without child slugs", state: { events: {
+      [requestedSlug]: { markets: ownEvent.markets },
+      [foreignSlug]: { markets: foreignEvent.markets }
+    } } },
+    { name: "nested event", state: { event: { slug: foreignSlug, nested: { markets: foreignEvent.markets } } } },
+    { name: "query data", state: { dehydratedState: { queries: [
+      { queryKey: ["event", foreignSlug], state: { data: foreignEvent } },
+      { queryKey: ["event", requestedSlug], state: { data: ownEvent } }
+    ] } } },
+    { name: "query ownership without data slug", state: { queries: [
+      { queryKey: ["event", foreignSlug], state: { data: { markets: foreignEvent.markets } } },
+      { queryKey: ["event", requestedSlug], state: { data: { markets: ownEvent.markets } } }
+    ] } }
+  ])("inherits ownership in $name for both market paths", ({ name, state }) => {
+    const expected = name === "nested event" ? [] : ["own-total-condition", "own-spread-condition"];
+    expect(findStrategyMarkets(state, requestedSlug).map((market) => market.conditionId)).toEqual(expected);
+    expect(findSpreadMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(expected.filter((id) => id.includes("spread")));
+  });
+
+  test("does not let explicit child ownership override a conflicting parent", () => {
+    const state = { events: { [foreignSlug]: {
+      slug: foreignSlug,
+      markets: eventMarkets("conflict").map((market) => ({ ...market, eventSlug: requestedSlug }))
+    } } };
+    expect(findStrategyMarkets(state, requestedSlug)).toEqual([]);
+    expect(findSpreadMarkets(state, requestedSlug)).toEqual([]);
+  });
+
+  test("rejects event records whose slug conflicts with their map key", () => {
+    const state = { events: { [foreignSlug]: ownEvent } };
+    expect(findStrategyMarkets(state, requestedSlug)).toEqual([]);
+    expect(findSpreadMarkets(state, requestedSlug)).toEqual([]);
+  });
+
+  test("does not assign unowned sibling markets from a multi-event page to the request", () => {
+    const state = { events: [ownEvent, foreignEvent], markets: eventMarkets("unowned") };
+    expect(findStrategyMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-total-condition", "own-spread-condition"]);
+    expect(findSpreadMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-spread-condition"]);
+  });
+
+  test("does not use fixture fallback when another event cache is nested beside markets", () => {
+    const state = { markets: eventMarkets("unowned"), cache: { events: [ownEvent, foreignEvent] } };
+    expect(findStrategyMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-total-condition", "own-spread-condition"]);
+    expect(findSpreadMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-spread-condition"]);
+  });
+
+  test("inherits a sibling event object's ownership before considering a fixture fallback", () => {
+    const state = { event: { slug: foreignSlug }, markets: eventMarkets("foreign") };
+    expect(findStrategyMarkets(state, requestedSlug)).toEqual([]);
+    expect(findSpreadMarkets(state, requestedSlug)).toEqual([]);
+    expect(findStrategyMarkets({ ...state, event: { slug: requestedSlug } }, requestedSlug)).toHaveLength(2);
+  });
+
+  test("does not confuse a page slug with the identities in its event collection", () => {
+    const state = { slug: "world-cup", events: [ownEvent, foreignEvent] };
+    expect(findStrategyMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-total-condition", "own-spread-condition"]);
+  });
+
+  test.each([
+    { name: "strategy", find: findStrategyMarkets, expected: ["own-total-condition", "own-spread-condition"] },
+    { name: "spread", find: findSpreadMarkets, expected: ["own-spread-condition"] }
+  ])("preserves event ownership through wrapped market lists on the $name path", ({ find, expected }) => {
+    const foreign = [{ slug: foreignSlug, nested: { markets: eventMarkets("foreign")
+      .map((market) => ({ ...market, eventSlug: requestedSlug })) } }];
+    expect(find(foreign, requestedSlug)).toEqual([]);
+    const own = { slug: requestedSlug, nested: { markets: eventMarkets("own") } };
+    expect(find([own], requestedSlug).map((market) => market.conditionId)).toEqual(expected);
+    expect(find({ data: own }, requestedSlug).map((market) => market.conditionId)).toEqual(expected);
+  });
+
+  test("rejects wrapped foreign event children from compressed Flight data", () => {
+    const state = [{ slug: foreignSlug, nested: { markets: eventMarkets("foreign")
+      .map((market) => ({ ...market, eventSlug: requestedSlug })) } }];
+    const encoded = deflateSync(JSON.stringify(state)).toString("base64url");
+    const chunk = `23:T${encoded.length.toString(16)},${encoded}\n`;
+    const html = `<script>self.__next_f.push([1,${JSON.stringify(chunk)}])</script>`;
+    expect(findStrategyMarketsFromSportsPageHtml(html, requestedSlug)).toEqual([]);
+  });
+
+  test.each([
+    { name: "array", events: [ownEvent, foreignEvent] },
+    { name: "map", events: { [requestedSlug]: ownEvent, [foreignSlug]: foreignEvent } }
+  ])("does not let a page slug own its nested event $name cache", ({ events }) => {
+    const state = { slug: "world-cup", markets: [], cache: { events } };
+    expect(findStrategyMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-total-condition", "own-spread-condition"]);
+    expect(findSpreadMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-spread-condition"]);
+  });
+
+  test.each([
+    { name: "strategy", find: findStrategyMarkets, expected: ["own-total-condition", "own-spread-condition"] },
+    { name: "spread", find: findSpreadMarkets, expected: ["own-spread-condition"] },
+    { name: "Flight", find: (state: unknown, slug: string) => {
+      const encoded = deflateSync(JSON.stringify(state)).toString("base64url");
+      const chunk = `23:T${encoded.length.toString(16)},${encoded}\n`;
+      return findStrategyMarketsFromSportsPageHtml(`<script>self.__next_f.push([1,${JSON.stringify(chunk)}])</script>`, slug);
+    }, expected: ["own-total-condition", "own-spread-condition"] }
+  ])("metadata collections cannot change direct event ownership on the $name path", ({ find, expected }) => {
+    const series = [{ slug: "world-cup-2026", events: [] }];
+    expect(find({ ...ownEvent, series }, requestedSlug).map((market) => market.conditionId)).toEqual(expected);
+    expect(find({
+      ...foreignEvent,
+      markets: foreignEvent.markets.map((market) => ({ ...market, eventSlug: requestedSlug })),
+      series
+    }, requestedSlug)).toEqual([]);
+  });
+
+  test("nested events establish new boundaries even through conflicting series metadata", () => {
+    const state = { ...foreignEvent, series: [{ slug: "world-cup-2026", events: [ownEvent] }] };
+    expect(findStrategyMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-total-condition", "own-spread-condition"]);
+    expect(findSpreadMarkets(state, requestedSlug).map((market) => market.conditionId)).toEqual(["own-spread-condition"]);
+    expect(findStrategyMarkets({ ...foreignEvent, series: [{
+      slug: "world-cup-2026", events: { [foreignSlug]: ownEvent }
+    }] }, requestedSlug)).toEqual([]);
+  });
+
+  test("event query boundaries ignore page ownership while checking the query against its data", () => {
+    const state = { slug: "world-cup", cache: { queries: [
+      { queryKey: ["event", requestedSlug], state: { data: ownEvent } },
+      { queryKey: ["event", foreignSlug], state: { data: { slug: requestedSlug, markets: eventMarkets("conflict") } } }
+    ] } };
+    expect(findStrategyMarkets(state, requestedSlug).map((market) => market.conditionId))
+      .toEqual(["own-total-condition", "own-spread-condition"]);
+  });
+
+  test("retains actual ownership when no event filter is supplied", () => {
+    const markets = findStrategyMarkets({ events: [ownEvent, foreignEvent] });
+    expect(markets.map((market) => market.eventSlug)).toEqual([requestedSlug, requestedSlug, foreignSlug, foreignSlug]);
+  });
+
+  test.each([
+    { name: "direct Gamma event", state: ownEvent },
+    { name: "direct market fixture", state: eventMarkets("own")[0] },
+    { name: "market array fixture", state: eventMarkets("own") },
+    { name: "market wrapper fixture", state: { markets: eventMarkets("own") } }
+  ])("preserves isolated $name compatibility", ({ state }) => {
+    expect(findStrategyMarkets(state, requestedSlug)[0]).toMatchObject({
+      eventSlug: requestedSlug,
+      conditionId: "own-total-condition"
+    });
+  });
+
+  test.each([
+    { name: "spread", normalize: normalizeSpreadMarket },
+    { name: "strategy", normalize: normalizeStrategyMarket }
+  ])("validates explicit market event associations in $name normalization", ({ normalize }) => {
+    const market = eventMarkets("relation")[1]!;
+    expect(normalize({ ...market, events: [{ slug: foreignSlug }] }, requestedSlug)).toBeNull();
+    expect(normalize({ ...market, events: [foreignSlug] }, requestedSlug)).toBeNull();
+    expect(normalize({ ...market, eventSlug: requestedSlug, event_slug: foreignSlug }, requestedSlug)).toBeNull();
+    expect(normalize({ ...market, events: [{ slug: requestedSlug }, { slug: foreignSlug }] }, requestedSlug)).toBeNull();
+    expect(normalize({ ...market, events: [{ slug: requestedSlug }] }, requestedSlug))
+      .toMatchObject({ eventSlug: requestedSlug });
+  });
+});
+
+describe("sports page match-state formats (O6)", () => {
+  const state = {
+    games: { [requestedSlug]: { event: requestedSlug, score: "3-0", period: "2H", elapsed: "90+1'", live: true } },
+    events: { [requestedSlug]: { slug: requestedSlug, title: "Spain vs. Saudi Arabia" } }
+  };
+  const encoded = deflateSync(JSON.stringify(state)).toString("base64url");
+  const splitAt = Math.floor(encoded.length / 2);
+  const flight = [
+    `<script>self.__next_f.push([1,${JSON.stringify(`23:T${encoded.length.toString(16)},${encoded.slice(0, splitAt)}`)}])</script>`,
+    `<script>self.__next_f.push([1,${JSON.stringify(`${encoded.slice(splitAt)}\n`)}])</script>`
+  ].join("");
+
+  test.each([
+    { name: "Flight without NEXT_DATA", html: flight },
+    { name: "malformed NEXT_DATA with Flight", html: `<script id="__NEXT_DATA__">{invalid}</script>${flight}` },
+    { name: "NEXT_DATA lacking the match with Flight", html: nextStateHtml({}) + flight },
+    { name: "legacy NEXT_DATA", html: nextStateHtml(state) }
+  ])("reads $name", async ({ html }) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(html));
+    await expect(fetchEventMatchState(requestedSlug)).resolves.toEqual({
+      eventSlug: requestedSlug,
+      homeTeam: "Spain",
+      awayTeam: "Saudi Arabia",
+      homeGoals: 3,
+      awayGoals: 0,
+      period: "2H",
+      minute: 91,
+      isLive: true
+    });
+  });
+
+  test("reports a missing requested match after searching Flight states", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(flight));
+    await expect(fetchEventMatchState(foreignSlug)).rejects.toThrow(`MATCH_STATE_NOT_FOUND: ${foreignSlug}`);
+  });
+});
+
+function nextStateHtml(state: unknown): string {
+  const initialState = deflateSync(JSON.stringify(state)).toString("base64");
+  return `<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { initialState } } })}</script>`;
+}
 
 describe("event page initial state parsing", () => {
   test("extracts base64 zlib initialState and normalizes spread markets", () => {

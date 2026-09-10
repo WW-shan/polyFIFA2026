@@ -1,10 +1,20 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, open, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
-import { createJournal } from "../../src/collector/journal.js";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createJournal, listJournalSegments } from "../../src/collector/journal.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
 
 const temporaryDirectories: string[] = [];
+
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(open).mockReset().mockImplementation(actual.open);
+});
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
@@ -26,6 +36,15 @@ async function journalLines(directory: string, runDirectory: string): Promise<Re
     }
   }
   return lines;
+}
+
+async function interceptNextFile(intercept: (file: FileHandle) => void): Promise<void> {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(open).mockImplementationOnce(async (...args) => {
+    const file = await actual.open(...args);
+    intercept(file);
+    return file;
+  });
 }
 
 describe("segmented collector journal", () => {
@@ -113,5 +132,153 @@ describe("segmented collector journal", () => {
     await expect(journal.flush()).rejects.toThrow("JOURNAL_STORAGE_ERROR");
     expect(reported).toBeDefined();
     await expect(journal.close()).rejects.toThrow("JOURNAL_STORAGE_ERROR");
+  });
+
+  test("allocates increasing segments when the receipt clock revisits an earlier UTC date", async () => {
+    const root = await temporaryRoot();
+    const times = ["2026-09-10T23:59:59Z", "2026-09-11T00:00:01Z", "2026-09-10T23:59:58Z"];
+    const journal = await createJournal({ rootDir: root, runId: "rollback", now: () => new Date(times.shift()!), maxSegmentBytes: 1 });
+    for (const value of ["first", "second", "third"]) journal.record({ source: "clob", kind: "ws_message", data: value });
+
+    await expect(journal.close()).resolves.toBeUndefined();
+    const segments = await listJournalSegments(journal.runDirectory);
+    expect(segments).toEqual(["2026-09-10-000000.ndjson", "2026-09-11-000001.ndjson", "2026-09-10-000002.ndjson"]);
+    const records = await Promise.all(segments.map(async (name) => JSON.parse(await readFile(join(journal.runDirectory, name), "utf8"))));
+    expect(records.map((record) => record.sequence)).toEqual([1, 2, 3]);
+    expect(records.map((record) => record.data)).toEqual(["first", "second", "third"]);
+  });
+
+  test("lists legacy per-date segments by record sequence, retaining incomplete and empty tails", async () => {
+    const root = await temporaryRoot();
+    const ordered = ["2026-09-11-000000.ndjson", "2026-09-10-000000.ndjson", "2026-09-11-000001.ndjson", "2026-09-09-000000.ndjson"];
+    await writeFile(join(root, ordered[0]!), `${JSON.stringify({ sequence: 1, data: "first" })}\n`);
+    await writeFile(join(root, ordered[1]!), `${JSON.stringify({ sequence: 3, data: "second" })}\n`);
+    await writeFile(join(root, ordered[2]!), '{"sequence":5,"data":"interrupted');
+    await writeFile(join(root, ordered[3]!), "");
+    await writeFile(join(root, "notes.txt"), "not a journal");
+
+    expect(await listJournalSegments(root)).toEqual(ordered);
+  });
+
+  test("orders large first records using bounded header reads and accepts indices beyond six digits", async () => {
+    const root = await temporaryRoot();
+    const first = "2026-09-11-999999.ndjson";
+    const second = "2026-09-10-1000000.ndjson";
+    const line = (sequence: number) => `${JSON.stringify({ schemaVersion: 1, runId: "large", sequence, data: "x".repeat(200_000) })}\n`;
+    await writeFile(join(root, first), line(1));
+    await writeFile(join(root, second), line(2));
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const reads: number[] = [];
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const file = await actual.open(...args);
+      const read = file.read.bind(file);
+      vi.spyOn(file, "read").mockImplementation((async (...readArgs: unknown[]) => {
+        const result = await Reflect.apply(read, file, readArgs);
+        reads.push(result.bytesRead);
+        return result;
+      }) as FileHandle["read"]);
+      return file;
+    });
+
+    expect(await listJournalSegments(root)).toEqual([first, second]);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.reduce((sum, bytes) => sum + bytes, 0)).toBeLessThanOrEqual(2 * 64 * 1024);
+  });
+
+  test("counts an in-flight write against the pending-byte admission limit", async () => {
+    const root = await temporaryRoot();
+    let releaseWrite!: () => void;
+    let enteredWrite!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const entered = new Promise<void>((resolve) => { enteredWrite = resolve; });
+    await interceptNextFile((file) => {
+      const write = file.write.bind(file);
+      vi.spyOn(file, "write").mockImplementationOnce((async (...args: unknown[]) => {
+        enteredWrite();
+        await gate;
+        return Reflect.apply(write, file, args);
+      }) as FileHandle["write"]);
+    });
+    const journal = await createJournal({ rootDir: root, runId: "in-flight", maxBufferBytes: 400 });
+    const input = { source: "clob" as const, kind: "ws_message", data: "x".repeat(50) };
+    const first = journal.record(input);
+    await entered;
+    try {
+      expect(journal.pendingBytes).toBe(Buffer.byteLength(`${JSON.stringify(first)}\n`));
+      expect(() => journal.record(input)).toThrow("JOURNAL_BUFFER_OVERFLOW");
+    } finally {
+      releaseWrite();
+      await journal.close();
+    }
+    expect(journal.pendingBytes).toBe(0);
+    expect(await journalLines(root, journal.runId)).toHaveLength(1);
+  });
+
+  test("reports initialization storage failure once even before a journal can be returned", async () => {
+    const root = await temporaryRoot();
+    const occupied = join(root, "file");
+    await writeFile(occupied, "occupied");
+    const onError = vi.fn();
+    await expect(createJournal({ rootDir: occupied, onError })).rejects.toBeDefined();
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(["sync", "close"] as const)("reports final %s failure once and makes close idempotent", async (operation) => {
+    const root = await temporaryRoot();
+    const storageError = new Error(`failed ${operation}`);
+    const onError = vi.fn();
+    let closeCalls!: ReturnType<typeof vi.spyOn>;
+    await interceptNextFile((file) => {
+      const close = file.close.bind(file);
+      closeCalls = vi.spyOn(file, "close").mockImplementation(async () => {
+        await close();
+        if (operation === "close") throw storageError;
+      });
+      if (operation === "sync") vi.spyOn(file, "sync").mockRejectedValue(storageError);
+    });
+    const journal = await createJournal({ rootDir: root, onError });
+    journal.record({ source: "collector", kind: "session_end", data: {} });
+    await journal.flush();
+    await expect(journal.close()).rejects.toThrow("JOURNAL_STORAGE_ERROR");
+    await expect(journal.close()).rejects.toThrow("JOURNAL_STORAGE_ERROR");
+    expect(onError).toHaveBeenCalledExactlyOnceWith(storageError);
+    expect(closeCalls).toHaveBeenCalledTimes(1);
+    expect(journal.error).toBe(storageError);
+    expect(() => journal.record({ source: "collector", kind: "late", data: {} })).toThrow("JOURNAL_CLOSED");
+  });
+
+  test("syncs each rotated segment and the final segment before closing their file handles", async () => {
+    const root = await temporaryRoot();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const operations: string[] = [];
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const file = await actual.open(...args);
+      const sync = file.sync.bind(file);
+      const close = file.close.bind(file);
+      vi.spyOn(file, "sync").mockImplementation(async () => { operations.push("sync"); await sync(); });
+      vi.spyOn(file, "close").mockImplementation(async () => { operations.push("close"); await close(); });
+      return file;
+    });
+    const journal = await createJournal({ rootDir: root, maxSegmentBytes: 1 });
+    journal.record({ source: "collector", kind: "session_start", data: {} });
+    journal.record({ source: "collector", kind: "session_end", data: {} });
+    await journal.close();
+    expect(operations).toEqual(["sync", "close", "sync", "close"]);
+  });
+
+  test("treats even an empty storage rejection as fatal and reports it only once", async () => {
+    const root = await temporaryRoot();
+    const onError = vi.fn();
+    await interceptNextFile((file) => { vi.spyOn(file, "write").mockRejectedValue(undefined); });
+    const journal = await createJournal({ rootDir: root, onError });
+    journal.record({ source: "clob", kind: "ws_message", data: "not written" });
+    try {
+      await expect(journal.flush()).rejects.toThrow("JOURNAL_STORAGE_ERROR");
+      expect(() => journal.record({ source: "clob", kind: "ws_message", data: "late" })).toThrow("JOURNAL_STORAGE_ERROR");
+    } finally {
+      await expect(journal.close()).rejects.toThrow("JOURNAL_STORAGE_ERROR");
+    }
+    expect(journal.pendingBytes).toBe(0);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(undefined);
   });
 });

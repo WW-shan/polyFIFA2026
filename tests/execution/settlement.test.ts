@@ -79,7 +79,7 @@ describe("auto settlement", () => {
     });
 
     expect(result).toMatchObject({ status: "submitted", positions: 1, conditions: 1, calls: 1 });
-    expect(markRedeemedConditionIds).toHaveBeenCalledWith([conditionA]);
+    expect(markRedeemedConditionIds).not.toHaveBeenCalled();
     expect(submitDepositWalletBatch).toHaveBeenCalledWith(expect.objectContaining({
       walletAddress,
       ownerAddress,

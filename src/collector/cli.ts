@@ -67,6 +67,7 @@ function parseCollectArgs(argv: readonly string[]): { command: "collect"; option
       case "--duration-seconds": options.durationSeconds = numberValue(requireValue(argv, index++, flag), flag); break;
       case "--discovery-interval-ms": options.discoveryIntervalMs = integerValue(requireValue(argv, index++, flag), flag); break;
       case "--snapshot-interval-ms": options.snapshotIntervalMs = integerValue(requireValue(argv, index++, flag), flag); break;
+      case "--snapshot-concurrency": options.snapshotConcurrency = integerValue(requireValue(argv, index++, flag), flag); break;
       case "--http-timeout-ms": options.httpTimeoutMs = integerValue(requireValue(argv, index++, flag), flag); break;
       case "--page-size": options.pageSize = integerValue(requireValue(argv, index++, flag), flag); break;
       case "--max-pages": options.maxPages = integerValue(requireValue(argv, index++, flag), flag); break;
@@ -103,28 +104,35 @@ function parseExportArgs(argv: readonly string[]): { command: "export"; options:
 }
 
 export async function runCollectorCli(argv = process.argv.slice(2), dependencies: CollectorCliDependencies = {}): Promise<unknown> {
-  const parsed = parseCollectorCliArgs(argv);
   const write = dependencies.write ?? ((text: string) => process.stdout.write(`${text}\n`));
   const report = dependencies.error ?? ((text: string) => process.stderr.write(`${text}\n`));
-  if (parsed.command === "export") {
-    const result = await (dependencies.exportRun ?? exportRun)(parsed.options);
-    write(JSON.stringify(result));
-    return result;
-  }
-
-  const runtime = (dependencies.createCollector ?? createCollector)(parsed.options);
-  const onSignal = (): void => {
-    void runtime.stop().catch((error: unknown) => report(String(error)));
-  };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
   try {
-    const result = await runtime.run();
-    write(JSON.stringify(result));
-    return result;
-  } finally {
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
+    const parsed = parseCollectorCliArgs(argv);
+    if (parsed.command === "export") {
+      const result = await (dependencies.exportRun ?? exportRun)(parsed.options);
+      write(JSON.stringify(result));
+      return result;
+    }
+
+    const runtime = (dependencies.createCollector ?? createCollector)(parsed.options);
+    const onSignal = (): void => {
+      // run() observes the same completion and reports a cleanup failure once.
+      void runtime.stop().catch(() => {});
+    };
+    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", onSignal);
+    try {
+      const result = await runtime.run();
+      write(JSON.stringify(result));
+      return result;
+    } finally {
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+    }
+  } catch (error) {
+    process.exitCode = 1;
+    report(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+    throw error;
   }
 }
 
@@ -134,8 +142,7 @@ export async function main(): Promise<void> {
 
 const entry = process.argv[1];
 if (entry && import.meta.url === pathToFileURL(resolve(entry)).href) {
-  void main().catch((error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  void main().catch(() => {
     process.exitCode = 1;
   });
 }

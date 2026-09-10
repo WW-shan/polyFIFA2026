@@ -192,6 +192,8 @@ export interface TradeResult {
   price: number;
   shares: number;
   notional: number;
+  /** Additional possible spend that has not been confirmed as a fill. */
+  reservedNotional?: number;
   fee: number;
   estimatedPayout: number;
   estimatedProfit: number;
@@ -204,9 +206,16 @@ export interface TradeResultLeg {
   status: TradeResult["status"];
   orderId: string;
   tokenId: string;
+  eventSlug?: string;
+  marketSlug?: string;
+  conditionId?: string;
+  outcome?: string;
+  strategy?: TailStrategy;
   price: number;
   shares: number;
   notional: number;
+  /** Additional possible spend that has not been confirmed as a fill. */
+  reservedNotional?: number;
   fee: number;
   estimatedPayout: number;
   estimatedProfit: number;

@@ -110,17 +110,18 @@ function baseUrl(value = GAMMA_BASE_URL): string {
 
 async function requestPage(url: string, deps: CatalogDependencies, now: () => number): Promise<unknown> {
   const requestStartedAt = new Date(now()).toISOString();
+  let response: unknown;
   try {
-    const response = await deps.request(url);
-    const requestEndedAt = new Date(now()).toISOString();
-    deps.onRequest?.({ url, requestStartedAt, requestEndedAt, response });
-    deps.onPage?.({ url, requestStartedAt, requestEndedAt, response });
-    return response;
+    response = await deps.request(url);
   } catch (error) {
     const requestEndedAt = new Date(now()).toISOString();
     deps.onRequest?.({ url, requestStartedAt, requestEndedAt, error });
     throw error;
   }
+  const requestEndedAt = new Date(now()).toISOString();
+  deps.onRequest?.({ url, requestStartedAt, requestEndedAt, response });
+  deps.onPage?.({ url, requestStartedAt, requestEndedAt, response });
+  return response;
 }
 
 async function eventBySlug(slug: string, deps: CatalogDependencies, base: string, now: () => number): Promise<CollectorEvent> {

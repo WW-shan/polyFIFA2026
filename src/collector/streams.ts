@@ -1,4 +1,5 @@
-import { ProxyAgent, WebSocket } from "undici";
+import { WebSocket } from "undici";
+import { createOwnedTransport, validateProxyConfiguration } from "../polymarket/owned-transport.js";
 import type { RecordSink } from "./types.js";
 
 export interface StreamRecord {
@@ -12,6 +13,10 @@ export interface CollectorSocket {
   addEventListener(type: string, listener: (event: StreamRecord) => void): void;
   send(data: string): void;
   close(code?: number, reason?: string): void;
+  /** Force the transport closed; implementations must still emit close. */
+  terminate?(): Promise<void> | void;
+  /** Tear down the transport and release any owned dispatcher resources. */
+  destroy?(): Promise<void> | void;
 }
 
 export interface StreamFrame {
@@ -34,7 +39,11 @@ export interface PublicStreamsOptions {
   proxyUrl?: string;
   maxTokensPerSocket?: number;
   heartbeatIntervalMs?: number;
+  openTimeoutMs?: number;
+  inboundTimeoutMs?: number;
+  closeTimeoutMs?: number;
   reconnectDelayMs?: number | ((attempt: number) => number);
+  maxReconnectDelayMs?: number;
   autoReconnect?: boolean;
   connectSports?: boolean;
   socketFactory?: (url: string) => CollectorSocket;
@@ -50,12 +59,23 @@ interface ChannelState {
   tokens: Set<string>;
   epoch: number;
   reconnectAttempt: number;
-  socket: CollectorSocket | undefined;
+  connection: SocketConnection | undefined;
   connectionId: string | undefined;
   open: boolean;
   heartbeat: unknown | undefined;
+  watchdog: unknown | undefined;
   reconnectTimer: unknown | undefined;
   disposed: boolean;
+}
+
+interface SocketConnection {
+  socket: CollectorSocket;
+  id: string;
+  closed: boolean;
+  closeRecorded: boolean;
+  closedPromise: Promise<void>;
+  resolveClosed: () => void;
+  shutdownPromise?: Promise<void>;
 }
 
 const DEFAULT_CLOB_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -101,10 +121,27 @@ function normalizeTokens(tokens: readonly string[]): string[] {
   return [...normalized];
 }
 
-function defaultSocketFactory(proxyUrl: string | undefined): (url: string) => CollectorSocket {
+function defaultSocketFactory(proxyUrl: string | undefined, connectTimeout: number): (url: string) => CollectorSocket {
+  validateProxyConfiguration(proxyUrl);
   return (url) => {
-    const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
-    return new WebSocket(url, dispatcher ? { dispatcher } : undefined) as unknown as CollectorSocket;
+    const transport = createOwnedTransport({ proxyUrl, connectTimeoutMs: connectTimeout });
+    let socket: InstanceType<typeof WebSocket>;
+    try {
+      socket = new WebSocket(url, { dispatcher: transport.dispatcher });
+      socket.binaryType = "arraybuffer";
+    } catch (error) {
+      void transport.destroy().catch(() => {});
+      throw error;
+    }
+    return {
+      addEventListener: (type, listener) => socket.addEventListener(type, (event) => listener(event as StreamRecord)),
+      send: (data) => socket.send(data),
+      close: (code, reason) => socket.close(code, reason),
+      destroy() {
+        if (socket.readyState === WebSocket.CONNECTING) socket.close();
+        return transport.destroy();
+      }
+    };
   };
 }
 
@@ -114,7 +151,11 @@ export class PublicStreams {
   private readonly sportsUrl: string;
   private readonly maxTokensPerSocket: number;
   private readonly heartbeatIntervalMs: number;
+  private readonly openTimeoutMs: number;
+  private readonly inboundTimeoutMs: number;
+  private readonly closeTimeoutMs: number;
   private readonly reconnectDelayMs: number | ((attempt: number) => number);
+  private readonly maxReconnectDelayMs: number;
   private readonly autoReconnect: boolean;
   private readonly connectSports: boolean;
   private readonly socketFactory: (url: string) => CollectorSocket;
@@ -124,10 +165,15 @@ export class PublicStreams {
   private readonly onFatal: ((error: unknown) => void) | undefined;
   private readonly shards: ChannelState[] = [];
   private readonly tokenShard = new Map<string, ChannelState>();
+  private readonly epochs = new Map<string, number>();
+  private readonly pendingClosures = new Set<Promise<void>>();
   private nextShardId = 0;
   private sportsChannel: ChannelState | undefined;
   private started = false;
   private stopping = false;
+  private lifecycle = 0;
+  private stopPromise: Promise<void> | undefined;
+  private closeError: unknown;
   private fatalError: unknown;
 
   constructor(options: PublicStreamsOptions) {
@@ -136,10 +182,14 @@ export class PublicStreams {
     this.sportsUrl = options.sportsUrl ?? DEFAULT_SPORTS_URL;
     this.maxTokensPerSocket = positiveInteger(options.maxTokensPerSocket, 200, "maxTokensPerSocket");
     this.heartbeatIntervalMs = positiveInteger(options.heartbeatIntervalMs, 10_000, "heartbeatIntervalMs");
+    this.openTimeoutMs = positiveInteger(options.openTimeoutMs, 10_000, "openTimeoutMs");
+    this.inboundTimeoutMs = positiveInteger(options.inboundTimeoutMs, Math.max(30_000, this.heartbeatIntervalMs * 3), "inboundTimeoutMs");
+    this.closeTimeoutMs = positiveInteger(options.closeTimeoutMs, 1_000, "closeTimeoutMs");
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1_000;
+    this.maxReconnectDelayMs = positiveInteger(options.maxReconnectDelayMs, 30_000, "maxReconnectDelayMs");
     this.autoReconnect = options.autoReconnect ?? true;
     this.connectSports = options.connectSports ?? true;
-    this.socketFactory = options.socketFactory ?? defaultSocketFactory(options.proxyUrl);
+    this.socketFactory = options.socketFactory ?? defaultSocketFactory(options.proxyUrl, this.openTimeoutMs);
     this.timers = options.timers ?? defaultTimers;
     this.onFrame = options.onFrame;
     this.onError = options.onError;
@@ -147,6 +197,12 @@ export class PublicStreams {
   }
 
   async start(tokens: readonly string[] = []): Promise<void> {
+    const lifecycle = this.lifecycle;
+    if (this.stopPromise) {
+      await this.stopPromise;
+      if (lifecycle !== this.lifecycle) return;
+      this.stopPromise = undefined;
+    }
     if (this.started) {
       await this.setTokens(tokens);
       return;
@@ -154,6 +210,7 @@ export class PublicStreams {
     this.started = true;
     this.stopping = false;
     await this.setTokens(tokens);
+    if (lifecycle !== this.lifecycle || !this.started || this.stopping) return;
     if (this.connectSports) {
       const channel = this.createChannel("sports", 0);
       this.sportsChannel = channel;
@@ -189,13 +246,20 @@ export class PublicStreams {
     }
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    this.lifecycle += 1;
+    if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
     this.started = false;
     for (const channel of [...this.shards]) this.disposeChannel(channel);
     if (this.sportsChannel) this.disposeChannel(this.sportsChannel);
     this.sportsChannel = undefined;
     this.tokenShard.clear();
+    this.stopPromise = (async () => {
+      while (this.pendingClosures.size > 0) await Promise.allSettled([...this.pendingClosures]);
+      if (this.closeError !== undefined) throw this.closeError;
+    })();
+    return this.stopPromise;
   }
 
   get activeConnectionIds(): string[] {
@@ -215,10 +279,11 @@ export class PublicStreams {
       tokens: new Set<string>(),
       epoch: 0,
       reconnectAttempt: 0,
-      socket: undefined,
+      connection: undefined,
       connectionId: undefined,
       open: false,
       heartbeat: undefined,
+      watchdog: undefined,
       reconnectTimer: undefined,
       disposed: false
     };
@@ -228,108 +293,128 @@ export class PublicStreams {
 
   private connect(channel: ChannelState): void {
     if (channel.disposed || !this.started || this.fatalError) return;
-    channel.epoch += 1;
-    channel.connectionId = `${channel.source}-${channel.id}-e${channel.epoch}`;
+    const key = `${channel.source}-${channel.id}`;
+    channel.epoch = (this.epochs.get(key) ?? 0) + 1;
+    this.epochs.set(key, channel.epoch);
+    channel.connectionId = `${key}-e${channel.epoch}`;
     channel.open = false;
     let socket: CollectorSocket;
     try {
       socket = this.socketFactory(channel.source === "clob" ? this.clobUrl : this.sportsUrl);
     } catch (error) {
+      this.recordGap(channel, "opening_error");
       this.reportError(error);
       this.scheduleReconnect(channel);
       return;
     }
-    channel.socket = socket;
-    socket.addEventListener("open", () => this.handleOpen(channel, socket));
-    socket.addEventListener("message", (event) => this.handleMessage(channel, socket, event.data));
-    socket.addEventListener("close", (event) => this.handleClose(channel, socket, event));
-    socket.addEventListener("error", (event) => this.handleSocketError(channel, socket, event.error));
+    let resolveClosed!: () => void;
+    const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve; });
+    const connection: SocketConnection = { socket, id: channel.connectionId, closed: false, closeRecorded: false, closedPromise, resolveClosed };
+    channel.connection = connection;
+    socket.addEventListener("open", () => this.handleOpen(channel, connection));
+    socket.addEventListener("message", (event) => this.handleMessage(channel, connection, event.data));
+    socket.addEventListener("close", (event) => this.handleClose(channel, connection, event));
+    socket.addEventListener("error", (event) => this.handleSocketError(channel, connection, event.error));
+    this.armWatchdog(channel, connection, "opening_timeout", this.openTimeoutMs);
   }
 
-  private handleOpen(channel: ChannelState, socket: CollectorSocket): void {
-    if (!this.isCurrent(channel, socket)) return;
+  private handleOpen(channel: ChannelState, connection: SocketConnection): void {
+    if (!this.isCurrent(channel, connection) || channel.open) return;
     channel.open = true;
-    channel.reconnectAttempt = 0;
-    this.safeRecord({
+    this.armWatchdog(channel, connection, "inbound_timeout", this.inboundTimeoutMs);
+    if (!this.safeRecord({
       source: "collector",
       kind: "connection_open",
       connectionId: channel.connectionId!,
       data: { source: channel.source, url: channel.source === "clob" ? this.clobUrl : this.sportsUrl, epoch: channel.epoch }
-    });
+    })) return;
     if (channel.source === "clob") {
       this.sendSubscription(channel, "initial", [...channel.tokens]);
+      if (!this.isCurrent(channel, connection)) return;
       channel.heartbeat = this.timers.setInterval(() => {
-        if (!channel.open || !channel.socket) return;
-        this.safeRecord({ source: "collector", kind: "heartbeat", connectionId: channel.connectionId!, data: "PING" });
+        if (!this.isCurrent(channel, connection) || !channel.open) return;
+        if (!this.safeRecord({ source: "collector", kind: "heartbeat", connectionId: connection.id, data: "PING" })) return;
         try {
-          channel.socket.send("PING");
+          connection.socket.send("PING");
         } catch (error) {
           this.reportError(error);
+          this.retireConnection(channel, connection, "heartbeat_error");
         }
       }, this.heartbeatIntervalMs);
     }
   }
 
-  private handleMessage(channel: ChannelState, socket: CollectorSocket, data: unknown): void {
-    if (!this.isCurrent(channel, socket)) return;
+  private handleMessage(channel: ChannelState, connection: SocketConnection, data: unknown): void {
+    if (!this.isCurrent(channel, connection) || !channel.open) return;
+    channel.reconnectAttempt = 0;
+    this.armWatchdog(channel, connection, "inbound_timeout", this.inboundTimeoutMs);
     const frame = frameText(data);
     if (frame === null) return;
     if (!this.safeRecord({ source: channel.source, kind: "ws_message", connectionId: channel.connectionId!, data: frame })) return;
     const callback = this.onFrame;
     if (callback) {
-      void Promise.resolve(callback({ source: channel.source, connectionId: channel.connectionId!, frame })).catch((error: unknown) => this.reportError(error));
-    }
-    if (channel.source === "sports" && (frame.toLowerCase() === "ping" || isJsonHeartbeat(frame))) {
       try {
-        channel.socket?.send(frame.toLowerCase() === "ping" ? "pong" : JSON.stringify({ type: "pong" }));
+        void Promise.resolve(callback({ source: channel.source, connectionId: connection.id, frame })).catch((error: unknown) => this.reportError(error));
       } catch (error) {
         this.reportError(error);
       }
     }
-  }
-
-  private handleClose(channel: ChannelState, socket: CollectorSocket, event: StreamRecord): void {
-    if (!this.isCurrent(channel, socket)) return;
-    channel.open = false;
-    this.clearHeartbeat(channel);
-    this.safeRecord({
-      source: "collector",
-      kind: "connection_close",
-      connectionId: channel.connectionId!,
-      data: { code: event.code, reason: event.reason }
-    });
-    channel.socket = undefined;
-    if (this.started && this.autoReconnect && !channel.disposed && (channel.source === "sports" || channel.tokens.size > 0)) {
-      this.scheduleReconnect(channel);
+    if (channel.source === "sports" && (frame.toLowerCase() === "ping" || isJsonHeartbeat(frame))) {
+      try {
+        connection.socket.send(frame.toLowerCase() === "ping" ? "pong" : JSON.stringify({ type: "pong" }));
+      } catch (error) {
+        this.reportError(error);
+        this.retireConnection(channel, connection, "heartbeat_error");
+      }
     }
   }
 
-  private handleSocketError(channel: ChannelState, socket: CollectorSocket, error: unknown): void {
-    if (!this.isCurrent(channel, socket)) return;
+  private handleClose(channel: ChannelState, connection: SocketConnection, event: StreamRecord): void {
+    if (connection.closed) return;
+    connection.closed = true;
+    connection.resolveClosed();
+    this.recordClose(connection, { code: event.code, reason: event.reason });
+    this.releaseConnection(connection);
+    if (!this.isCurrent(channel, connection)) return;
+    this.retireConnection(channel, connection, "socket_close");
+  }
+
+  private handleSocketError(channel: ChannelState, connection: SocketConnection, error: unknown): void {
+    if (!this.isCurrent(channel, connection)) return;
     this.safeRecord({ source: "collector", kind: "socket_error", connectionId: channel.connectionId!, data: error });
     this.reportError(error);
+    this.retireConnection(channel, connection, "socket_error");
   }
 
   private sendSubscription(channel: ChannelState, operation: "initial" | "subscribe" | "unsubscribe", tokens: string[]): void {
-    if (!channel.socket || !channel.open || tokens.length === 0) return;
+    const connection = channel.connection;
+    if (!connection || !channel.open || tokens.length === 0) return;
     const payload = operation === "initial"
       ? { assets_ids: tokens, type: "market", custom_feature_enabled: true }
       : { assets_ids: tokens, operation };
     if (!this.safeRecord({ source: "collector", kind: "subscription", connectionId: channel.connectionId!, data: payload })) return;
     try {
-      channel.socket.send(JSON.stringify(payload));
+      connection.socket.send(JSON.stringify(payload));
     } catch (error) {
       this.reportError(error);
+      this.retireConnection(channel, connection, "subscription_error");
     }
   }
 
   private scheduleReconnect(channel: ChannelState): void {
-    if (channel.reconnectTimer !== undefined || channel.disposed || !this.started || !this.autoReconnect) return;
+    if (channel.reconnectTimer !== undefined || channel.disposed || !this.started || !this.autoReconnect || this.fatalError) return;
+    if (channel.source === "clob" && channel.tokens.size === 0) return;
     channel.reconnectAttempt += 1;
-    const configured = typeof this.reconnectDelayMs === "function"
-      ? this.reconnectDelayMs(channel.reconnectAttempt)
-      : this.reconnectDelayMs;
-    const delay = Number.isFinite(configured) && configured >= 0 ? configured : 1_000;
+    let configured: number;
+    try {
+      configured = typeof this.reconnectDelayMs === "function"
+        ? this.reconnectDelayMs(channel.reconnectAttempt)
+        : this.reconnectDelayMs * 2 ** Math.min(channel.reconnectAttempt - 1, 30);
+    } catch (error) {
+      this.reportError(error);
+      configured = 1_000;
+    }
+    const delay = Math.min(this.maxReconnectDelayMs, Number.isFinite(configured) && configured >= 0 ? configured : 1_000);
     channel.reconnectTimer = this.timers.setTimeout(() => {
       channel.reconnectTimer = undefined;
       this.connect(channel);
@@ -340,20 +425,15 @@ export class PublicStreams {
     if (channel.disposed) return;
     channel.disposed = true;
     this.clearHeartbeat(channel);
+    this.clearWatchdog(channel);
     if (channel.reconnectTimer !== undefined) {
       this.timers.clearTimeout(channel.reconnectTimer);
       channel.reconnectTimer = undefined;
     }
-    const socket = channel.socket;
-    channel.socket = undefined;
+    const connection = channel.connection;
+    channel.connection = undefined;
     channel.open = false;
-    if (socket) {
-      try {
-        socket.close(1000, "collector stopping");
-      } catch (error) {
-        this.reportError(error);
-      }
-    }
+    if (connection) this.releaseConnection(connection);
     const index = this.shards.indexOf(channel);
     if (index >= 0) this.shards.splice(index, 1);
   }
@@ -365,8 +445,100 @@ export class PublicStreams {
     }
   }
 
-  private isCurrent(channel: ChannelState, socket: CollectorSocket): boolean {
-    return !channel.disposed && channel.socket === socket && channel.connectionId !== undefined;
+  private clearWatchdog(channel: ChannelState): void {
+    if (channel.watchdog !== undefined) {
+      this.timers.clearTimeout(channel.watchdog);
+      channel.watchdog = undefined;
+    }
+  }
+
+  private armWatchdog(channel: ChannelState, connection: SocketConnection, reason: string, timeoutMs: number): void {
+    this.clearWatchdog(channel);
+    channel.watchdog = this.timers.setTimeout(() => {
+      channel.watchdog = undefined;
+      if (this.isCurrent(channel, connection)) this.retireConnection(channel, connection, reason);
+    }, timeoutMs);
+  }
+
+  private recordGap(channel: ChannelState, reason: string): void {
+    this.safeRecord({
+      source: "collector", kind: "connection_gap", connectionId: channel.connectionId!,
+      data: { source: channel.source, reason, epoch: channel.epoch }
+    });
+  }
+
+  private recordClose(connection: SocketConnection, data: Record<string, unknown>): void {
+    if (connection.closeRecorded) return;
+    connection.closeRecorded = true;
+    this.safeRecord({ source: "collector", kind: "connection_close", connectionId: connection.id, data });
+  }
+
+  private retireConnection(channel: ChannelState, connection: SocketConnection, reason: string): void {
+    if (!this.isCurrent(channel, connection)) return;
+    this.recordGap(channel, reason);
+    channel.open = false;
+    channel.connection = undefined;
+    this.clearHeartbeat(channel);
+    this.clearWatchdog(channel);
+    this.releaseConnection(connection);
+    this.scheduleReconnect(channel);
+  }
+
+  private releaseConnection(connection: SocketConnection): void {
+    if (connection.shutdownPromise) return;
+    // Defer the handshake until the promise is registered: fake sockets and
+    // some transports can emit close synchronously from close().
+    const closing = Promise.resolve().then(() => this.closeConnection(connection));
+    connection.shutdownPromise = closing;
+    this.pendingClosures.add(closing);
+    void closing.then(() => {
+      this.pendingClosures.delete(closing);
+    }, (error: unknown) => {
+      this.pendingClosures.delete(closing);
+      const failure = error instanceof Error ? error : new Error("STREAM_CLOSE_FAILED", { cause: error });
+      this.closeError ??= failure;
+      this.reportError(failure);
+      this.fail(failure);
+    });
+  }
+
+  private async closeConnection(connection: SocketConnection): Promise<void> {
+    const socket = connection.socket;
+    let graceful = connection.closed;
+    if (!graceful) {
+      const closed = this.withCloseDeadline(connection.closedPromise, connection.id).then(() => true, () => false);
+      try {
+        socket.close(1000, this.stopping ? "collector stopping" : "collector reconnecting");
+      } catch (error) {
+        this.reportError(error);
+      }
+      graceful = await closed;
+    }
+    if (!graceful) {
+      const force = socket.destroy ?? socket.terminate;
+      if (!force) throw new Error(`STREAM_CLOSE_TIMEOUT: ${connection.id} has no forced teardown`);
+      this.recordClose(connection, { code: 1006, reason: "close_timeout", forced: true });
+      await this.withCloseDeadline(Promise.resolve().then(() => force.call(socket)).then(() => connection.closedPromise), connection.id);
+    } else if (socket.destroy) {
+      await this.withCloseDeadline(Promise.resolve().then(() => socket.destroy!()), connection.id);
+    }
+  }
+
+  private withCloseDeadline(work: Promise<void>, connectionId: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = this.timers.setTimeout(() => reject(new Error(`STREAM_CLOSE_TIMEOUT: ${connectionId}`)), this.closeTimeoutMs);
+      void work.then(() => {
+        this.timers.clearTimeout(timer);
+        resolve();
+      }, (error: unknown) => {
+        this.timers.clearTimeout(timer);
+        reject(error);
+      });
+    });
+  }
+
+  private isCurrent(channel: ChannelState, connection: SocketConnection): boolean {
+    return !channel.disposed && channel.connection === connection;
   }
 
   private safeRecord(input: Parameters<RecordSink["record"]>[0]): boolean {
@@ -395,6 +567,7 @@ export class PublicStreams {
     } catch {
       // Keep the original storage error available through the public state.
     }
+    void this.stop().catch((closeError: unknown) => this.reportError(closeError));
   }
 }
 

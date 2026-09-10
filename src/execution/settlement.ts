@@ -4,6 +4,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { polygon, polygonAmoy } from "viem/chains";
 import { POLYMARKET_PUSD_ADDRESS, DEFAULT_POLYGON_RPC_URL } from "./balance.js";
 import { fetchJson, postJson, type HttpOptions } from "../polymarket/http.js";
+import type { LedgerStatus } from "../persistence/ledger.js";
 
 export const POLYMARKET_CONDITIONAL_TOKENS_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 export const POLYMARKET_CTF_COLLATERAL_ADAPTER = "0xAdA100Db00Ca00073811820692005400218FcE1f";
@@ -59,6 +60,8 @@ export interface SettlementLedgerEntry {
   tokenId: string;
   conditionId: string;
   outcome: string;
+  status?: LedgerStatus;
+  shares?: number;
 }
 
 export interface MarketSettlementStatus {
@@ -98,7 +101,7 @@ export interface SettlementConfig {
   builderPassphrase?: string;
 }
 
-export type SettlementStatus = "disabled" | "unconfigured" | "no_positions" | "no_calls" | "submitted";
+export type SettlementStatus = "disabled" | "unconfigured" | "no_positions" | "no_calls" | "submitted" | "confirmed";
 
 export interface SettlementResult {
   status: SettlementStatus;
@@ -267,10 +270,17 @@ export async function settleRedeemablePositions(
   if (config.builderApiSecret) submitInput.builderApiSecret = config.builderApiSecret;
   if (config.builderPassphrase) submitInput.builderPassphrase = config.builderPassphrase;
   const response = await submit(submitInput);
-  await deps.markRedeemedConditionIds?.(groups.map((group) => group.conditionId));
+  const state = stringValue(field(response, "state"));
+  const normalizedState = state?.trim().toUpperCase();
+  if (["STATE_FAILED", "STATE_INVALID", "STATE_REJECTED", "FAILED", "INVALID", "REJECTED"].includes(normalizedState ?? "")
+    || field(response, "success") === false || hasSettlementResponseError(response)) {
+    throw new Error(`POLY_REDEEM_FAILED: ${state ?? "relayer rejected the redemption batch"}`, { cause: response });
+  }
+  const confirmed = normalizedState === "STATE_CONFIRMED";
+  if (confirmed) await deps.markRedeemedConditionIds?.(groups.map((group) => group.conditionId));
 
   const result: SettlementResult = {
-    status: "submitted",
+    status: confirmed ? "confirmed" : "submitted",
     positions: positions.length,
     conditions: groups.length,
     calls: calls.length
@@ -279,9 +289,16 @@ export async function settleRedeemablePositions(
   if (transactionID) result.transactionID = transactionID;
   const transactionHash = stringValue(field(response, "transactionHash") ?? field(response, "hash"));
   if (transactionHash) result.transactionHash = transactionHash;
-  const state = stringValue(field(response, "state"));
   if (state) result.state = state;
   return result;
+}
+
+function hasSettlementResponseError(response: unknown): boolean {
+  return ["error", "errorMsg", "err_msg"].some((key) => {
+    const value = field(response, key);
+    if (typeof value === "string") return value.trim().length > 0;
+    return value !== undefined && value !== null && value !== false && value !== 0;
+  });
 }
 
 export async function reconcileAlreadyRedeemedLedgerEntries(
@@ -295,28 +312,43 @@ export async function reconcileAlreadyRedeemedLedgerEntries(
   const entries = await deps.readActiveLedgerEntries();
   const fetchMarket = deps.fetchMarketSettlementStatus ?? fetchGammaMarketSettlementStatus;
   const readBalance = deps.readConditionalTokenBalance ?? readConditionalTokenBalance;
-  const redeemedConditions = new Set<string>();
-  const lostConditions = new Set<string>();
-
-  await Promise.all(entries.map(async (entry) => {
+  const dispositions = await Promise.all(entries.map(async (entry): Promise<"redeemed" | "lost" | undefined> => {
     try {
+      // A posted order may still fill after this balance read. Zero balance is
+      // evidence of redemption only for an already established position.
+      if (entry.status === "posted" || (entry.shares !== undefined && !(entry.shares > 0))) return;
       if (!entry.marketSlug || !entry.tokenId || !entry.conditionId || !entry.outcome) return;
       const market = await fetchMarket(entry.marketSlug, config);
       if (!market?.resolved) return;
       if (isWinningOutcome(market, entry.outcome)) {
         if (!deps.markRedeemedConditionIds) return;
         const balance = await readBalance(config.walletAddress!, entry.tokenId, config);
-        if (balance === 0n) redeemedConditions.add(entry.conditionId);
+        if (balance === 0n) return "redeemed";
         return;
       }
-      if (isResolvedLosingOutcome(market, entry.outcome)) lostConditions.add(entry.conditionId);
+      if (isResolvedLosingOutcome(market, entry.outcome)) return "lost";
     } catch {
       // Reconciliation is best-effort; normal redeem polling should continue.
     }
   }));
 
-  const redeemedConditionIds = [...redeemedConditions];
-  const lostConditionIds = [...lostConditions];
+  const conditions = new Map<string, { conditionId: string; dispositions: typeof dispositions }>();
+  entries.forEach((entry, index) => {
+    if (!entry.conditionId) return;
+    const key = entry.conditionId.toLowerCase();
+    const group = conditions.get(key) ?? { conditionId: entry.conditionId, dispositions: [] };
+    group.dispositions.push(dispositions[index]);
+    conditions.set(key, group);
+  });
+  const redeemedConditionIds: string[] = [];
+  const lostConditionIds: string[] = [];
+  for (const group of conditions.values()) {
+    // These callbacks settle an entire condition. A losing outcome or one zero
+    // balance cannot establish that its other tracked tokens have settled too.
+    if (group.dispositions.some((disposition) => disposition === undefined)) continue;
+    if (group.dispositions.every((disposition) => disposition === "lost")) lostConditionIds.push(group.conditionId);
+    else redeemedConditionIds.push(group.conditionId);
+  }
   if (redeemedConditionIds.length > 0) await deps.markRedeemedConditionIds?.(redeemedConditionIds);
   if (lostConditionIds.length > 0) await deps.markLostConditionIds?.(lostConditionIds);
   return { checkedEntries: entries.length, redeemedConditions: redeemedConditionIds, lostConditions: lostConditionIds };

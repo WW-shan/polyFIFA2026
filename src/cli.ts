@@ -69,11 +69,13 @@ interface PendingBuy {
   decision: Extract<TradeDecision, { action: "BUY" }>;
   lockedIncidentKey?: string;
   lockedIncidentPreviousMatch?: MatchState;
+  lockedIncidentRequiresScoreConfirmation?: boolean;
 }
 
 interface LockedScoreIncident {
   key: string;
   previousMatch: MatchState;
+  requiresScoreConfirmation?: boolean;
 }
 
 interface LockedIncidentBudget {
@@ -87,6 +89,12 @@ interface LockedScoreRiskAssessment {
   details: string;
   stakeLimit?: number;
   lockedScoreGuard?: LockedScoreGuardAudit;
+  checkBeforeExecution?: () => NoTradeDecision | undefined;
+}
+
+interface LockedGoalSignalCheck {
+  ready: Promise<void>;
+  current: () => Scores365GoalSignal | null;
 }
 
 interface LockedScoreRiskContext {
@@ -154,6 +162,7 @@ type ScoreIncidentContext =
 const MAX_VERIFIED_CLOCK_POLL_INTERVAL_MS = 1000;
 const SPORTS_WATCH_RECONNECT_INTERVAL_MS = 1000;
 const DEFAULT_LOCKED_SCORE_CONFIRM_TIMEOUT_MS = 900;
+const LOCKED_SCORE_SIGNAL_GRACE_MS = 100;
 const LOCKED_INCIDENT_BANKROLL_FRACTION = 0.2;
 const LOCKED_ORDERBOOK_DELTA_DELAY_MS = 750;
 const LOCKED_ORDERBOOK_CHEAP_GROWTH_TOLERANCE_NOTIONAL = 0.5;
@@ -275,15 +284,27 @@ async function runSinglePass(
     const ledgerFile = resolveLedgerFile(args, env);
     const ledger = ledgerFile ? new LiveLedger(ledgerFile) : undefined;
     const duplicateDecisionFor = async (buyDecision: Extract<TradeDecision, { action: "BUY" }>): Promise<NoTradeDecision | undefined> => {
-      if (!ledger || !(await ledger.hasActiveEventTrade(buyDecision.eventSlug))) return undefined;
-      const hasActiveLockedEventTrade = await ledger.hasActiveLockedEventTrade(buyDecision.eventSlug);
+      if (!ledger) return undefined;
+      const activePositions = (await ledger.readActiveEntries()).filter((entry) => entry.eventSlug === buyDecision.eventSlug);
+      if (activePositions.length === 0) return undefined;
+      // A basket's aggregate "partial" status can include a zero-notional
+      // posted leg. Its unresolved commitment cannot fund another refill.
+      if (activePositions.some((entry) => entry.status === "posted")) {
+        return {
+          action: "NO_TRADE",
+          reason: "DUPLICATE_TRADE",
+          eventSlug: buyDecision.eventSlug,
+          details: "Ledger has an unresolved submitted position for this event; reconciliation is required before another buy"
+        };
+      }
+      const hasActiveLockedEventTrade = activePositions.some((entry) => isLockedStrategy(entry.strategy));
       const allowLockedRefill = options.allowActiveEventRefill
         && buyDecision.locked === true
         && hasActiveLockedEventTrade;
       const allowNonLockedAfterLocked = options.allowActiveEventRefill
         && buyDecision.locked !== true
         && hasActiveLockedEventTrade
-        && !(await ledger.hasActiveTrade(buyDecision.eventSlug, buyDecision.tokenId));
+        && !activePositions.some((entry) => entry.tokenId === buyDecision.tokenId);
       if (allowLockedRefill === true || allowNonLockedAfterLocked === true) return undefined;
       return {
         action: "NO_TRADE",
@@ -343,6 +364,7 @@ async function runSinglePass(
       return ok(summary(args.mode, decision));
     }
     let lockedScoreGuardAudit: LockedScoreGuardAudit | undefined;
+    let checkLockedScoreBeforeExecution: (() => NoTradeDecision | undefined) | undefined;
     if (decision.locked === true && options.assessLockedScoreRisk) {
       const risk = await options.assessLockedScoreRisk(match, decision, {
         ...(options.lockedIncidentPreviousMatch ? { previousMatch: options.lockedIncidentPreviousMatch } : {}),
@@ -370,6 +392,7 @@ async function runSinglePass(
         decision = suppressedDecision;
       } else {
         lockedScoreGuardAudit = risk.assessment.lockedScoreGuard;
+        checkLockedScoreBeforeExecution = risk.assessment.checkBeforeExecution;
         const incidentRiskStakeLimit = lockedIncidentHasNewCandidate && options.lockedIncidentStakeLimit
           ? await options.lockedIncidentStakeLimit(risk.assessment.capFraction)
           : undefined;
@@ -447,11 +470,24 @@ async function runSinglePass(
       decision,
       ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
     });
+    const lateSignalBlock = decision.locked === true ? checkLockedScoreBeforeExecution?.() : undefined;
+    if (lateSignalBlock) {
+      await writeDepthAudit(args, env, {
+        match,
+        markets,
+        orderbooks,
+        thresholds,
+        decision: lateSignalBlock,
+        ...(lockedScoreGuardAudit ? { lockedScoreGuard: lockedScoreGuardAudit } : {})
+      });
+      return ok(summary(args.mode, lateSignalBlock));
+    }
+    const executeOptions = liveExecuteOptions(args, thresholds, deps, decision, checkLockedScoreBeforeExecution);
     const trade = args.mode === "paper"
       ? await new PaperExecutor().execute(decision)
       : await (deps.executeLive
-        ? deps.executeLive(decision, liveExecuteOptions(args, thresholds, deps))
-        : new LiveExecutor(liveConfig).execute(decision, liveExecuteOptions(args, thresholds, deps)));
+        ? deps.executeLive(decision, executeOptions)
+        : new LiveExecutor(liveConfig).execute(decision, executeOptions));
     if (ledger) await ledger.recordResult(decision, trade);
 
     return ok(summary(args.mode, decision, trade));
@@ -506,6 +542,9 @@ async function runSportsWatch(
     });
   }
 
+  // Keep unresolved events blocked across sports reconnects, including paper
+  // or memory-only runs without a ledger. A new watch can use reconciled data.
+  const unresolvedEventSlugs = new Set<string>();
   const settlementMonitor = autoSettlementMonitor(args, env, deps);
   while (iterations < maxIterations) {
     settlementMonitor?.kick();
@@ -588,7 +627,7 @@ async function runSportsWatch(
 
     const activeMatches = new Map<string, MatchState>();
     const pendingBuys = new Map<string, PendingBuy>();
-    const completedEventSlugs = new Set<string>();
+    const completedEventSlugs = new Set(unresolvedEventSlugs);
     const refillEventSlugs = new Set<string>();
     const observedScores = new Map<string, MatchState>();
     const currentLockedIncidents = new Map<string, CurrentScoreIncidentState>();
@@ -597,6 +636,7 @@ async function runSportsWatch(
     const lockedOrderbookCache = new Map<string, CachedOrderbook>();
     let marketsFileCache: StrategyMarket[] | undefined;
     await seedLateActiveMatches(activeMatches, events, deps);
+    for (const eventSlug of unresolvedEventSlugs) activeMatches.delete(eventSlug);
     const iterator = updates[Symbol.asyncIterator]();
     let updatePromise: Promise<IteratorResult<MatchState>> | undefined = iterator.next();
 
@@ -675,7 +715,8 @@ async function runSportsWatch(
       if (!lockedIncident) return options;
       options.lockedIncidentPreviousMatch = lockedIncident.previousMatch;
       options.lockedIncidentStakeLimit = (fraction) => lockedIncidentBudgetRemaining(lockedIncident.key, fraction);
-      options.assessLockedScoreRisk = assessLockedScoreRisk;
+      options.assessLockedScoreRisk = (match, decision, context) =>
+        assessLockedScoreRisk(match, decision, context, lockedIncident.requiresScoreConfirmation === true);
       return options;
     }
 
@@ -706,7 +747,7 @@ async function runSportsWatch(
       return entries.reduce((total, entry) => total + (Number.isFinite(entry.notional) ? entry.notional : 0), 0);
     }
 
-    async function assessLockedScoreRisk(match: MatchState, decision: Extract<TradeDecision, { action: "BUY" }>, context: LockedScoreRiskContext): Promise<LockedScoreRiskResult> {
+    async function assessLockedScoreRisk(match: MatchState, decision: Extract<TradeDecision, { action: "BUY" }>, context: LockedScoreRiskContext, requiresScoreConfirmation = false): Promise<LockedScoreRiskResult> {
       if (decision.locked !== true || !isLockedStrategy(decision.strategy)) {
         return {
           action: "USE",
@@ -718,80 +759,55 @@ async function runSportsWatch(
         };
       }
 
-      const signal = await fetchLockedGoalSignalCheck(match, context.previousMatch);
-      if (!signal) {
-        const marketGuard = await assessLockedOrderbookDelta(match, decision, context);
-        if (marketGuard.action === "SKIP") return marketGuard;
-        return {
-          action: "USE",
-          assessment: {
-            capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
-            minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
-            ...(marketGuard.stakeLimit !== undefined ? { stakeLimit: marketGuard.stakeLimit } : {}),
-            ...(marketGuard.lockedScoreGuard ? { lockedScoreGuard: marketGuard.lockedScoreGuard } : {}),
-            details: `locked score guard passed without 365 goal signal via orderbook delta ${match.homeGoals}-${match.awayGoals}; ${marketGuard.details}`
-          }
-        };
-      }
+      const evidence = fetchLockedGoalSignalCheck(match, context.previousMatch);
+      await evidence.ready;
+      let audit = lockedScoreGuardAudit(lockedDecisionTokenIds(decision));
+      const checkBeforeExecution = (): NoTradeDecision | undefined => {
+        const signal = evidence.current();
+        const signalAudit = lockedScoreGuardAudit([], signal ?? undefined).signal;
+        if (signalAudit) audit.signal = signalAudit;
+        let details: string | undefined;
+        if (signal?.hasNoGoalSignal || signal?.hasVarReviewSignal || signal?.hasPostRegulationGoalSignal) {
+          details = `locked score guard hard-blocked by 365 event signal: ${signal.details.join("; ")}`;
+        } else if (signal && !signal.scoreMatchesSports) {
+          details = `locked score guard rejected because 365 score ${signal.homeGoals}-${signal.awayGoals} disagrees with sports score ${match.homeGoals}-${match.awayGoals}`;
+        } else if (!signal && requiresScoreConfirmation) {
+          details = "locked score guard requires independent score confirmation after a sports score rollback";
+        }
+        if (details) return { action: "NO_TRADE", reason: "NO_ELIGIBLE_STRATEGY", eventSlug: match.eventSlug, details };
+        return undefined;
+      };
+      const initialBlock = checkBeforeExecution();
+      if (initialBlock) return { action: "SKIP", decision: initialBlock, lockedScoreGuard: audit };
 
-      if (signal.hasNoGoalSignal || signal.hasVarReviewSignal || signal.hasPostRegulationGoalSignal) {
-        const details = signal.details.join("; ");
-        return {
-          action: "SKIP",
-          decision: {
-            action: "NO_TRADE",
-            reason: "NO_ELIGIBLE_STRATEGY",
-            eventSlug: match.eventSlug,
-            details: `locked score guard hard-blocked by 365 event signal: ${details}`
-          }
-        };
-      }
-
-      if (!signal.scoreMatchesSports) {
-        return {
-          action: "SKIP",
-          decision: {
-            action: "NO_TRADE",
-            reason: "NO_ELIGIBLE_STRATEGY",
-            eventSlug: match.eventSlug,
-            details: `locked score guard rejected because 365 score ${signal.homeGoals}-${signal.awayGoals} disagrees with sports score ${match.homeGoals}-${match.awayGoals}`
-          }
-        };
-      }
-
-      const marketGuard = await assessLockedOrderbookDelta(match, decision, context, signal);
+      const marketGuard = await assessLockedOrderbookDelta(match, decision, context, evidence.current() ?? undefined);
+      audit = marketGuard.lockedScoreGuard ?? audit;
+      // The signal budget only bounds waiting. Responses received during S2,
+      // budget/ledger reads, or audit writes still invalidate this attempt.
+      const lateBlock = checkBeforeExecution();
+      if (lateBlock) return { action: "SKIP", decision: lateBlock, lockedScoreGuard: audit };
       if (marketGuard.action === "SKIP") return marketGuard;
-
-      if (signal.scoreMatchesSports || signal.hasMatchingGoal) {
-        return {
-          action: "USE",
-          assessment: {
-            capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
-            minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
-            ...(marketGuard.stakeLimit !== undefined ? { stakeLimit: marketGuard.stakeLimit } : {}),
-            ...(marketGuard.lockedScoreGuard ? { lockedScoreGuard: marketGuard.lockedScoreGuard } : {}),
-            details: `locked score guard passed ${match.homeGoals}-${match.awayGoals}; ${signal.details.join("; ")}; ${marketGuard.details}`
-          }
-        };
-      }
-
+      const signal = evidence.current();
       return {
-        action: "SKIP",
-        decision: {
-          action: "NO_TRADE",
-          reason: "NO_ELIGIBLE_STRATEGY",
-          eventSlug: match.eventSlug,
-          details: "locked score guard rejected because no confirmed score signal passed"
+        action: "USE",
+        assessment: {
+          capFraction: LOCKED_INCIDENT_BANKROLL_FRACTION,
+          minimumNetReturn: DEFAULT_THRESHOLDS.minimumNetReturn,
+          ...(marketGuard.stakeLimit !== undefined ? { stakeLimit: marketGuard.stakeLimit } : {}),
+          lockedScoreGuard: audit,
+          checkBeforeExecution,
+          details: signal
+            ? `locked score guard passed ${match.homeGoals}-${match.awayGoals}; ${signal.details.join("; ")}; ${marketGuard.details}`
+            : `locked score guard passed without 365 goal signal via orderbook delta ${match.homeGoals}-${match.awayGoals}; ${marketGuard.details}`
         }
       };
     }
 
-    async function fetchLockedGoalSignalCheck(match: MatchState, previousMatch: MatchState | undefined): Promise<Scores365GoalSignal | null> {
-      return firstUsableGoalSignal([
-        fetchLockedGoalSignal(match, previousMatch, events, clockOptions).catch(() => null),
-        fetchExternalScore(match, events, clockOptions)
+    function fetchLockedGoalSignalCheck(match: MatchState, previousMatch: MatchState | undefined): LockedGoalSignalCheck {
+      return collectGoalSignals([
+        Promise.resolve().then(() => fetchLockedGoalSignal(match, previousMatch, events, clockOptions)),
+        Promise.resolve().then(() => fetchExternalScore(match, events, clockOptions))
           .then((patch) => scorePatchToGoalSignal(patch, match))
-          .catch(() => null)
       ], lockedScoreConfirmTimeoutMs(env));
     }
 
@@ -975,7 +991,7 @@ async function runSportsWatch(
     function executedNotional(value: Record<string, unknown>): number | undefined {
       const trade = value.trade;
       if (isRecord(trade) && isPositiveNumber(trade.notional)) return trade.notional;
-      return isPositiveNumber(value.notional) ? value.notional : undefined;
+      return undefined;
     }
 
     function rememberScoreIncident(match: MatchState): ScoreIncidentContext {
@@ -1003,21 +1019,26 @@ async function runSportsWatch(
         return createLockedScoreIncident(match, previous);
       }
 
-      currentLockedIncidents.delete(match.eventSlug);
+      // A correction invalidates every surviving locked candidate. Keep its
+      // budget, and revalidate from zero so unchanged ticks cannot bypass the
+      // score guard or treat a surviving goal as an already cleared candidate.
+      createLockedScoreIncident(match, zeroScoreMatch(match), true);
       return {
         action: "blocked",
         details: `Locked score suppressed because sports score moved from ${scorePair(previous)} to ${score}`
       };
     }
 
-    function createLockedScoreIncident(match: MatchState, previousMatch: MatchState): ScoreIncidentContext {
+    function createLockedScoreIncident(match: MatchState, previousMatch: MatchState, requiresScoreConfirmation = false): ScoreIncidentContext {
       const sequence = (incidentSequences.get(match.eventSlug) ?? 0) + 1;
       incidentSequences.set(match.eventSlug, sequence);
+      const recovering = requiresScoreConfirmation ? currentLockedIncidents.get(match.eventSlug) : undefined;
       const incident: CurrentScoreIncidentState = {
-        key: `${match.eventSlug}:${sequence}:${scorePair(match)}`,
+        key: recovering?.key ?? `${match.eventSlug}:${sequence}:${scorePair(match)}`,
         previousMatch,
         homeGoals: match.homeGoals,
-        awayGoals: match.awayGoals
+        awayGoals: match.awayGoals,
+        requiresScoreConfirmation
       };
       currentLockedIncidents.set(match.eventSlug, incident);
       return { action: "locked_incident", incident };
@@ -1140,6 +1161,7 @@ async function runSportsWatch(
       if (lockedIncident) {
         pending.lockedIncidentKey = lockedIncident.key;
         pending.lockedIncidentPreviousMatch = lockedIncident.previousMatch;
+        pending.lockedIncidentRequiresScoreConfirmation = lockedIncident.requiresScoreConfirmation === true;
       }
       pendingBuys.set(match.eventSlug, pending);
     }
@@ -1159,7 +1181,11 @@ async function runSportsWatch(
       for (const pending of ranked) {
         pendingBuys.delete(pending.eventSlug);
         const lockedIncident = pending.lockedIncidentKey && pending.lockedIncidentPreviousMatch
-          ? { key: pending.lockedIncidentKey, previousMatch: pending.lockedIncidentPreviousMatch }
+          ? {
+            key: pending.lockedIncidentKey,
+            previousMatch: pending.lockedIncidentPreviousMatch,
+            requiresScoreConfirmation: pending.lockedIncidentRequiresScoreConfirmation === true
+          }
           : undefined;
         const fatal = await executeAndRememberSportsWatchMatch(pending.match, lockedIncident);
         if (fatal) return fatal;
@@ -1197,6 +1223,7 @@ async function runSportsWatch(
 
     function rememberSportsWatchTradeOutcome(value: Record<string, unknown>, match: MatchState): void {
       if (!isCompletedTradeSummary(value)) return;
+      if (hasUnresolvedTradeSummary(value)) unresolvedEventSlugs.add(match.eventSlug);
       if (shouldKeepRefillingLockedEvent(value, match)) {
         refillEventSlugs.add(match.eventSlug);
         activeMatches.set(match.eventSlug, match);
@@ -1309,9 +1336,18 @@ function isCompletedTradeSummary(value: Record<string, unknown>): boolean {
   return value.status === "filled" || value.status === "partial" || value.status === "posted";
 }
 
+function hasUnresolvedTradeSummary(value: Record<string, unknown>): boolean {
+  if (value.status === "posted") return true;
+  const trade = value.trade;
+  return isRecord(trade) && (trade.status === "posted"
+    || (Array.isArray(trade.legs) && trade.legs.some((leg) => isRecord(leg) && leg.status === "posted")));
+}
+
 function shouldKeepRefillingLockedEvent(value: Record<string, unknown>, match: MatchState): boolean {
   if (value.status !== "filled" && value.status !== "partial") return false;
-  if (!isPositiveNumber(value.notional) && !isPositiveNumber(value.shares)) return false;
+  if (hasUnresolvedTradeSummary(value)) return false;
+  const trade = value.trade;
+  if (!isRecord(trade) || (!isPositiveNumber(trade.notional) && !isPositiveNumber(trade.shares))) return false;
   const decision = buyDecisionFromSummary(value);
   if (!decision || decision.locked !== true || !isLockedStrategy(decision.strategy)) return false;
   return isLiveLockedScoreMatch(match);
@@ -1425,37 +1461,62 @@ function lockedScoreConfirmTimeoutMs(env: Record<string, string | undefined>): n
   return Math.max(1, numberEnv(env.POLY_LOCKED_SCORE_CONFIRM_TIMEOUT_MS) ?? DEFAULT_LOCKED_SCORE_CONFIRM_TIMEOUT_MS);
 }
 
-function firstUsableGoalSignal(
+function collectGoalSignals(
   sources: Array<Promise<Scores365GoalSignal | null>>,
   timeoutMs: number
-): Promise<Scores365GoalSignal | null> {
-  if (sources.length === 0) return Promise.resolve(null);
-  return new Promise((resolve) => {
+): LockedGoalSignalCheck {
+  let latest: Scores365GoalSignal | null = null;
+  const ready = new Promise<void>((resolve) => {
     let settled = false;
     let pending = sources.length;
-    const finish = (signal: Scores365GoalSignal | null): void => {
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(signal);
+      clearTimeout(graceTimer);
+      resolve();
     };
-    const timer = setTimeout(() => finish(null), timeoutMs);
+    const timer = setTimeout(finish, timeoutMs);
+    const receive = (signal: Scores365GoalSignal | null): void => {
+      if (signal) latest = mergeGoalSignals(latest, signal);
+      pending -= 1;
+      if (settled) return;
+      if (pending === 0 || (latest && isBlockingGoalSignal(latest))) {
+        finish();
+      } else if (latest && graceTimer === undefined) {
+        // Give the other source a bounded chance to contradict a fast score.
+        // Keep observing it even after the grace period or total timeout ends.
+        graceTimer = setTimeout(finish, LOCKED_SCORE_SIGNAL_GRACE_MS);
+      }
+    };
+    if (pending === 0) finish();
     for (const source of sources) {
-      source.then((signal) => {
-        if (settled) return;
-        if (signal) {
-          finish(signal);
-          return;
-        }
-        pending -= 1;
-        if (pending === 0) finish(null);
-      }, () => {
-        if (settled) return;
-        pending -= 1;
-        if (pending === 0) finish(null);
-      });
+      source.then(receive, () => receive(null));
     }
   });
+  return { ready, current: () => latest };
+}
+
+function isBlockingGoalSignal(signal: Scores365GoalSignal): boolean {
+  return signal.hasNoGoalSignal || signal.hasVarReviewSignal || signal.hasPostRegulationGoalSignal === true || !signal.scoreMatchesSports;
+}
+
+function mergeGoalSignals(previous: Scores365GoalSignal | null, signal: Scores365GoalSignal): Scores365GoalSignal {
+  if (!previous) return { ...signal, details: [...signal.details] };
+  // Preserve the disagreeing score and latch every negative for this attempt;
+  // neither a score-only response nor a later goal can clear a hard block.
+  const score = !previous.scoreMatchesSports ? previous : signal;
+  return {
+    ...score,
+    scoreMatchesSports: previous.scoreMatchesSports && signal.scoreMatchesSports,
+    hasMatchingGoal: (previous.hasMatchingGoal || signal.hasMatchingGoal)
+      && !isBlockingGoalSignal(previous) && !isBlockingGoalSignal(signal),
+    hasNoGoalSignal: previous.hasNoGoalSignal || signal.hasNoGoalSignal,
+    hasVarReviewSignal: previous.hasVarReviewSignal || signal.hasVarReviewSignal,
+    hasPostRegulationGoalSignal: previous.hasPostRegulationGoalSignal === true || signal.hasPostRegulationGoalSignal === true,
+    details: [...new Set([...previous.details, ...signal.details])]
+  };
 }
 
 function roundForDetails(value: number): number {
@@ -1937,13 +1998,45 @@ function resolveDepthAuditFile(args: ParsedArgs, env: Record<string, string | un
   return undefined;
 }
 
-function liveExecuteOptions(args: ParsedArgs, thresholds: DecisionThresholds, deps: CliDependencies): LiveExecuteOptions {
+function liveExecuteOptions(
+  args: ParsedArgs,
+  thresholds: DecisionThresholds,
+  deps: CliDependencies,
+  decision: Extract<TradeDecision, { action: "BUY" }>,
+  checkBeforeExecution?: () => NoTradeDecision | undefined
+): LiveExecuteOptions {
+  const fetcher = deps.fetchOrderbook ?? fetchOrderbook;
+  let refreshOrderbook = fetcher;
+  let beforeSubmit: LiveExecuteOptions["beforeSubmit"];
+  if (decision.locked === true && checkBeforeExecution) {
+    beforeSubmit = (_order) => {
+      const block = checkBeforeExecution();
+      if (block) throw new LiveExecutionError("LIVE_ORDER_REJECTED", block.details ?? block.reason);
+    };
+    const tokenIds = lockedDecisionTokenIds(decision);
+    let pending: Promise<PromiseSettledResult<OrderbookSnapshot>[]> | undefined;
+    refreshOrderbook = async (tokenId) => {
+      const initialBlock = checkBeforeExecution();
+      if (initialBlock) throw new LiveExecutionError("LIVE_NO_TRADE_DECISION", initialBlock.details ?? initialBlock.reason);
+      // Release refreshed legs together: a negative received while the slowest
+      // book is pending must also veto legs whose books have already arrived.
+      pending ??= Promise.allSettled(tokenIds.map((token) => Promise.resolve().then(() => fetcher(token))));
+      const results = await pending;
+      const lateBlock = checkBeforeExecution();
+      if (lateBlock) throw new LiveExecutionError("LIVE_NO_TRADE_DECISION", lateBlock.details ?? lateBlock.reason);
+      const result = results[tokenIds.indexOf(tokenId)];
+      if (!result) throw new Error(`Unexpected locked orderbook token ${tokenId}`);
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    };
+  }
   return {
     orderType: args.orderType,
-    refreshOrderbook: deps.fetchOrderbook ?? fetchOrderbook,
+    refreshOrderbook,
     minimumNotional: thresholds.minimumNotional,
     minimumNetReturn: thresholds.minimumNetReturn,
-    maxEntryPrice: thresholds.maxEntryPrice
+    maxEntryPrice: thresholds.maxEntryPrice,
+    ...(beforeSubmit ? { beforeSubmit } : {})
   };
 }
 

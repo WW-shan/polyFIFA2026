@@ -176,6 +176,14 @@ Polymarket CLOB v2 may reject older proxy/profile makers with `maker address not
 
 `HTTP_PROXY` / `HTTPS_PROXY` are read as ordinary network settings, for example `http://127.0.0.1:10808`. The project does not implement geoblock bypass logic; trading availability is determined by Polymarket responses.
 
+## Execution recovery
+
+Multi-leg results are recorded independently: a confirmed fill survives failures in sibling legs, while an unacknowledged submission stays `posted` with separate reserved notional. Unresolved positions block further event buys, including locked refills. Do not remove those ledger entries merely to retry; establish the actual exchange outcome first. Canceled remainders retain protection for matched quantities that the trade response has not accounted for.
+
+Ledger writes are serialized across instances in one process and published atomically. Active exposure and settlement are evaluated per basket leg/condition. Pending or failed redemption submissions do not mark holdings redeemed; confirmed state or on-chain reconciliation is required. Operate one trading process per ledger file.
+
+Locked score checks retain rollback state and contradictory evidence through order preparation and the final submission boundary. See `docs/review-repair-verification.md` for the finding-to-regression matrix and public collector acceptance evidence.
+
 ## Secret Safety
 
 No private keys or Polymarket credentials should be committed. Runtime credentials must be provided through environment variables only.

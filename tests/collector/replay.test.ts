@@ -17,7 +17,7 @@ function record(sequence: number, source: ReplayJournalRecord["source"], kind: s
     sequence,
     receivedAt: new Date(receivedAtMs).toISOString(),
     receivedAtMs,
-    monotonicNs: String(sequence),
+    monotonicNs: String(BigInt(sequence) * 1_000_000_000n),
     source,
     kind,
     data
@@ -96,8 +96,8 @@ describe("collector replay", () => {
 
     const result = await readJournalRecords(run);
 
-    expect(result.records).toHaveLength(2);
+    expect(result.records).toHaveLength(1);
     expect(result.quality.incompleteFinalLines).toBe(1);
-    expect(result.quality.sequenceGaps).toEqual([{ expected: 2, actual: 3 }]);
+    expect(result.quality.sequenceGaps).toEqual([]);
   });
 });

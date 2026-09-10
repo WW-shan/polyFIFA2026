@@ -7,6 +7,7 @@ import type { JournalRecord, RecordInput, RecordSink } from "./types.js";
 const DEFAULT_ROOT_DIR = "data/collector";
 const DEFAULT_MAX_SEGMENT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+const SEGMENT_HEADER_BYTES = 64 * 1024;
 
 export interface JournalOptions {
   rootDir?: string;
@@ -19,7 +20,6 @@ export interface JournalOptions {
 }
 
 interface PendingRecord {
-  record: JournalRecord;
   line: string;
   bytes: number;
   date: string;
@@ -64,7 +64,7 @@ export class CollectorJournal implements RecordSink {
   private closePromise: Promise<void> | undefined;
   private file: FileHandle | undefined;
   private segmentDate: string | undefined;
-  private segmentIndex = 0;
+  private nextSegmentIndex = 0;
   private segmentBytes = 0;
   private queuedBytes = 0;
   private sequence = 0;
@@ -96,7 +96,12 @@ export class CollectorJournal implements RecordSink {
       monotonicNs: options.monotonicNs ?? (() => process.hrtime.bigint()),
       onError: options.onError
     });
-    await journal.ready;
+    try {
+      await journal.ready;
+    } catch (error) {
+      journal.fail(error);
+      throw new Error("JOURNAL_STORAGE_ERROR", { cause: error });
+    }
     return journal;
   }
 
@@ -120,7 +125,7 @@ export class CollectorJournal implements RecordSink {
 
   record(input: RecordInput): JournalRecord {
     if (this.closed || this.closing) throw new Error("JOURNAL_CLOSED");
-    if (this.fatalError) throw new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
+    if (this.errorReported) throw new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
 
     const received = asDate(this.now());
     const sequence = this.sequence + 1;
@@ -144,7 +149,7 @@ export class CollectorJournal implements RecordSink {
     }
 
     this.sequence = sequence;
-    this.queue.push({ record, line, bytes, date: utcDate(received) });
+    this.queue.push({ line, bytes, date: utcDate(received) });
     this.queuedBytes += bytes;
     this.scheduleDrain();
     return record;
@@ -156,23 +161,31 @@ export class CollectorJournal implements RecordSink {
       const current = this.drainPromise;
       await current;
     }
-    if (this.queue.length > 0 && !this.fatalError) {
+    if (this.queue.length > 0 && !this.errorReported) {
       this.scheduleDrain();
       return this.flush();
     }
-    if (this.fatalError) throw new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
+    if (this.errorReported) throw new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = (async () => {
       try {
         await this.flush();
+      } catch (error) {
+        this.fail(error);
       } finally {
-        await this.closeFile();
-        this.closed = true;
+        try {
+          await this.closeFile();
+        } catch (error) {
+          this.fail(error);
+        } finally {
+          this.closed = true;
+        }
       }
+      if (this.errorReported) throw new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
     })();
     return this.closePromise;
   }
@@ -197,41 +210,36 @@ export class CollectorJournal implements RecordSink {
   }
 
   private scheduleDrain(): void {
-    if (this.drainPromise || this.fatalError) return;
+    if (this.drainPromise || this.errorReported) return;
     this.drainPromise = this.drainLoop().catch((error: unknown) => {
       this.fail(error);
     }).finally(() => {
       this.drainPromise = undefined;
-      if (this.queue.length > 0 && !this.fatalError && !this.closed) this.scheduleDrain();
+      if (this.queue.length > 0 && !this.errorReported && !this.closed) this.scheduleDrain();
     });
   }
 
   private async drainLoop(): Promise<void> {
     await this.ready;
     while (this.queue.length > 0) {
-      if (this.fatalError) return;
+      if (this.errorReported) return;
       const pending = this.queue.shift();
       if (!pending) return;
-      this.queuedBytes -= pending.bytes;
       await this.writeRecord(pending);
+      this.queuedBytes -= pending.bytes;
     }
   }
 
   private async writeRecord(pending: PendingRecord): Promise<void> {
-    if (this.segmentDate !== pending.date) {
+    if (this.file && (this.segmentDate !== pending.date || (this.segmentBytes > 0 && this.segmentBytes + pending.bytes > this.maxSegmentBytes))) {
       await this.closeFile();
-      this.segmentDate = pending.date;
-      this.segmentIndex = 0;
-      this.segmentBytes = 0;
-    }
-    if (this.file && this.segmentBytes > 0 && this.segmentBytes + pending.bytes > this.maxSegmentBytes) {
-      await this.closeFile();
-      this.segmentIndex += 1;
-      this.segmentBytes = 0;
     }
     if (!this.file) {
-      const filePath = join(this.runDirectory, segmentName(pending.date, this.segmentIndex));
+      if (!Number.isSafeInteger(this.nextSegmentIndex)) throw new Error("JOURNAL_SEGMENT_LIMIT");
+      const filePath = join(this.runDirectory, segmentName(pending.date, this.nextSegmentIndex++));
       this.file = await open(filePath, "wx", 0o600);
+      this.segmentDate = pending.date;
+      this.segmentBytes = 0;
     }
     const data = Buffer.from(pending.line, "utf8");
     let offset = 0;
@@ -246,11 +254,23 @@ export class CollectorJournal implements RecordSink {
   private async closeFile(): Promise<void> {
     const file = this.file;
     this.file = undefined;
-    if (file) await file.close();
+    if (!file) return;
+    try {
+      await file.sync();
+    } catch (error) {
+      this.fail(error);
+    } finally {
+      try {
+        await file.close();
+      } catch (error) {
+        this.fail(error);
+      }
+    }
+    if (this.errorReported) throw new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
   }
 
   private fail(error: unknown): void {
-    if (!this.fatalError) this.fatalError = error;
+    if (!this.errorReported) this.fatalError = error;
     this.queue.length = 0;
     this.queuedBytes = 0;
     if (this.errorReported) return;
@@ -268,5 +288,51 @@ export async function createJournal(options: JournalOptions = {}): Promise<Colle
 }
 
 export async function listJournalSegments(runDirectory: string): Promise<string[]> {
-  return (await readdir(runDirectory)).filter((name) => /^\d{4}-\d{2}-\d{2}-\d{6}\.ndjson$/.test(name)).sort();
+  const names = (await readdir(runDirectory)).filter((name) => /^\d{4}-\d{2}-\d{2}-\d{6,}\.ndjson$/.test(name));
+  const segments: Array<{ name: string; sequence: number | undefined }> = [];
+  const header = Buffer.alloc(SEGMENT_HEADER_BYTES);
+  // Older archives restarted the index on each UTC date. Only the record
+  // sequence, not the filename's date or index, identifies their actual order.
+  for (const name of names) {
+    segments.push({ name, sequence: await firstSegmentSequence(join(runDirectory, name), header) });
+  }
+  return segments.sort((left, right) => {
+    if (left.sequence !== right.sequence) {
+      if (left.sequence === undefined) return 1;
+      if (right.sequence === undefined) return -1;
+      return left.sequence - right.sequence;
+    }
+    return left.name.localeCompare(right.name);
+  }).map(({ name }) => name);
+}
+
+async function firstSegmentSequence(path: string, header: Buffer): Promise<number | undefined> {
+  const file = await open(path, "r");
+  try {
+    let length = 0;
+    let newline = -1;
+    while (length < header.length && newline < 0) {
+      const { bytesRead } = await file.read(header, length, header.length - length, length);
+      if (bytesRead === 0) break;
+      newline = header.subarray(length, length + bytesRead).indexOf(10);
+      if (newline >= 0) newline += length;
+      length += bytesRead;
+    }
+    const firstLine = header.toString("utf8", 0, newline < 0 ? length : newline);
+    let sequence: unknown;
+    try {
+      sequence = (JSON.parse(firstLine) as { sequence?: unknown } | null)?.sequence;
+    } catch {
+      // Journal metadata precedes the potentially large raw frame. A bounded
+      // prefix also orders a truncated final record without treating it as a
+      // complete record; replay still owns line/envelope validation.
+      const prefix = firstLine.match(/^\s*\{\s*(?:"schemaVersion"\s*:\s*\d+\s*,\s*)?(?:"runId"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*)?"sequence"\s*:\s*(\d+)\s*[,}]/);
+      if (prefix) sequence = Number(prefix[1]);
+    }
+    // Keep empty or unreadable tails in the result so replay can account for
+    // them. Never invent a sequence based on a date that may have rolled back.
+    return typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0 ? sequence : undefined;
+  } finally {
+    await file.close();
+  }
 }

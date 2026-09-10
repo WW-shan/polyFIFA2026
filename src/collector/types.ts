@@ -49,6 +49,7 @@ export interface JsonRequestOptions {
   body?: string;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export type JsonRequester = (url: string, options?: JsonRequestOptions) => Promise<unknown>;

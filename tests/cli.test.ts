@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,7 +131,14 @@ const liveMarkets: StrategyMarket[] = [
   }
 ];
 
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    throw new Error("Unexpected network request in CLI unit test");
+  }));
+});
+
 afterEach(() => {
+  vi.unstubAllGlobals();
   sportsLiveMock.reset();
   eventPageMock.fetchEventMatchState.mockClear();
   eventPageMock.fetchEventStrategyMarkets.mockClear();
@@ -3945,7 +3952,8 @@ describe("CLI", () => {
       "--stake", "97",
       "--max-iterations", "1"
     ], {}, {
-      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }]
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      fetchVerifiedClock: async () => null
     });
 
     const provider = await waitForDefaultSportsProvider();
@@ -3972,6 +3980,7 @@ describe("CLI", () => {
       }
     });
     expect(provider.socket?.closed).toBe(true);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   test("worldcup watch passes audit and proxy options to the default sports provider", async () => {

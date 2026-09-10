@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { BuyTradeLeg, OrderbookSnapshot, TradeDecision, TradeResult, TradeResultLeg } from "../domain/types.js";
 import { netReturnRate, sportsTakerFeePerShare } from "../domain/fees.js";
 import { signPoly1271Order } from "./poly1271-signature.js";
+import { serializeDiagnostic } from "../persistence/ledger.js";
 
 const LOCKED_ENTRY_PRICE_FLOOR = 0.85;
 
@@ -32,6 +34,7 @@ export interface LiveExecuteOptions {
   minimumNotional?: number;
   minimumNetReturn?: number;
   maxEntryPrice?: number;
+  beforeSubmit?: (order: LiveOrderRequest) => void | Promise<void>;
 }
 
 export interface LiveOrderRequest {
@@ -43,6 +46,7 @@ export interface LiveOrderRequest {
   tickSize: "0.1" | "0.01" | "0.001" | "0.0001";
   negRisk: boolean;
   estimatedFee: number;
+  beforeSubmit?: (order: LiveOrderRequest) => void | Promise<void>;
 }
 
 export interface LiveClobClient {
@@ -101,28 +105,43 @@ export class LiveExecutor {
     const refreshedLegs = await refreshPlannedLegs(plannedLegs, options);
     if (refreshedLegs.length === 0) return stalePlanResult(decision);
 
-    const results = await Promise.all(refreshedLegs.map(async (leg) => {
-      try {
-        const result = await client.placeLimitBuy({
-          tokenId: leg.tokenId,
-          price: leg.price,
-          size: leg.shares,
-          notional: leg.notional,
-          orderType: options.orderType ?? "FAK",
-          tickSize: leg.tickSize ?? "0.001",
-          negRisk: leg.negRisk ?? false,
-          estimatedFee: leg.estimatedFee
-        });
-        return tradeResultToLeg(result);
-      } catch (error) {
-        if (error instanceof LiveExecutionError && error.code === "LIVE_ORDER_REJECTED") {
-          return rejectedLegResult(leg, error);
-        }
-        throw error;
-      }
+    const submissions = await Promise.allSettled(refreshedLegs.map(async (leg) => {
+      const order: LiveOrderRequest = {
+        tokenId: leg.tokenId,
+        price: leg.price,
+        size: leg.shares,
+        notional: leg.notional,
+        orderType: options.orderType ?? "FAK",
+        tickSize: leg.tickSize ?? "0.001",
+        negRisk: leg.negRisk ?? false,
+        estimatedFee: leg.estimatedFee
+      };
+      if (options.beforeSubmit) order.beforeSubmit = options.beforeSubmit;
+      await checkBeforeSubmit(order);
+      return client.placeLimitBuy(order);
     }));
+    const results = submissions.map((submission, index) => {
+      const leg = refreshedLegs[index]!;
+      if (submission.status === "fulfilled") return tradeResultToLeg(submission.value, leg);
+      const error: unknown = submission.reason;
+      const result = error instanceof LiveExecutionError && error.code === "LIVE_ORDER_REJECTED" && !isUncertainPostResponse(error.raw)
+        ? rejectedLegResult(leg, error)
+        : uncertainLegResult(leg, error);
+      return tradeResultToLeg(result, leg);
+    });
 
     return aggregateLiveResults(decision, results);
+  }
+}
+
+async function checkBeforeSubmit(order: LiveOrderRequest): Promise<void> {
+  if (!order.beforeSubmit) return;
+  try {
+    await order.beforeSubmit(order);
+  } catch (error) {
+    throw new LiveExecutionError("LIVE_ORDER_REJECTED", error instanceof Error ? error.message : String(error), {
+      raw: { reason: "BEFORE_SUBMIT_VETO", submitted: false, error: serializeDiagnostic(error) }
+    });
   }
 }
 
@@ -252,12 +271,16 @@ function hasImplausiblyLowAsk(orderbook: OrderbookSnapshot): boolean {
   );
 }
 
-function tradeResultToLeg(result: TradeResult): TradeResultLeg {
+function tradeResultToLeg(result: TradeResult, planned: BuyTradeLeg): TradeResultLeg {
   const leg: TradeResultLeg = {
     mode: result.mode,
     status: result.status,
     orderId: result.orderId,
     tokenId: result.tokenId,
+    eventSlug: planned.eventSlug,
+    marketSlug: planned.marketSlug,
+    conditionId: planned.conditionId,
+    outcome: planned.outcome,
     price: result.price,
     shares: result.shares,
     notional: result.notional,
@@ -265,7 +288,10 @@ function tradeResultToLeg(result: TradeResult): TradeResultLeg {
     estimatedPayout: result.estimatedPayout,
     estimatedProfit: result.estimatedProfit
   };
-  if (result.raw !== undefined) leg.raw = result.raw;
+  if (planned.strategy !== undefined) leg.strategy = planned.strategy;
+  const reservedNotional = result.reservedNotional ?? (result.status === "posted" ? Math.max(0, planned.notional - result.notional) : 0);
+  if (reservedNotional > 0) leg.reservedNotional = reservedNotional;
+  if (result.raw !== undefined) leg.raw = serializeDiagnostic(result.raw);
   return leg;
 }
 
@@ -289,6 +315,9 @@ function aggregateLiveResults(decision: Extract<TradeDecision, { action: "BUY" }
     estimatedProfit
   };
   if (decision.legs?.length) aggregate.legs = [...results];
+  const reservedNotional = results.reduce((total, result) => total + (result.reservedNotional ?? 0), 0);
+  if (reservedNotional > 0) aggregate.reservedNotional = reservedNotional;
+  if (results.length === 1 && first.raw !== undefined) aggregate.raw = first.raw;
   return aggregate;
 }
 
@@ -317,6 +346,33 @@ function rejectedLegResult(leg: BuyTradeLeg, error: LiveExecutionError): TradeRe
       code: error.code,
       message: error.message,
       error: error.raw
+    }
+  };
+}
+
+function uncertainLegResult(leg: BuyTradeLeg, error: unknown): TradeResultLeg {
+  const details = error instanceof LiveExecutionError ? error.raw : error;
+  const orderId = extractLiveOrderId(details)
+    ?? extractLiveOrderId(isRecord(details) ? details.postResponse : undefined)
+    ?? extractLiveOrderId(isRecord(details) ? details.order : undefined)
+    ?? "live-order-unknown";
+  return {
+    mode: "live",
+    status: "posted",
+    orderId,
+    tokenId: leg.tokenId,
+    price: leg.price,
+    shares: 0,
+    notional: 0,
+    fee: 0,
+    estimatedPayout: 0,
+    estimatedProfit: 0,
+    raw: {
+      code: error instanceof LiveExecutionError ? error.code : "LIVE_ORDER_SUBMISSION_UNKNOWN",
+      message: error instanceof Error ? error.message : String(error),
+      error: details,
+      requestedShares: leg.shares,
+      requestedNotional: leg.notional
     }
   };
 }
@@ -422,9 +478,25 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
       signer,
       creds,
       signatureType: config.signatureType as typeof clob.SignatureTypeV2.POLY_PROXY,
-      retryOnError: true
+      // A response-less failure may already have accepted the order. The SDK's
+      // hidden transport retry cannot run the submission guard again.
+      retryOnError: false
     };
     const client = new clob.ClobClient(config.funderAddress ? { ...clientOptions, funderAddress: config.funderAddress } : clientOptions);
+    const submissionContext = new AsyncLocalStorage<LiveOrderRequest>();
+    const httpClient = client as unknown as GuardedHttpClient;
+    const post = httpClient.post.bind(httpClient);
+    // postOrder awaits asynchronous L2 header signing after order construction.
+    // Hook this client's HTTP boundary without sharing mutable callbacks across
+    // concurrently prepared basket legs or changing the SDK's global transport.
+    httpClient.post = async (endpoint, options, skipThrow) => {
+      if (new URL(endpoint).pathname.replace(/\/+$/, "").endsWith("/order")) {
+        const order = submissionContext.getStore();
+        if (!order) throw new Error("LIVE_SUBMISSION_CONTEXT_MISSING");
+        await checkBeforeSubmit(order);
+      }
+      return post(endpoint, options, skipThrow);
+    };
 
     return {
       async placeLimitBuy(order: LiveOrderRequest): Promise<TradeResult> {
@@ -441,9 +513,9 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
           orderType
         };
         const createOptions = { tickSize: order.tickSize, negRisk: order.negRisk };
-        const postResponse = config.signatureType === 3
-          ? await createAndPostPoly1271MarketOrder(client as unknown as Poly1271PostingClient, config, userMarketOrder, createOptions, orderType)
-          : await client.createAndPostMarketOrder(userMarketOrder as never, createOptions, orderType as never);
+        const postResponse = await submissionContext.run(order, () => createAndPostGuardedMarketOrder(
+          client as unknown as GuardedPostingClient, config, userMarketOrder, createOptions, orderType, order
+        ));
 
         assertNoPostError(postResponse);
 
@@ -473,9 +545,14 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
   }
 }
 
-interface Poly1271PostingClient {
+interface GuardedPostingClient {
   createMarketOrder: (userMarketOrder: any, options: any) => Promise<Record<string, unknown>>;
-  postOrder: (signedOrder: Record<string, unknown>, orderType: any) => Promise<unknown>;
+  postOrder: (signedOrder: Record<string, unknown>, orderType: any, postOnly?: boolean, deferExec?: boolean) => Promise<unknown>;
+  _retryOnVersionUpdate?: (operation: () => Promise<void>) => Promise<void>;
+}
+
+interface GuardedHttpClient {
+  post(endpoint: string, options?: unknown, skipThrow?: boolean): Promise<unknown>;
 }
 
 interface LiveClobConfirmationClient {
@@ -485,13 +562,43 @@ interface LiveClobConfirmationClient {
   cancelOrder?: (payload: { orderID: string }) => Promise<unknown>;
 }
 
-async function createAndPostPoly1271MarketOrder(
-  client: Poly1271PostingClient,
+async function createAndPostGuardedMarketOrder(
+  client: GuardedPostingClient,
   config: RequiredLiveExecutorConfig,
   userMarketOrder: unknown,
   createOptions: { negRisk: boolean },
-  orderType: unknown
+  orderType: unknown,
+  order: LiveOrderRequest
 ): Promise<unknown> {
+  let response: unknown;
+  let submitted = false;
+  const attempt = async () => {
+    // Preserve the SDK's bounded version retry only after its authoritative
+    // version rejection. A concurrent cache update must not duplicate a post.
+    if (submitted && !isOrderVersionMismatch(response)) return;
+    const signedOrder = config.signatureType === 3
+      ? await createPoly1271MarketOrder(client, config, userMarketOrder, createOptions)
+      : await client.createMarketOrder(userMarketOrder, createOptions);
+    await checkBeforeSubmit(order);
+    response = await client.postOrder(signedOrder, orderType, false, false);
+    submitted = true;
+  };
+  if (client._retryOnVersionUpdate) await client._retryOnVersionUpdate(attempt);
+  else await attempt();
+  return response;
+}
+
+function isOrderVersionMismatch(response: unknown): boolean {
+  return isRecord(response) && !isUncertainPostResponse(response)
+    && JSON.stringify(serializeDiagnostic(response.error)).includes("order_version_mismatch");
+}
+
+async function createPoly1271MarketOrder(
+  client: GuardedPostingClient,
+  config: RequiredLiveExecutorConfig,
+  userMarketOrder: unknown,
+  createOptions: { negRisk: boolean }
+): Promise<Record<string, unknown>> {
   const signedOrder = await client.createMarketOrder(userMarketOrder, createOptions);
   signedOrder.signature = await signPoly1271Order({
     privateKey: config.privateKey,
@@ -511,7 +618,7 @@ async function createAndPostPoly1271MarketOrder(
       builder: stringField(signedOrder, "builder")
     }
   });
-  return client.postOrder(signedOrder, orderType);
+  return signedOrder;
 }
 
 function exchangeV2Address(negRisk: boolean): string {
@@ -543,6 +650,7 @@ export function normalizeLiveOrderResult(order: LiveOrderRequest, raw: unknown):
   assertNoPostError(raw);
 
   const orderId = extractLiveOrderId(raw) ?? "live-order-unknown";
+  if (isUncertainPostResponse(raw)) return emptyConfirmedLiveResult(order, orderId, "posted", raw);
   const rawStatus = isRecord(raw) ? orderStatus(raw) ?? "" : "";
   if (["rejected", "failed", "expired"].includes(rawStatus)) {
     return emptyConfirmedLiveResult(order, orderId, "rejected", raw);
@@ -564,13 +672,21 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
   const trades = Array.isArray(confirmation.trades) ? confirmation.trades : [];
   const openOrders = Array.isArray(confirmation.openOrders) ? confirmation.openOrders : [];
   const tradeFills = confirmedTradeFills(order, orderId, trades);
-  const orderFill = tradeFills.length === 0 ? confirmedOrderFill(order, orderId, confirmation) : undefined;
+  // Order snapshots can lag on-chain failure or pending evidence. Only fall back
+  // when the trade endpoint has no evidence for this particular order and token.
+  const orderFill = tradeFills.length === 0 && !hasMatchingTradeEvidence(order, orderId, trades)
+    ? confirmedOrderFill(order, orderId, confirmation)
+    : undefined;
   const fills = orderFill ? [orderFill] : tradeFills;
   const openOrder = hasMatchingOpenOrder(order, orderId, openOrders);
   const pendingTrade = hasPendingMatchingTrade(order, orderId, trades);
   const canceled = isCancelConfirmed(orderId, confirmation.cancelResponse);
 
   const shares = fills.reduce((total, fill) => total + fill.shares, 0);
+  const matchedSize = matchingOrderSize(order, orderId, confirmation.order);
+  const failedShares = failedMatchingTradeShares(order, orderId, trades);
+  const unexplainedMatch = matchedSize !== undefined && matchedSize > 0 && !fillsRequestedSize(shares + failedShares, matchedSize);
+  const pendingExecution = unexplainedMatch || pendingTrade || (openOrder && !canceled);
   if (shares > 0) {
     const notional = fills.reduce((total, fill) => total + fill.notional, 0);
     const fee = fills.reduce((total, fill) => total + fill.fee, 0);
@@ -578,7 +694,7 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
     const requestedSize = confirmedOrderRequestedSize(order, confirmation);
     return {
       mode: "live",
-      status: fillsRequestedSize(shares, requestedSize) && !openOrder ? "filled" : "partial",
+      status: pendingExecution ? "posted" : fillsRequestedSize(shares, requestedSize) && !openOrder ? "filled" : "partial",
       orderId,
       tokenId: order.tokenId,
       price,
@@ -587,11 +703,15 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
       fee,
       estimatedPayout: shares,
       estimatedProfit: shares - notional - fee,
+      ...(pendingExecution && order.notional > notional
+        ? { reservedNotional: order.notional - notional } : {}),
       raw: confirmation
     };
   }
 
-  if (pendingTrade) return emptyConfirmedLiveResult(order, orderId, "posted", confirmation);
+  if (pendingTrade || unexplainedMatch) {
+    return emptyConfirmedLiveResult(order, orderId, "posted", confirmation);
+  }
   if (canceled) return emptyConfirmedLiveResult(order, orderId, "canceled", confirmation);
   if (openOrder) return emptyConfirmedLiveResult(order, orderId, "posted", confirmation);
   const terminalNoFillStatus = terminalNoFillConfirmationStatus(order, orderId, confirmation, trades);
@@ -602,11 +722,26 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
 
 function assertNoPostError(raw: unknown): void {
   if (!isRecord(raw)) return;
+  if (isUncertainPostResponse(raw)) return;
 
   const errorMessage = errorFieldMessage(raw.errorMsg) ?? errorFieldMessage(raw.error);
   if (raw.success === false || errorMessage) {
     throw new LiveExecutionError("LIVE_ORDER_REJECTED", errorMessage ?? "Polymarket rejected live order", { raw });
   }
+}
+
+function isUncertainPostResponse(raw: unknown): boolean {
+  if (!isRecord(raw) || raw.reason === "BEFORE_SUBMIT_VETO") return false;
+  const status = numberField(raw, "status") ?? numberField(raw, "statusCode") ?? numberField(raw.response, "status");
+  if (status === 408 || (status !== undefined && status >= 500 && status < 600)) return true;
+  const error = errorFieldMessage(raw.errorMsg) ?? errorFieldMessage(raw.error);
+  const code = stringField(raw, "code") ?? stringField(raw.error, "code");
+  const diagnostic = `${code ?? ""} ${error ?? ""}`;
+  if (/ECONNRESET|ECONNABORTED|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EAI_AGAIN|ENOTFOUND|socket hang up|network error|fetch failed|timed?\s*out|timeout|request aborted|connection (?:reset|closed|lost)|no\s+(?:response|acknowledg)|without\s+(?:response|acknowledg)|bad gateway|gateway timeout|service unavailable|upstream/i.test(diagnostic)) return true;
+  // The SDK discards HTTP provenance for response-less errors. Bare errors are
+  // uncertain unless their payload identifies a definite business rejection.
+  const definiteBusinessError = /not enough|insufficient|invalid|couldn.t be fully filled|no match|order_version_mismatch|order rejected/i.test(error ?? "");
+  return error !== undefined && status === undefined && raw.success !== false && !definiteBusinessError;
 }
 
 function confirmationAvailability(confirmation: LiveOrderConfirmation): { blockingErrors: LiveOrderConfirmationError[]; raw: LiveOrderConfirmation } {
@@ -640,21 +775,43 @@ function confirmedTradeFills(order: LiveOrderRequest, orderId: string, trades: u
   if (!isKnownOrderId(orderId)) return [];
 
   const fills: ConfirmedFill[] = [];
+  const fillIndexes = new Map<string, number>();
+  const failedIds = new Set(trades.flatMap((trade) => {
+    const id = tradeExecutionId(trade);
+    return id && terminalNoFillTradeStatus(order, orderId, [trade]) ? [id] : [];
+  }));
+  const include = (fill: ConfirmedFill, id: string | undefined) => {
+    if (id && failedIds.has(id)) return;
+    const index = id ? fillIndexes.get(id) : undefined;
+    if (index === undefined) {
+      if (id) fillIndexes.set(id, fills.length);
+      fills.push(fill);
+    } else if (fill.shares < fills[index]!.shares) {
+      // Multiple snapshots of one execution do not represent multiple fills.
+      // On inconsistent quantities retain the conservative confirmed amount.
+      fills[index] = fill;
+    }
+  };
   for (const trade of trades) {
+    const id = tradeExecutionId(trade);
     const fill = topLevelTradeFill(order, orderId, trade);
     if (fill) {
-      fills.push(fill);
+      include(fill, id);
       continue;
     }
 
     if (!isRecord(trade) || !Array.isArray(trade.maker_orders)) continue;
     for (const makerOrder of trade.maker_orders) {
       const makerFill = makerOrderTradeFill(order, orderId, makerOrder, trade);
-      if (makerFill) fills.push(makerFill);
+      if (makerFill) include(makerFill, id);
     }
   }
 
   return fills;
+}
+
+function tradeExecutionId(trade: unknown): string | undefined {
+  return stringField(trade, "id") ?? stringField(trade, "trade_id") ?? stringField(trade, "tradeId");
 }
 
 function confirmedOrderFill(order: LiveOrderRequest, orderId: string, confirmation: LiveOrderConfirmation): ConfirmedFill | undefined {
@@ -663,15 +820,68 @@ function confirmedOrderFill(order: LiveOrderRequest, orderId: string, confirmati
   if (!matchesAnyField(confirmation.order, ["asset_id", "assetId"], order.tokenId)) return undefined;
   if (!isFillConfirmingOrderStatus(orderStatus(confirmation.order))) return undefined;
 
-  const shares = numberField(confirmation.order, "size_matched")
-    ?? numberField(confirmation.order, "sizeMatched")
-    ?? numberField(confirmation.order, "matched_size")
-    ?? numberField(confirmation.order, "matchedSize");
+  const shares = matchingOrderSize(order, orderId, confirmation.order);
   const price = postResponseFillPrice(confirmation.postResponse, shares)
     ?? numberField(confirmation.order, "average_price")
     ?? numberField(confirmation.order, "averagePrice")
     ?? numberField(confirmation.order, "price");
   return validFill(shares, price);
+}
+
+function matchingOrderSize(order: LiveOrderRequest, orderId: string, record: unknown): number | undefined {
+  if (!isKnownOrderId(orderId) || !isRecord(record)) return undefined;
+  if (!matchesAnyField(record, ["id", "orderID", "orderId"], orderId)) return undefined;
+  if (!matchesAnyField(record, ["asset_id", "assetId"], order.tokenId)) return undefined;
+  return numberField(record, "size_matched")
+    ?? numberField(record, "sizeMatched")
+    ?? numberField(record, "matched_size")
+    ?? numberField(record, "matchedSize");
+}
+
+function hasMatchingTradeEvidence(order: LiveOrderRequest, orderId: string, trades: unknown[]): boolean {
+  if (!isKnownOrderId(orderId)) return false;
+  return trades.some((trade) => {
+    if (!isRecord(trade)) return false;
+    if (matchesAnyField(trade, ["taker_order_id", "maker_order_id", "order_id"], orderId)
+      && matchesAnyField(trade, ["asset_id", "assetId"], order.tokenId)) return true;
+    return Array.isArray(trade.maker_orders) && trade.maker_orders.some((makerOrder: unknown) =>
+      isRecord(makerOrder)
+      && matchesAnyField(makerOrder, ["order_id", "orderID", "orderId", "id", "maker_order_id"], orderId)
+      && (matchesAnyField(makerOrder, ["asset_id", "assetId"], order.tokenId)
+        || matchesAnyField(trade, ["asset_id", "assetId"], order.tokenId))
+    );
+  });
+}
+
+function failedMatchingTradeShares(order: LiveOrderRequest, orderId: string, trades: unknown[]): number {
+  const identified = new Map<string, number>();
+  let anonymousMaximum = 0;
+  const include = (tradeId: string | undefined, shares: number | undefined) => {
+    if (shares === undefined || shares <= 0) return;
+    if (!tradeId) {
+      // Anonymous rows may repeat each other or an identified row. They cannot
+      // safely be summed, but a single row still proves its own failed size.
+      anonymousMaximum = Math.max(anonymousMaximum, shares);
+      return;
+    }
+    const previous = identified.get(tradeId);
+    identified.set(tradeId, previous === undefined ? shares : Math.min(previous, shares));
+  };
+  for (const trade of trades) {
+    if (!isRecord(trade)) continue;
+    const tradeId = tradeExecutionId(trade);
+    if (topLevelTerminalNoFillTradeStatus(order, orderId, trade)) {
+      include(tradeId, numberField(trade, "size"));
+      continue;
+    }
+    if (!Array.isArray(trade.maker_orders)) continue;
+    for (const makerOrder of trade.maker_orders) {
+      if (makerOrderTerminalNoFillTradeStatus(order, orderId, makerOrder, trade)) {
+        include(tradeId, numberField(makerOrder, "matched_amount") ?? numberField(makerOrder, "size"));
+      }
+    }
+  }
+  return Math.max(anonymousMaximum, [...identified.values()].reduce((total, shares) => total + shares, 0));
 }
 
 function hasPendingMatchingTrade(order: LiveOrderRequest, orderId: string, trades: unknown[]): boolean {
@@ -720,6 +930,7 @@ function makerOrderTradeFill(order: LiveOrderRequest, orderId: string, makerOrde
 
 function makerOrderPendingTrade(order: LiveOrderRequest, orderId: string, makerOrder: unknown, parentTrade: Record<string, unknown>): boolean {
   if (!isRecord(makerOrder)) return false;
+  if (makerOrderTradeFill(order, orderId, makerOrder, parentTrade)) return false;
   if (hasTradeError(parentTrade) || hasTradeError(makerOrder)) return false;
   const makerStatus = tradeStatus(makerOrder);
   const parentStatus = tradeStatus(parentTrade);
@@ -748,7 +959,7 @@ function postResponseFillPrice(postResponse: unknown, shares: number | undefined
 }
 
 function isPendingTradeEvidence(trade: Record<string, unknown>): boolean {
-  if (hasTradeError(trade)) return false;
+  if (hasTradeError(trade) || isFillConfirmingTrade(trade)) return false;
   return isPendingTradeStatus(tradeStatus(trade));
 }
 
@@ -775,7 +986,7 @@ function terminalNoFillConfirmationStatus(
   confirmation: LiveOrderConfirmation,
   trades: unknown[]
 ): Exclude<EmptyLiveStatus, "posted"> | undefined {
-  return terminalNoFillRecordStatus(confirmation.postResponse)
+  return (isUncertainPostResponse(confirmation.postResponse) ? undefined : terminalNoFillRecordStatus(confirmation.postResponse))
     ?? terminalNoFillRecordStatus(confirmation.order)
     ?? terminalNoFillTradeStatus(order, orderId, trades);
 }
@@ -901,6 +1112,7 @@ function emptyConfirmedLiveResult(order: LiveOrderRequest, orderId: string, stat
     fee: 0,
     estimatedPayout: 0,
     estimatedProfit: 0,
+    ...(status === "posted" ? { reservedNotional: order.notional } : {}),
     raw
   };
 }
