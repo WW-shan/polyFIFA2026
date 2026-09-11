@@ -39,3 +39,7 @@ Raw HTTP timeout/caller cancellation and transport cleanup are tested alongside 
 See [the research report](tennis-research-2026-09-11.md) for observed price paths, commands and limitations. Historical trade exhaustion is not historical L2 completeness or proof of own fills. Complete-game collection, point/server state, subperiod end labels and queue-level journal backtesting are not claimed as completed.
 
 No trading credentials were used, no orders were submitted, no permanent collector was deployed, and no remote push was performed. All finite data processes completed and stopped.
+
+## Local integration
+
+Implementation commit `08daa12` was fast-forwarded to local `main`. The merged project was reverified: **46 files / 866 tests passed**, typecheck and diff check passed. Existing untracked `docs/collector-data-goal.md` and `docs/sports-opportunity-research-assessment.md` were preserved. Raw data and generated research reports remain under the main project's ignored `data/research/` and `data/collector/` directories.

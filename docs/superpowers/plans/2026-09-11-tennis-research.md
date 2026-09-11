@@ -53,4 +53,4 @@
 
 - [x] Review spec compliance independently, fix actionable findings with regression tests, then review code quality.
 - [x] Run `npm test`, `npm run typecheck`, `git diff --check`; record exact results and live sample limitations in `docs/tennis-research-verification.md`.
-- [ ] Commit only the scoped implementation/docs; integrate into local main according to the user's existing preference, preserving unrelated root documents. Do not push or trade.
+- [x] Commit only the scoped implementation/docs; integrate into local main according to the user's existing preference, preserving unrelated root documents. Implementation `08daa12` was fast-forwarded to local main and reverified there. No push or trading.
