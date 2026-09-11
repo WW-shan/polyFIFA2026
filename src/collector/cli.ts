@@ -62,6 +62,12 @@ function parseCollectArgs(argv: readonly string[]): { command: "collect"; option
       case "--tag-id": options.tagId = requireValue(argv, index++, flag); break;
       case "--sports": options.sports = listValue(requireValue(argv, index++, flag)); break;
       case "--event-slugs": options.eventSlugs = listValue(requireValue(argv, index++, flag)); break;
+      case "--date-window": {
+        const value = requireValue(argv, index++, flag);
+        if (value !== "metadata-end" && value !== "game-start") throw invalid(`${flag} must be metadata-end or game-start`);
+        options.dateWindow = value;
+        break;
+      }
       case "--lookback-hours": options.lookbackHours = numberValue(requireValue(argv, index++, flag), flag); break;
       case "--ahead-hours": options.aheadHours = numberValue(requireValue(argv, index++, flag), flag); break;
       case "--duration-seconds": options.durationSeconds = numberValue(requireValue(argv, index++, flag), flag); break;

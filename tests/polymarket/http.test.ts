@@ -5,7 +5,7 @@ import { connect as connectTcp, createServer as createTcpServer, type AddressInf
 import type { Duplex } from "node:stream";
 import type { Dispatcher } from "undici";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { fetchJson, fetchText, postJson, type HttpOptions } from "../../src/polymarket/http.js";
+import { fetchHttpResponseText, fetchJson, fetchText, postJson, type HttpOptions } from "../../src/polymarket/http.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -16,10 +16,23 @@ afterEach(() => {
 const readers = [
   { name: "JSON", read: (url: string, options: HttpOptions) => fetchJson(url, options) },
   { name: "text", read: (url: string, options: HttpOptions) => fetchText(url, options) },
+  { name: "raw text", read: (url: string, options: HttpOptions) => fetchHttpResponseText(url, options) },
   { name: "POST JSON", read: (url: string, options: HttpOptions) => postJson(url, "{}", options) }
 ];
 
 describe("HTTP request lifetime", () => {
+  test.each([
+    { status: 429, body: '{"retry":"later"}\n' },
+    { status: 200, body: '{"incomplete":' }
+  ])("raw response reader preserves HTTP $status text before validation", async ({ status, body }) => {
+    await withServer((_request, response) => {
+      response.writeHead(status, { "content-type": "application/json", "x-evidence": "retained" });
+      response.end(body);
+    }, async url => {
+      const result = await fetchHttpResponseText(url, { proxyUrl: "", timeoutMs: 1000 });
+      expect(result).toMatchObject({ status, body, headers: { "content-type": "application/json", "x-evidence": "retained" } });
+    });
+  });
   test.each(readers)("times out a stalled $name body after receiving headers", async ({ read }) => {
     await withServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
@@ -36,7 +49,7 @@ describe("HTTP request lifetime", () => {
   test.each(readers)("cancels a pending $name body through the caller's signal", async ({ name, read }) => {
     let bodyReadStarted!: () => void;
     const readingBody = new Promise<void>((resolve) => { bodyReadStarted = resolve; });
-    const method = name === "text" ? "text" : "json";
+    const method = name === "text" || name === "raw text" ? "text" : "json";
     const originalRead = Response.prototype[method];
     vi.spyOn(Response.prototype, method).mockImplementation(function (this: Response) {
       const pending = originalRead.call(this);

@@ -5,6 +5,7 @@ export interface CatalogOptions {
   tagId?: string;
   sports?: string[];
   eventSlugs?: string[];
+  dateWindow?: "metadata-end" | "game-start";
   lookbackHours?: number;
   aheadHours?: number;
   allOpen?: boolean;
@@ -138,6 +139,9 @@ export async function fetchCollectorEvent(slug: string, deps: CatalogDependencie
 }
 
 function validateOptions(options: CatalogOptions): void {
+  if (options.dateWindow !== undefined && options.dateWindow !== "metadata-end" && options.dateWindow !== "game-start") {
+    throw new Error("CATALOG_OPTIONS_INVALID: dateWindow must be metadata-end or game-start");
+  }
   for (const [name, value] of [["pageSize", options.pageSize], ["maxPages", options.maxPages]] as const) {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
       throw new Error(`CATALOG_OPTIONS_INVALID: ${name} must be a positive integer`);
@@ -171,6 +175,17 @@ function pageSignature(page: unknown[]): string {
   }).sort());
 }
 
+function matchesGameStartWindow(event: CollectorEvent, min: number, max: number): boolean {
+  if (event.raw.live === true) return true;
+  // Only scheduled game clocks qualify; Gamma startDate/endDate are metadata dates.
+  for (const value of [event.raw.startTime, ...event.markets.map((market) => market.raw.gameStartTime)]) {
+    const start = typeof value === "string" ? Date.parse(value) : NaN;
+    if (Number.isFinite(start)) return start >= min && start <= max;
+  }
+  // Missing or invalid scheduled starts must not silently exclude an event.
+  return true;
+}
+
 export async function discoverSportsEvents(options: CatalogOptions, deps: CatalogDependencies): Promise<CollectorEvent[]> {
   validateOptions(options);
   const base = baseUrl(options.baseUrl);
@@ -202,11 +217,17 @@ export async function discoverSportsEvents(options: CatalogOptions, deps: Catalo
     order: "id",
     ascending: "true"
   });
+  let windowStart = -Infinity;
+  let windowEnd = Infinity;
   if (!options.allOpen) {
-    // Gamma end dates are metadata dates, not observed finish clocks.
     const current = now();
-    params.set("end_date_min", new Date(current - (options.lookbackHours ?? 48) * HOUR_MS).toISOString());
-    params.set("end_date_max", new Date(current + (options.aheadHours ?? 24) * HOUR_MS).toISOString());
+    windowStart = current - (options.lookbackHours ?? 48) * HOUR_MS;
+    windowEnd = current + (options.aheadHours ?? 24) * HOUR_MS;
+    if (options.dateWindow !== "game-start") {
+      // Gamma end dates are metadata dates, not observed finish clocks.
+      params.set("end_date_min", new Date(windowStart).toISOString());
+      params.set("end_date_max", new Date(windowEnd).toISOString());
+    }
   }
   const sports = new Set((options.sports ?? []).map((sport) => sport.trim().toLowerCase()).filter(Boolean));
   const seenPages = new Set<string>();
@@ -221,9 +242,9 @@ export async function discoverSportsEvents(options: CatalogOptions, deps: Catalo
     }
     for (const raw of page) addEvent(normalizeCollectorEvent(raw));
     if (page.length < pageSize) {
-      return events.filter((event) => sports.size === 0 || [event.sport, ...event.tags].some(
+      return events.filter((event) => (sports.size === 0 || [event.sport, ...event.tags].some(
         (sport) => sport !== null && sports.has(sport.trim().toLowerCase())
-      ));
+      )) && (options.allOpen || options.dateWindow !== "game-start" || matchesGameStartWindow(event, windowStart, windowEnd)));
     }
   }
   throw new Error(`CATALOG_PAGINATION_LIMIT: no short page within ${maxPages} pages`);

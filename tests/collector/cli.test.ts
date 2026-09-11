@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, test } from "vitest";
 import { parseCollectorCliArgs, runCollectorCli } from "../../src/collector/cli.js";
-import { createCollector, type CollectorJournalLike } from "../../src/collector/collector.js";
+import { createCollector, type CollectorJournalLike, type CollectorOptions } from "../../src/collector/collector.js";
 
 const originalExitCode = process.exitCode;
 afterEach(() => { process.exitCode = originalExitCode; });
@@ -16,7 +16,7 @@ async function settled<T>(promise: Promise<T>) {
   ]);
 }
 
-function cliRuntime() {
+function cliRuntime(options: CollectorOptions = {}) {
   const cleanup: string[] = [];
   let onFatal: ((error: unknown) => void) | undefined;
   const journal: CollectorJournalLike = {
@@ -25,7 +25,7 @@ function cliRuntime() {
     async flush() { cleanup.push("flush"); },
     async close() { cleanup.push("close"); }
   };
-  const runtime = createCollector({}, {
+  const runtime = createCollector(options, {
     createJournal: async () => journal,
     discover: async () => [],
     createStreams: (options) => {
@@ -38,6 +38,40 @@ function cliRuntime() {
 }
 
 describe("collector CLI", () => {
+  test("leaves an omitted date window to the legacy collector default", () => {
+    expect(parseCollectorCliArgs(["collect"])).toEqual({ command: "collect", options: {} });
+  });
+
+  test.each(["metadata-end", "game-start"] as const)("parses --date-window %s", (dateWindow) => {
+    expect(parseCollectorCliArgs(["collect", "--date-window", dateWindow])).toEqual({
+      command: "collect", options: { dateWindow }
+    });
+  });
+
+  test.each(["start-date", "", "GAME-START"])("rejects invalid --date-window %j", (dateWindow) => {
+    expect(() => parseCollectorCliArgs(["collect", "--date-window", dateWindow]))
+      .toThrow("CLI_ARGUMENTS_INVALID: --date-window must be metadata-end or game-start");
+  });
+
+  test.each([{ following: [] }, { following: ["--all-open"] }])("requires a value after --date-window %j", ({ following }) => {
+    expect(() => parseCollectorCliArgs(["collect", "--date-window", ...following]))
+      .toThrow("CLI_ARGUMENTS_INVALID: --date-window requires a value");
+  });
+
+  test.each(["metadata-end", "game-start"] as const)("passes --date-window %s into the collector runtime", async (dateWindow) => {
+    const received: CollectorOptions[] = [];
+    const stdout: string[] = [];
+    const result = await runCollectorCli(["collect", "--date-window", dateWindow, "--duration-seconds", "0"], {
+      createCollector: (options) => { received.push(options); return cliRuntime(options).runtime; },
+      write: (value) => stdout.push(value),
+      error() {}
+    });
+
+    expect(received).toEqual([{ dateWindow, durationSeconds: 0 }]);
+    expect(result).toMatchObject({ status: "stopped" });
+    expect(stdout).toEqual([JSON.stringify(result)]);
+  });
+
   test("parses finite collection settings without loading credentials", () => {
     const parsed = parseCollectorCliArgs([
       "collect",

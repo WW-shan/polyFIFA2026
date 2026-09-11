@@ -2,6 +2,8 @@
 
 Research and implementation workspace for a Polymarket World Cup single-match tail-entry bot.
 
+The current public-data research track is tennis-first and studies advance resting BUY orders. It is separate from the World Cup taker/execution logic below. Start with [the tennis data and initial results](docs/tennis-research-2026-09-11.md) and [the comparison with table tennis/esports](docs/sports-comparison-2026-09-11.md).
+
 Start here:
 
 - `docs/worldcup_tail_spread_research.md` — research conclusions, API notes, backtest summaries.
@@ -44,6 +46,38 @@ The standalone collector preserves public Gamma metadata, CLOB book/trade frames
 npm run collect -- --duration-seconds 60 --event-slugs <one-public-event-slug>
 npm run collect:export -- --run-dir data/collector/<runId>
 ```
+
+## Tennis Collection and Resting-Order Research
+
+Tennis `endDate` can be a week after the match. `collect:tennis` uses tag 864 and the `game-start` window, based on scheduled `startTime`/`gameStartTime`, with live and unknown-start events retained. It never filters by intended bid price or final winner. Unknown-start events can include non-match topics; all raw metadata is retained. Page-cap failures are explicit.
+
+```bash
+# Finite public capture; optional --proxy-url http://127.0.0.1:10808
+npm run collect:tennis -- --duration-seconds 60 --run-id tennis-example
+
+# Bounded public-trade history, both outcomes and all market types by default
+npm run research:download -- --sport tennis --max-events 30 --require-finish \
+  --output-dir data/research/tennis-example
+
+# Independent price/window scenarios; no actual orders are placed
+npm run research:backtest -- --input data/research/tennis-example/dataset.json \
+  --output-dir data/research/tennis-example/tail \
+  --prices 0.5,0.6,0.7,0.8,0.9,0.95 --windows 60,180,300,480 --shares 10
+
+# Entry triggered by an observed price, then a fixed 1/3/5/8-minute lifetime
+npm run research:backtest -- --input data/research/tennis-example/dataset.json \
+  --output-dir data/research/tennis-example/trigger --entry-mode price-trigger
+
+npm run research -- --help
+```
+
+The default entry threshold is 0.90 and the maximum reference age is 120 seconds; change them with `--entry-min-price` and `--max-entry-age-seconds`. These are backtest parameters, not collection filters. `--shares` changes order size. Entry uses the latest pre-entry second's trade prices (including the labeled binary complement), independently of final payout. A bid at/above that reference is excluded from this resting-order screen.
+
+`price-trigger` uses neither final finish time for entry nor for expiry. It is a price-only baseline: it can trigger or remain active after the recorded match finish. Inspect `entryAtMs`, `expiryAtMs` and `finishAtMs`; do not call those post-finish scenarios pre-finish opportunities.
+
+Outputs: `dataset.json` plus raw HTTP requests/replies; then `summary.csv`, `trials.csv`, `report.json`, and an input-hash manifest. Every output directory must be new; existing evidence is never overwritten. `--require-finish` explicitly excludes missing-finish matches from the download sample and reports the count; omit it to retain those samples. Built-in sport tags also support `table-tennis`, `cs2`, `dota2`, and `valorant`; custom sports require `--tag-id`.
+
+The initial backtest is a **public-trade screen**, not historical order-book replay or confirmed execution. Any-side price touches and direct SELL-through volume are separate columns. Default modeled fills require a SELL below the bid; `--fill-model sell-at-or-below --queue-ahead-shares 100` adds an equality/queue scenario. Maker fee defaults to zero and is configurable with `--maker-fee-bps`. Finish-relative entry is retrospective; set-level markets are excluded from that mode without set-end timestamps. Missing/stale entries, incomplete history and unresolved payouts do not enter aggregate profit totals. Alternative price/window rows must not be summed as portfolio returns.
 
 ## Paper Acceptance Run
 

@@ -37,6 +37,7 @@ export interface CollectorOptions {
   tagId?: string;
   sports?: string[];
   eventSlugs?: string[];
+  dateWindow?: "metadata-end" | "game-start";
   lookbackHours?: number;
   aheadHours?: number;
   allOpen?: boolean;
@@ -108,6 +109,9 @@ function baseUrl(value: string | undefined, fallback: string): string {
 }
 
 function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions {
+  if (options.dateWindow !== undefined && options.dateWindow !== "metadata-end" && options.dateWindow !== "game-start") {
+    throw new RangeError("dateWindow must be metadata-end or game-start");
+  }
   const effective: EffectiveCollectorOptions = {
     ...options,
     rootDir: options.rootDir ?? "data/collector",
@@ -118,6 +122,7 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     tagId: options.tagId ?? "100639",
     sports: [...(options.sports ?? [])],
     eventSlugs: [...(options.eventSlugs ?? [])],
+    dateWindow: options.dateWindow ?? "metadata-end",
     lookbackHours: options.lookbackHours ?? 48,
     aheadHours: options.aheadHours ?? 24,
     allOpen: options.allOpen ?? false,
@@ -384,6 +389,7 @@ export class CollectorRuntime {
       tagId: this.options.tagId,
       sports: this.options.sports,
       eventSlugs: this.options.eventSlugs,
+      dateWindow: this.options.dateWindow,
       lookbackHours: this.options.lookbackHours,
       aheadHours: this.options.aheadHours,
       allOpen: this.options.allOpen,

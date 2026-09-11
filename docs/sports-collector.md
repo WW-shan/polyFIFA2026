@@ -14,6 +14,8 @@ npm run collect -- \
 
 The default discovery scope is the Games tag (`100639`), with a 48-hour lookback and 24-hour forward metadata window. Use `--all-open` to remove the date window, `--sports nba,tennis` to filter by tag or sport code, and `--event-slugs` for a small explicit scope. Event slugs bypass the date and sport filters.
 
+For tennis use `npm run collect:tennis -- --duration-seconds 60`. This selects the Tennis tag (`864`) and `--date-window game-start`: it omits server metadata-date filters, then uses event `startTime` or market `gameStartTime` locally, retaining live and unknown-start events. Gamma `startDate` is not used as a game clock, and `endDate` may be scheduled start plus seven days. The legacy `metadata-end` mode remains the default for existing callers. `--all-open` bypasses either date mode. Broader scans still have explicit pagination caps; unknown-start events may include non-match topics rather than confirmed games.
+
 The command creates a new directory under `data/collector/<runId>/`. Every journal line contains a schema version, run ID, process sequence, UTC receipt time, monotonic timestamp, source, kind, optional connection epoch, and source data. CLOB and Sports WebSocket connections are independent. CLOB token subscriptions are sharded at 200 tokens per socket by default; public frames are persisted before interpretation.
 
 A positive `--duration-seconds` includes startup and cancels pending HTTP requests at the deadline. A value of zero performs one initial discovery/snapshot pass. Omit the option for continuous collection:
@@ -52,7 +54,7 @@ Useful collection options include:
 
 - `--root-dir`, `--run-id`, `--max-segment-bytes`, and `--max-buffer-bytes` for local storage.
 - `--gamma-base-url`, `--clob-base-url`, `--clob-ws-url`, and `--sports-ws-url` for endpoint fixtures or mirrors.
-- `--page-size`, `--max-pages`, `--lookback-hours`, `--ahead-hours`, and `--all-open` for discovery.
+- `--page-size`, `--max-pages`, `--lookback-hours`, `--ahead-hours`, `--date-window metadata-end|game-start`, and `--all-open` for discovery.
 - `--discovery-interval-ms`, `--snapshot-interval-ms`, `--snapshot-concurrency`, `--http-timeout-ms`, and `--duration-seconds` for runtime control.
 
 The collector uses `HTTP_PROXY`/`HTTPS_PROXY` (and their lowercase variants) when no explicit `--proxy-url` is supplied. Supported proxy URLs use `http:` or `https:`; unsupported protocols such as `socks5:` fail before opening a connection. For a local mixed-protocol proxy, use its HTTP URL, for example `--proxy-url http://127.0.0.1:10808`. HTTP requests own and release their transport through success, timeout and cancellation, including unfinished TLS and CONNECT handshakes.

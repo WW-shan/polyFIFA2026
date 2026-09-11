@@ -10,6 +10,15 @@ export interface HttpOptions {
   signal?: AbortSignal;
 }
 
+export interface HttpResponseText { status: number; statusText: string; headers: Record<string, string>; body: string }
+/** Capture public response text before HTTP status / JSON interpretation. */
+export async function fetchHttpResponseText(url: string, options: HttpOptions = {}): Promise<HttpResponseText> {
+  return fetchWithTimeout(url, options, async response => ({
+    status: response.status, statusText: response.statusText,
+    headers: Object.fromEntries(response.headers), body: await response.text()
+  }), true);
+}
+
 export async function fetchJson<T = unknown>(url: string, options: HttpOptions = {}): Promise<T> {
   return fetchWithTimeout(url, options, async (response) => (await response.json()) as T);
 }
@@ -26,7 +35,7 @@ export async function fetchText(url: string, options: HttpOptions = {}): Promise
   return fetchWithTimeout(url, options, (response) => response.text());
 }
 
-async function fetchWithTimeout<T>(url: string, options: HttpOptions, readBody: (response: Response) => Promise<T>): Promise<T> {
+async function fetchWithTimeout<T>(url: string, options: HttpOptions, readBody: (response: Response) => Promise<T>, acceptErrorStatus = false): Promise<T> {
   options.signal?.throwIfAborted();
   const transport = createOwnedTransport({ proxyUrl: options.proxyUrl });
   const controller = new AbortController();
@@ -47,7 +56,7 @@ async function fetchWithTimeout<T>(url: string, options: HttpOptions, readBody: 
       dispatcher: transport.dispatcher
     } as RequestInit & { dispatcher: Dispatcher });
 
-    if (!response.ok) {
+    if (!response.ok && !acceptErrorStatus) {
       throw new Error(`HTTP ${response.status} ${response.statusText} for ${url}`);
     }
     const result = await readBody(response);

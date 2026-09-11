@@ -191,6 +191,129 @@ describe("sports catalog discovery", () => {
     });
   });
 
+  test("game-start omits every server date filter while preserving catalog request settings", async () => {
+    const deps = pages([[]]);
+    await discoverSportsEvents({
+      dateWindow: "game-start", tagId: "custom-games", lookbackHours: 6, aheadHours: 2,
+      pageSize: 3, now: () => nowMs
+    }, deps);
+
+    expect(Object.fromEntries(deps.urls[0]!.searchParams)).toEqual({
+      tag_id: "custom-games", closed: "false", limit: "3", offset: "0", order: "id", ascending: "true"
+    });
+  });
+
+  test("game-start discovers tennis with an endDate seven days after its scheduled start", async () => {
+    const raw = event("tennis", {
+      slug: "atp-brunold-heide-2026-09-11", sport: "ATP", tags: [{ slug: "Tennis" }],
+      startTime: "2026-09-11T10:00:00Z", finishedTimestamp: "2026-09-11T11:26:00Z",
+      startDate: "2026-09-01T00:00:00Z", endDate: "2026-09-18T10:00:00Z",
+      markets: [market(), market({ id: "sets", sportsMarketType: "total" }), market({ id: "closed", closed: true })]
+    });
+    const result = await discoverSportsEvents({
+      dateWindow: "game-start", sports: ["tennis"], lookbackHours: 6, aheadHours: 2,
+      now: () => Date.parse("2026-09-11T12:00:00Z")
+    }, {
+      request: async (url) => {
+        const params = new URL(url).searchParams;
+        const min = params.get("end_date_min");
+        const max = params.get("end_date_max");
+        const end = Date.parse(String(raw.endDate));
+        // Mirror Gamma's metadata filtering to reproduce the missed tennis event.
+        return (min !== null && end < Date.parse(min)) || (max !== null && end > Date.parse(max)) ? [] : [raw];
+      }
+    });
+
+    expect(result.map((item) => item.eventSlug)).toEqual(["atp-brunold-heide-2026-09-11"]);
+    expect(result[0]?.raw).toBe(raw);
+    expect(result[0]?.markets.map((item) => item.raw)).toEqual(raw.markets);
+  });
+
+  test.each([
+    ["2026-09-10T05:59:59.999Z", false],
+    ["2026-09-10T06:00:00.000Z", true],
+    ["2026-09-10T12:00:00.000Z", true],
+    ["2026-09-10T14:00:00.000Z", true],
+    ["2026-09-10T14:00:00.001Z", false]
+  ])("game-start applies inclusive scheduled bounds to %s (retained=%s)", async (startTime, retained) => {
+    const result = await discoverSportsEvents({
+      dateWindow: "game-start", lookbackHours: 6, aheadHours: 2, now: () => nowMs
+    }, pages([[event("1", { startTime, endDate: "2026-09-10T12:00:00Z" })]]));
+
+    expect(result.map((item) => item.eventId)).toEqual(retained ? ["1"] : []);
+  });
+
+  test.each([undefined, null, "", "invalid"])("game-start falls back to market gameStartTime when startTime is %j", async (startTime) => {
+    const raw = ["2026-09-10T05:00:00Z", "2026-09-10T12:00:00Z", "2026-09-10T15:00:00Z"].map((gameStartTime, index) => event(String(index), {
+      startTime,
+      markets: [market({ gameStartTime: "invalid" }), market({ id: "scheduled", gameStartTime })]
+    }));
+    const result = await discoverSportsEvents({
+      dateWindow: "game-start", lookbackHours: 6, aheadHours: 2, now: () => nowMs
+    }, pages([raw]));
+
+    expect(result.map((item) => item.eventId)).toEqual(["1"]);
+    expect(result[0]?.markets.map((item) => item.raw)).toEqual(raw[1]?.markets);
+  });
+
+  test("game-start prefers a valid event startTime over the market fallback", async () => {
+    const result = await discoverSportsEvents({ dateWindow: "game-start", now: () => nowMs }, pages([[
+      event("inside", { startTime: "2026-09-10T12:00:00Z", markets: [market({ gameStartTime: "1999-01-01T00:00:00Z" })] }),
+      event("outside", { startTime: "1999-01-01T00:00:00Z", markets: [market({ gameStartTime: "2026-09-10T12:00:00Z" })] })
+    ]]));
+
+    expect(result.map((item) => item.eventId)).toEqual(["inside"]);
+  });
+
+  test.each(["1999-01-01T00:00:00Z", "2099-01-01T00:00:00Z"])("game-start retains live events with out-of-window start %s", async (startTime) => {
+    const result = await discoverSportsEvents({ dateWindow: "game-start", now: () => nowMs }, pages([[
+      event("live", { live: true, startTime }),
+      event("not-live", { live: false, startTime }),
+      event("string-live", { live: "true", startTime })
+    ]]));
+
+    expect(result.map((item) => item.eventId)).toEqual(["live"]);
+  });
+
+  test.each([undefined, null, "", "invalid", 0])("game-start retains unknown start %j without using creation, end, or finish dates", async (startTime) => {
+    const metadataDates = {
+      startDate: "1999-01-01T00:00:00Z", endDate: "2099-01-01T00:00:00Z",
+      closedTime: "1999-01-01T01:00:00Z", finishedTimestamp: "1999-01-01T01:00:00Z"
+    };
+    const result = await discoverSportsEvents({ dateWindow: "game-start", now: () => nowMs }, pages([[
+      event("unknown", { ...metadataDates, startTime, markets: [market({ ...metadataDates, gameStartTime: startTime })] }),
+      event("metadata-only", { ...metadataDates, markets: [] })
+    ]]));
+
+    expect(result.map((item) => item.eventId)).toEqual(["unknown", "metadata-only"]);
+  });
+
+  test("game-start audits complete pages and paginates past pages with no local matches", async () => {
+    const first = [event("old", { startTime: "1999-01-01T00:00:00Z" }), event("future", { startTime: "2099-01-01T00:00:00Z" })];
+    const last = [event("tennis", { sport: "ATP", tags: [{ slug: "Tennis" }], startTime: "2026-09-10T12:00:00Z" })];
+    const deps = pages([first, last]);
+    const recorded: unknown[] = [];
+    const audited: unknown[] = [];
+    const result = await discoverSportsEvents({ dateWindow: "game-start", sports: ["soccer", "tennis"], pageSize: 2, now: () => nowMs }, {
+      ...deps, onPage: (page) => recorded.push(page.response), onRequest: (request) => audited.push(request.response)
+    });
+
+    expect(result.map((item) => item.eventId)).toEqual(["tennis"]);
+    expect(deps.urls.map((url) => url.searchParams.get("offset"))).toEqual(["0", "2"]);
+    expect(recorded).toEqual([first, last]);
+    expect(audited).toEqual([first, last]);
+    for (const url of deps.urls) expect([...url.searchParams.keys()].some((key) => /date/.test(key))).toBe(false);
+  });
+
+  test("explicit metadata-end preserves server filtering without local scheduled-start selection", async () => {
+    const deps = pages([[event("1", { startTime: "1999-01-01T00:00:00Z" })]]);
+    const result = await discoverSportsEvents({ dateWindow: "metadata-end", now: () => nowMs }, deps);
+
+    expect(result.map((item) => item.eventId)).toEqual(["1"]);
+    expect(deps.urls[0]?.searchParams.get("end_date_min")).toBe("2026-09-08T12:00:00.000Z");
+    expect(deps.urls[0]?.searchParams.get("end_date_max")).toBe("2026-09-11T12:00:00.000Z");
+  });
+
   test("paginates through all sports and deduplicates both event IDs and slugs", async () => {
     const first = [event("1"), event("2", { sport: "tennis" })];
     const second = [event("1", { slug: "same-id-another-slug" }), event("3", { sport: { sport: "cs2" }, title: "More Markets" })];
@@ -260,12 +383,26 @@ describe("sports catalog discovery", () => {
     expect(deps.urls[0]?.searchParams.get("closed")).toBe("false");
   });
 
-  test("explicit encoded slugs override both the date window and sports filter", async () => {
+  test("allOpen bypasses game-start filtering while retaining sports matching", async () => {
+    const deps = pages([[
+      event("old", { sport: "Tennis", startTime: "1999-01-01T00:00:00Z" }),
+      event("future", { sport: "ATP", tags: [{ slug: "tennis" }], startTime: "2099-01-01T00:00:00Z" }),
+      event("other-sport", { live: true })
+    ]]);
+    const result = await discoverSportsEvents({ dateWindow: "game-start", allOpen: true, sports: ["tennis"], now: () => nowMs }, deps);
+
+    expect(result.map((item) => item.eventId)).toEqual(["old", "future"]);
+    expect(Object.fromEntries(deps.urls[0]!.searchParams)).toEqual({
+      tag_id: "100639", closed: "false", limit: "100", offset: "0", order: "id", ascending: "true"
+    });
+  });
+
+  test.each<CatalogOptions>([{}, { dateWindow: "game-start" }])("explicit encoded slugs override both the date window and sports filter: %j", async (options) => {
     const slug = "nba/finals?x & y";
-    const raw = event("1", { slug, sport: "nba", closed: true, endDate: "1999-01-01T00:00:00Z" });
+    const raw = event("1", { slug, sport: "nba", closed: true, startTime: "1999-01-01T00:00:00Z", endDate: "1999-01-01T00:00:00Z" });
     const deps = pages([raw]);
     const recorded: unknown[] = [];
-    const result = await discoverSportsEvents({ baseUrl: "https://gamma.example.test/", eventSlugs: [slug, slug], sports: ["soccer"], now: () => nowMs }, { ...deps, onPage: (page) => recorded.push(page.response) });
+    const result = await discoverSportsEvents({ ...options, baseUrl: "https://gamma.example.test/", eventSlugs: [slug, slug], sports: ["soccer"], now: () => nowMs }, { ...deps, onPage: (page) => recorded.push(page.response) });
 
     expect(result.map((item) => item.eventSlug)).toEqual([slug]);
     expect(deps.urls).toHaveLength(1);
@@ -286,18 +423,18 @@ describe("sports catalog discovery", () => {
     expect(result.map((item) => item.eventId)).toEqual(["metadata"]);
   });
 
-  test("throws on a repeated nonempty page even if order or market metadata changes", async () => {
+  test.each<CatalogOptions>([{}, { dateWindow: "game-start" }])("throws on a repeated nonempty page even if order or market metadata changes: %j", async (options) => {
     const deps = pages([
-      [event("1"), event("2")],
-      [event("2", { volume: "100" }), event("1", { volume: "200" })]
+      [event("1", { startTime: "1999-01-01T00:00:00Z" }), event("2", { startTime: "1999-01-01T00:00:00Z" })],
+      [event("2", { volume: "100", startTime: "1999-01-01T00:00:00Z" }), event("1", { volume: "200", startTime: "1999-01-01T00:00:00Z" })]
     ]);
-    await expect(discoverSportsEvents({ pageSize: 2, maxPages: 10 }, deps)).rejects.toThrow("CATALOG_PAGINATION_STALLED");
+    await expect(discoverSportsEvents({ ...options, pageSize: 2, maxPages: 10, now: () => nowMs }, deps)).rejects.toThrow("CATALOG_PAGINATION_STALLED");
     expect(deps.urls).toHaveLength(2);
   });
 
-  test("throws instead of returning a partial catalog at the page cap", async () => {
-    const deps = pages([[event("1")], [event("2")]]);
-    await expect(discoverSportsEvents({ pageSize: 1, maxPages: 2 }, deps)).rejects.toThrow("CATALOG_PAGINATION_LIMIT");
+  test.each<CatalogOptions>([{}, { dateWindow: "game-start" }])("throws instead of returning a partial catalog at the page cap: %j", async (options) => {
+    const deps = pages([[event("1", { startTime: "1999-01-01T00:00:00Z" })], [event("2", { startTime: "1999-01-01T00:00:00Z" })]]);
+    await expect(discoverSportsEvents({ ...options, pageSize: 1, maxPages: 2, now: () => nowMs }, deps)).rejects.toThrow("CATALOG_PAGINATION_LIMIT");
     expect(deps.urls).toHaveLength(2);
   });
 
@@ -318,6 +455,13 @@ describe("sports catalog discovery", () => {
   ])("rejects invalid options before requesting data: %j", async (options) => {
     const deps = pages([]);
     await expect(discoverSportsEvents(options, deps)).rejects.toThrow("CATALOG_OPTIONS_INVALID");
+    expect(deps.urls).toHaveLength(0);
+  });
+
+  test.each(["start-date", "", null])("rejects invalid dateWindow %j before requesting data", async (dateWindow) => {
+    const deps = pages([[]]);
+    await expect(discoverSportsEvents({ dateWindow } as unknown as CatalogOptions, deps))
+      .rejects.toThrow("CATALOG_OPTIONS_INVALID: dateWindow must be metadata-end or game-start");
     expect(deps.urls).toHaveLength(0);
   });
 

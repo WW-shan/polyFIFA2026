@@ -164,6 +164,65 @@ async function journalRecords(root: string, runId: string): Promise<RecordInput[
 }
 
 describe("collector runtime", () => {
+  test.each<CollectorOptions>([{}, { dateWindow: "metadata-end" }, { dateWindow: "game-start" }])("propagates the date window through initial and repeated discovery: %j", async (options) => {
+    const discoveries: CatalogOptions[] = [];
+    const fixture = memoryRuntime(options, {
+      discover: async (catalogOptions) => { discoveries.push(catalogOptions); return []; }
+    });
+    await fixture.runtime.start();
+    await fixture.runtime.discoverOnce();
+    await fixture.runtime.stop();
+
+    const expected = options.dateWindow ?? "metadata-end";
+    expect(discoveries.map((item) => item.dateWindow)).toEqual([expected, expected]);
+    expect(fixture.records.find((record) => record.kind === "session_start")?.data).toMatchObject({ config: { dateWindow: expected } });
+  });
+
+  test.each(["start-date", "", null])("rejects an invalid runtime dateWindow %j", (dateWindow) => {
+    expect(() => createCollector({ dateWindow } as unknown as CollectorOptions))
+      .toThrow("dateWindow must be metadata-end or game-start");
+  });
+
+  test("game-start discovers and snapshots every tennis market despite a seven-day metadata end offset", async () => {
+    const raw = {
+      id: "tennis", slug: "atp-brunold-heide-2026-09-11", sport: "ATP", tags: [{ slug: "tennis" }],
+      startTime: "2026-09-11T10:00:00Z", endDate: "2026-09-18T10:00:00Z",
+      finishedTimestamp: "2026-09-11T11:26:00Z", closed: false,
+      markets: ["winner", "sets"].map((id) => ({
+        id, conditionId: "condition-" + id, slug: id, question: id,
+        outcomes: ["Yes", "No"], clobTokenIds: [id + "-yes", id + "-no"],
+        closed: false, enableOrderBook: true
+      }))
+    };
+    const snapshots: string[] = [];
+    const fixture = memoryRuntime({ dateWindow: "game-start", sports: ["tennis"], lookbackHours: 6, aheadHours: 2, durationSeconds: 0 }, {
+      now: () => Date.parse("2026-09-11T12:00:00Z"),
+      discover: discoverSportsEvents,
+      request: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/events") {
+          const min = parsed.searchParams.get("end_date_min");
+          const max = parsed.searchParams.get("end_date_max");
+          const end = Date.parse(raw.endDate);
+          return (min !== null && end < Date.parse(min)) || (max !== null && end > Date.parse(max)) ? [] : [raw];
+        }
+        if (parsed.pathname === "/book") {
+          const token = parsed.searchParams.get("token_id")!;
+          snapshots.push(token);
+          return { asset_id: token, bids: [], asks: [] };
+        }
+        throw new Error("Unexpected request: " + url);
+      }
+    });
+    const result = await fixture.runtime.run();
+
+    expect(result).toMatchObject({ status: "stopped", eventCount: 1, tokenCount: 4 });
+    expect(fixture.stream.starts).toEqual([["winner-yes", "winner-no", "sets-yes", "sets-no"]]);
+    expect(snapshots).toEqual(["winner-yes", "winner-no", "sets-yes", "sets-no"]);
+    expect(fixture.records.find((record) => record.kind === "discovery_page")?.data).toMatchObject({ response: [raw] });
+    expect(fixture.records.filter((record) => record.source === "gamma" && record.kind === "http_request")).toHaveLength(1);
+  });
+
   test("performs a finite discovery/snapshot run and closes the independent stream set", async () => {
     const root = await mkdtemp(join(tmpdir(), "poly-fifa-collector-runtime-"));
     temporaryDirectories.push(root);
@@ -574,7 +633,7 @@ describe("collector request lifecycle", () => {
       config: {
         rootDir: "data/collector", gammaBaseUrl: "https://gamma-api.polymarket.com", clobBaseUrl: "https://clob.polymarket.com",
         clobWsUrl: "wss://ws-subscriptions-clob.polymarket.com/ws/market", sportsWsUrl: "wss://sports-api.polymarket.com/ws",
-        tagId: "100639", sports: [], eventSlugs: [], lookbackHours: 48, aheadHours: 24, allOpen: false,
+        tagId: "100639", sports: [], eventSlugs: [], dateWindow: "metadata-end", lookbackHours: 48, aheadHours: 24, allOpen: false,
         pageSize: 100, maxPages: 200, discoveryIntervalMs: 60_000, snapshotIntervalMs: 60_000, httpTimeoutMs: 10_000,
         snapshotConcurrency: 8, maxTokensPerSocket: 200, maxSegmentBytes: 64 * 1024 * 1024, maxBufferBytes: 32 * 1024 * 1024,
         durationSeconds: 0

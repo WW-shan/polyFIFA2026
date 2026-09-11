@@ -24,6 +24,7 @@ data/live-ledger.json
 data/live-sports-audit.ndjson
 data/live-depth-audit.ndjson
 data/collector/
+data/research/
 
 # local git worktrees
 .worktrees/
