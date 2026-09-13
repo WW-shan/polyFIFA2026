@@ -50,7 +50,7 @@ Files: `src/collector/tail-view.ts`, collector CLI/package scripts, tests, `docs
 ### 5. Review and integration
 
 - [x] Independent spec and correctness review, regression fixes, fresh full tests/typecheck/diff checks.
-- [ ] Document observed coverage, remaining source limits and commands; locally integrate after verification while preserving existing untracked documents and raw data. No push or trades.
+- [x] Document observed coverage, remaining source limits and commands; locally integrate after verification while preserving existing untracked documents and raw data. No push or trades.
 
 ## Final validation notes (2026-09-13)
 
@@ -59,5 +59,6 @@ Files: `src/collector/tail-view.ts`, collector CLI/package scripts, tests, `docs
 - Final raw re-export: `tail-final-20260913/`; 49,379 raw window records match the source and all 39,000 viewer depth offsets validate.
 - Dodig: six active directions each have 300 valid book seconds and 119 combined in-window full-depth matches. Score context is fresh for 273 seconds, stale for 27, so strict `readyForReplay` is false. This is a source-data limitation, not waived acceptance.
 - The prior 90-second capture remains a negative control with zero complete tail windows. No sport expansion, orders or permanent monitoring was started.
-- Full suite: 56 files / 1,297 tests; typecheck and diff checks passed. Final integration verification remains a separate step.
+- Full suite: 56 files / 1,297 tests; typecheck and diff checks passed both in the feature worktree and after local integration to `main`.
 - Independent context/catalog/labels and core recovery reviews passed after regression fixes. Latest-code replay SHA-256 outputs for all five NDJSON streams and the quality object match both final real-data exports.
+- Feature commit `a28d8a4` was fast-forwarded locally. Main also passed the tail help command and all 13 local README/acceptance links; the two pre-existing untracked user notes retained their original SHA-256 hashes. No remote push or trading action occurred.
