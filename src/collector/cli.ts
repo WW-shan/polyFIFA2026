@@ -81,6 +81,7 @@ function parseCollectArgs(argv: readonly string[]): { command: "collect"; option
       case "--max-segment-bytes": options.maxSegmentBytes = integerValue(requireValue(argv, index++, flag), flag); break;
       case "--max-buffer-bytes": options.maxBufferBytes = integerValue(requireValue(argv, index++, flag), flag); break;
       case "--all-open": options.allOpen = true; break;
+      case "--include-related-events": options.includeRelatedEvents = true; break;
       case "--help": throw invalid("help is not a collection run; see README.md");
       default: throw invalid(`unknown option ${String(flag)}`);
     }

@@ -38,6 +38,9 @@ function cliRuntime(options: CollectorOptions = {}) {
 }
 
 describe("collector CLI", () => {
+  test("parses same-game related markets without expanding sports",()=>{
+    expect(parseCollectorCliArgs(["collect","--include-related-events"])).toEqual({command:"collect",options:{includeRelatedEvents:true}});
+  });
   test("leaves an omitted date window to the legacy collector default", () => {
     expect(parseCollectorCliArgs(["collect"])).toEqual({ command: "collect", options: {} });
   });

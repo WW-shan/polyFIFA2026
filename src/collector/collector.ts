@@ -8,6 +8,7 @@ import {
   type CatalogOptions
 } from "./catalog.js";
 import { createJournal } from "./journal.js";
+import { expandRelatedEvents } from "./related-catalog.js";
 import { createPublicStreams, type PublicStreamsOptions, type StreamTimerApi } from "./streams.js";
 import type { CollectorEvent, JsonRequestOptions, JsonRequester, RecordInput, RecordSink } from "./types.js";
 
@@ -38,6 +39,7 @@ export interface CollectorOptions {
   sports?: string[];
   eventSlugs?: string[];
   dateWindow?: "metadata-end" | "game-start";
+  includeRelatedEvents?: boolean;
   lookbackHours?: number;
   aheadHours?: number;
   allOpen?: boolean;
@@ -123,6 +125,7 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     sports: [...(options.sports ?? [])],
     eventSlugs: [...(options.eventSlugs ?? [])],
     dateWindow: options.dateWindow ?? "metadata-end",
+    includeRelatedEvents: options.includeRelatedEvents ?? false,
     lookbackHours: options.lookbackHours ?? 48,
     aheadHours: options.aheadHours ?? 24,
     allOpen: options.allOpen ?? false,
@@ -405,6 +408,8 @@ export class CollectorRuntime {
     let discovered: CollectorEvent[];
     try {
       discovered = await this.untilStopped(() => this.discover(catalogOptions, catalogDependencies));
+      if(this.options.includeRelatedEvents)discovered=await this.untilStopped(()=>expandRelatedEvents(discovered,
+        {baseUrl:this.options.gammaBaseUrl,pageSize:this.options.pageSize,maxPages:Math.min(this.options.maxPages,20),now:()=>dateValue(this.now()).getTime()},catalogDependencies));
     } catch (error) {
       if (this.collecting) this.record({ source: "collector", kind: "discovery_error", data: { error: serializeError(error) } });
       return;

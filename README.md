@@ -2,7 +2,7 @@
 
 Research and implementation workspace for a Polymarket World Cup single-match tail-entry bot.
 
-The current public-data research track is tennis-first and studies advance resting BUY orders. It is separate from the World Cup taker/execution logic below. Start with [the tennis data and initial results](docs/tennis-research-2026-09-11.md) and [the comparison with table tennis/esports](docs/sports-comparison-2026-09-11.md).
+The current public-data research track is tennis-first and studies advance resting BUY orders. It is separate from the World Cup taker/execution logic below. Start with [the final-five-minute order-book replay and data-quality report](docs/second-replay-acceptance.md), then [the initial public-trade backtest](docs/tennis-research-2026-09-11.md). Sport expansion follows data validation.
 
 Start here:
 
@@ -46,6 +46,30 @@ The standalone collector preserves public Gamma metadata, CLOB book/trade frames
 npm run collect -- --duration-seconds 60 --event-slugs <one-public-event-slug>
 npm run collect:export -- --run-dir data/collector/<runId>
 ```
+
+## Final-Five-Minute Order-Book Replay
+
+`collect:tail` derives 300 one-second rows per captured outcome from a completed raw journal. Rows retain full bid/ask depth, intra-second price extremes, trades, score provenance and explicit coverage status. Raw messages and individual changes remain separate; missing seconds are never interpolated. This is an order-book data product, not a personal-fill simulator.
+
+```bash
+# Finite forward capture; both outcomes, all market types, related events by game ID
+npm run collect:tennis -- --duration-seconds 1800 --run-id tennis-tail-next \
+  --discovery-interval-ms 30000 --snapshot-interval-ms 15000
+
+# Only if actual finish labels were not yet published during collection
+npm run collect:labels -- --run-dir data/collector/tennis-tail-next \
+  --output-dir data/collector/tennis-tail-next/labels
+
+npm run collect:tail -- --run-dir data/collector/tennis-tail-next \
+  --finish-labels data/collector/tennis-tail-next/labels/finish-labels.json \
+  --output-dir data/collector/tennis-tail-next/tail-5m
+
+npm run collect:tail -- --help
+```
+
+Every output directory must be new. Omit `--finish-labels` when the journal already contains explicit finish evidence. Open `viewer.html`, select the match/market/outcome, then select the adjacent `seconds.ndjson` locally to inspect exact depth. The viewer makes no network requests.
+
+The window ends at the source's explicit match-finish label, not scheduled `endDate`, market closure, or an independently inferred set/half finish. Compare book coverage, snapshot audits and score freshness separately in `quality.json`; a complete book window does not imply a complete live score feed. Late finish-label refreshes never backfill scores or market state. See the [Chinese acceptance report](docs/second-replay-acceptance.md) for sample evidence and remaining source limits.
 
 ## Tennis Collection and Resting-Order Research
 

@@ -46,6 +46,20 @@ function event(): CollectorEvent {
   };
 }
 
+test("same-game related markets are subscribed and their lookup is retained",async()=>{
+  const root=await mkdtemp(join(tmpdir(),"poly-related-integration-"));temporaryDirectories.push(root);
+  const streams=new FakeStreams();const parent=event();
+  const child={id:"child",slug:"game-1-exact",gameId:"game-id",markets:[{id:"child-market",slug:"child-market",conditionId:"child-condition",outcomes:["Yes","No"],clobTokenIds:["child-yes","child-no"]}]};
+  const runtime=createCollector({rootDir:root,runId:"related",durationSeconds:0,includeRelatedEvents:true},{
+    discover:async()=>[parent],createStreams:()=>streams,
+    request:async url=>new URL(url).pathname==="/events/keyset"?{events:[child]}:{asset_id:new URL(url).searchParams.get("token_id"),bids:[],asks:[]}
+  });
+  const result=await runtime.run();
+  expect(streams.starts[0]).toEqual(["token-yes","token-no","child-yes","child-no"]);
+  const data=await readJournalRecords(result.runDirectory);
+  expect(data.records.some(r=>r.kind==="discovery_page"&&String((r.data as {url?:string}).url).includes("game_id=game-id"))).toBe(true);
+});
+
 class FakeStreams implements CollectorStreamLike {
   readonly starts: string[][] = [];
   readonly updates: string[][] = [];
