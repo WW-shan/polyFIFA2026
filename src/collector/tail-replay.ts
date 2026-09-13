@@ -2,7 +2,7 @@ import { JournalReplay } from "./replay.js";
 import { objectValue, parsedJson } from "./replay-values.js";
 import { scanJournal } from "./journal-reader.js";
 import { metadataFromRecord, observationsFromRecord, changesBetween, windowKeyForIdentity } from "./tail-context.js";
-import { journalStamp, scanTailCatalog, tailOptions } from "./tail-catalog.js";
+import { finishFactsStamp, journalStamp, scanTailCatalog, tailOptions } from "./tail-catalog.js";
 import { TailBuckets, type TailLiveState } from "./tail-buckets.js";
 import { auditBook, auditSnapshot, sourceMilliseconds } from "./tail-audit.js";
 import type { JournalRecord } from "./types.js";
@@ -12,7 +12,7 @@ import type { TailAuditBook, TailBookChange, TailObservation, TailOptions, TailS
 function freshQuality(window:TailWindow,tokenId:string,seconds:number):TailTokenQuality{
   const market=window.markets.find(m=>m.tokenId===tokenId)!;
   return {windowKey:window.key,tokenId,marketId:market.marketId,outcome:market.outcome,marketType:market.marketType,
-    expectedSeconds:seconds,validSeconds:0,closedSeconds:0,partialSeconds:0,missingSeconds:0,staleSeconds:0,contextSeconds:0,
+    expectedSeconds:seconds,validSeconds:0,closedSeconds:0,partialSeconds:0,missingSeconds:0,staleSeconds:0,contextSeconds:0,clockAffectedSeconds:0,
     snapshotMatches:0,snapshotMismatches:0,snapshotNotComparable:0,seedSnapshotMatches:0,seedSnapshotMismatches:0,seedSnapshotNotComparable:0,
     observedWindowComplete:false,snapshotAuditPassed:false,readyForReplay:false,reasons:[]};
 }
@@ -70,14 +70,16 @@ export async function replayTail(input: TailOptions, sink: TailSink): Promise<Ta
       }
     }
   };
-  const replay=new JournalReplay({sportsStaleAfterMs:options.sportsStaleAfterMs,onInvalidation:event=>{
+  const replay=new JournalReplay({tokenIds:[...tokenWindows.keys()],sportsStaleAfterMs:options.sportsStaleAfterMs,onInvalidation:event=>{
     if(event.reason!=="sequence_gap"||!sequenceGapPrechecked)invalidateTail(event);
   }});
   const emitSecond=async(row:TailSecond):Promise<void>=>{
     seconds++;
     const q=qualities.get(row.windowKey+":"+row.tokenId)!;
+    const clockAffected=(row.clockIssueSequences?.length??0)>0;
+    if(clockAffected)q.clockAffectedSeconds=(q.clockAffectedSeconds??0)+1;
     if(row.wholeSecondValid)q.validSeconds++;
-    else if(row.status==="closed")q.closedSeconds++;
+    else if(row.status==="closed"){if(clockAffected)q.partialSeconds++;else q.closedSeconds++;}
     else if(row.status==="partial")q.partialSeconds++;
     else if(row.status==="feed_stale")q.staleSeconds++;
     else q.missingSeconds++;
@@ -242,9 +244,10 @@ export async function replayTail(input: TailOptions, sink: TailSink): Promise<Ta
   for(const bucket of buckets)if(bucket.window.endAtMs!==null)await bucket.advance(bucket.window.endAtMs,emitSecond);
   if(records!==catalog.records||await journalStamp(options.runDirectory)!==catalog.stamp)throw new Error("TAIL_INPUT_CHANGED");
   if(options.finishLabelsFile&&await readFile(options.finishLabelsFile,"utf8")!==catalog.labelText)throw new Error("TAIL_INPUT_CHANGED: finish labels");
+  if(options.finishFactsFile&&await finishFactsStamp(options.finishFactsFile).catch(()=>null)!==catalog.factsStamp)throw new Error("TAIL_INPUT_CHANGED: finish facts");
   for(const q of qualities.values()){
     const window=catalog.windows.find(w=>w.key===q.windowKey)!;
-    q.observedWindowComplete=window.endAtMs!==null&&!window.finishConflict&&q.validSeconds+q.closedSeconds===q.expectedSeconds;
+    q.observedWindowComplete=window.endAtMs!==null&&!window.finishConflict&&(q.clockAffectedSeconds??0)===0&&q.validSeconds+q.closedSeconds===q.expectedSeconds;
     q.snapshotAuditPassed=(q.snapshotMatches>0||q.closedSeconds===q.expectedSeconds)&&q.snapshotMismatches===0&&
       !q.reasons.includes("unresolved-snapshot-audit")&&!q.reasons.includes("pending-snapshot-audit");
     if(window.endAtMs===null){q.reasons.push("missing-actual-finish");q.missingSeconds=q.expectedSeconds;}
@@ -256,7 +259,8 @@ export async function replayTail(input: TailOptions, sink: TailSink): Promise<Ta
   }
   return {schemaVersion:1,basis:"received-order-book-tail",runId:catalog.runId,firstReceivedAtMs:catalog.firstMs,lastReceivedAtMs:catalog.lastMs,
     windowSeconds:options.windowSeconds,records,seconds,changes,stateChanges:stateChangeCount,audits,rawRecords,windows:catalog.windows,tokens:[...qualities.values()],
-    journalQuality:replay.quality,warnings:[...catalog.warnings,...contextWarnings,
+    clockPolicy:catalog.clockPolicy,clockIssues:catalog.clockIssues,journalQuality:replay.quality,warnings:[...catalog.warnings,...contextWarnings,
+      "Frame/book/trade diagnostics are selection-scoped; journal ordering and damage diagnostics remain global.",
       "Rows use half-open one-second receipt-time intervals; source timestamps are separate. No future score is backfilled.",
       "A carried book is the last valid observed state on a live stream, not a fresh snapshot or proof that the upstream exchange omitted no events.",
       "Full depth audits compare matching source states; non-comparable snapshots are not counted as verification.",

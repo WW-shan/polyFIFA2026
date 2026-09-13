@@ -16,7 +16,7 @@ export interface CatalogOptions {
 
 export interface CatalogDependencies {
   request: JsonRequester;
-  onPage?: (page: { url: string; requestStartedAt: string; requestEndedAt?: string; response: unknown }) => void;
+  onPage?: (page: { url: string; requestStartedAt: string; requestEndedAt?: string; response: unknown }) => void | Promise<void>;
   onRequest?: (request: { url: string; requestStartedAt: string; requestEndedAt: string; response?: unknown; error?: unknown }) => void;
 }
 
@@ -121,7 +121,7 @@ async function requestPage(url: string, deps: CatalogDependencies, now: () => nu
   }
   const requestEndedAt = new Date(now()).toISOString();
   deps.onRequest?.({ url, requestStartedAt, requestEndedAt, response });
-  deps.onPage?.({ url, requestStartedAt, requestEndedAt, response });
+  await deps.onPage?.({ url, requestStartedAt, requestEndedAt, response });
   return response;
 }
 

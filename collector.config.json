@@ -1,0 +1,15 @@
+{
+  "dataRoot": "data/collector/continuous",
+  "profiles": [
+    { "name": "tennis", "tagId": "864" },
+    { "name": "table-tennis", "tagId": "103767" }
+  ],
+  "proxyUrl": "http://127.0.0.1:10808",
+  "lookbackHours": 6,
+  "aheadHours": 2,
+  "discoveryIntervalMs": 30000,
+  "snapshotIntervalMs": 60000,
+  "postFinishRetentionMs": 600000,
+  "minFreeBytes": 21474836480,
+  "port": 8765
+}

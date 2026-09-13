@@ -14,7 +14,7 @@ const previewFields = [
   "stateChangeCount", "reasons", "depthOffset", "depthBytes"
 ] as const satisfies readonly (keyof TailPreviewRow)[];
 
-/** Full books stay in the separately selected local NDJSON file. */
+/** Full books stay in separate NDJSON, read by local file slice or loopback HTTP Range. */
 export function renderTailViewer(input: TailViewerInput): string {
   // Project explicitly: runtime extras can include full books and large market.raw payloads.
   const data = {
@@ -45,7 +45,7 @@ const html = `<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>尾盘逐秒订单簿</title>
 <style>
 :root{color-scheme:light;font-family:system-ui,sans-serif;color:#172a3b;background:#f3f5f7;font-size:14px}
@@ -106,7 +106,7 @@ input[type=file]{max-width:100%;margin:6px 0}summary{cursor:pointer}
 <label for="depth-file">选择本地深度文件</label>
 <input id="depth-file" type="file" accept=".ndjson,.jsonl,application/x-ndjson">
 <p id="depth-file-hint" class="muted"></p>
-<p class="muted">文件只在本机读取，不会上传。每次仅按字节读取选中秒，不会将整个文件载入内存。身份核验只检查索引对应关系，数据质量见上方。</p>
+<p class="muted">通过本地服务器打开时会自动读取所选秒；离线打开时请选择本地深度文件。用户选择的本地文件优先读取，不会上传。每次仅按字节读取选中秒，不会将整个文件载入内存。身份核验只检查索引对应关系，数据质量见上方。</p>
 <p id="file-status" class="muted" role="status"></p>
 <p id="depth-status" role="status" aria-live="polite"></p>
 <div class="depth-grid">
@@ -128,16 +128,24 @@ const browserScript = String.raw`
   const chart = byId("price-chart");
   const statusLabels = {
     observed: "本秒有更新", carried: "沿用此前订单簿", partial: "部分缺失", missing: "缺失", invalid: "无效",
-    feed_stale: "数据流过期", outside_run: "采集范围外", not_yet_known: "尚未知晓", closed: "已关闭"
+    feed_stale: "数据流过期", outside_run: "采集范围外", not_yet_known: "尚未知晓", closed: "已关闭／非可交易时段"
   };
   const contextLabels = { present: "有上下文", missing: "上下文缺失", stale: "上下文过期", disconnected: "比分连接中断" };
   const changeLabels = { score_change: "比分变化", score_increase: "比分增加", score_decrease: "比分回退", period_change: "阶段变化", ended_change: "结束状态变化" };
   const reasonLabels = {
+    ...statusLabels,
     missing_book: "缺少订单簿", missing_seconds: "存在缺失秒", feed_stale: "数据流过期", feed_silence: "数据流静默",
     outside_run: "采集范围外", not_yet_known: "市场尚未知晓", connection_gap: "连接中断",
     snapshot_mismatch: "快照校验不一致", missing_context: "比分上下文缺失", context_missing: "比分上下文缺失",
-    context_stale: "比分上下文过期", context_disconnected: "比分连接中断", unknown_finish: "结束时间未知"
+    context_stale: "比分上下文过期", context_disconnected: "比分连接中断", unknown_finish: "结束时间未知",
+    missing_actual_finish: "缺少实际结束时间", conflicting_finish_labels: "结束时间来源冲突",
+    snapshot_audit_not_passed: "快照校验未通过", no_active_book_seconds: "无有效盘口价格秒",
+    within_second_invalidation: "秒内订单簿失效", pending_snapshot_audit: "快照校验待完成",
+    unresolved_snapshot_audit: "快照校验未完成", missing_book_source_time: "缺少订单簿来源时间",
+    book_source_clock_invalid: "订单簿来源时钟无效"
   };
+  // Current exports use hyphens; retain labels for older underscore reason codes too.
+  for (const [code, title] of Object.entries(reasonLabels)) reasonLabels[code.replace(/_/g, "-")] = title;
   const text = value => value == null ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
   const label = (labels, value) => Object.hasOwn(labels, value) ? labels[value] : text(value);
   const reasons = values => values.map(value => label(reasonLabels, value) + (Object.hasOwn(reasonLabels, value) ? " (" + value + ")" : "")).join("；");
@@ -161,6 +169,11 @@ const browserScript = String.raw`
   const range = (low, high) => decimal(low) + "–" + decimal(high);
   const valid = row => row.wholeSecondValid === true && (row.status === "observed" || row.status === "carried");
   const knownWindow = window => window && Number.isFinite(window.startAtMs) && Number.isFinite(window.endAtMs) && window.endAtMs > window.startAtMs;
+  // Display-only: price evidence is independent of the stricter readyForReplay flag.
+  const priceUsable = (window, quality) => !!(knownWindow(window) && !window.finishConflict && quality
+    && quality.observedWindowComplete === true && quality.snapshotAuditPassed === true && quality.validSeconds > 0);
+  const allClosed = quality => quality && quality.expectedSeconds > 0 && quality.validSeconds === 0
+    && quality.closedSeconds === quality.expectedSeconds;
   const key = (window, market, token) => JSON.stringify([window, market, token]);
   const rowsByChoice = new Map(), changesByWindow = new Map(), qualityByChoice = new Map();
   for (const row of data.rows) {
@@ -174,7 +187,31 @@ const browserScript = String.raw`
   }
   for (const quality of summary.tokens) qualityByChoice.set(key(quality.windowKey, quality.marketId, quality.tokenId), quality);
   let currentWindow = null, currentRows = [], selectedRow = null, localFile = null, readVersion = 0;
+  let depthRequest = null;
+  const remoteDepthUrl = loopbackDepthUrl();
   let rowNodes = [];
+
+  const qualityFor = (window, market) => qualityByChoice.get(key(window.key, market.marketId, market.tokenId));
+  function priceLabel(window, quality) {
+    if (!knownWindow(window)) return "结束时间未知；不可回放";
+    if (window.finishConflict) return "结束时间来源冲突；不可回放";
+    if (!quality) return "缺少该结果的质量记录；不可回放";
+    if (priceUsable(window, quality)) return "盘口价格可回放"
+      + (quality.contextSeconds < quality.expectedSeconds ? "；比分上下文不完整/过期" : "");
+    if (allClosed(quality)) return "已关闭／非可交易时段；无有效盘口价格秒"
+      + (quality.snapshotAuditPassed ? "" : "；快照校验未通过");
+    const issues = quality.reasons.filter(code => !/^(context[-_]|missing[-_]context$)/.test(code)).map(code => label(reasonLabels, code));
+    if (!quality.observedWindowComplete && !issues.length) issues.push("盘口观测窗口不完整");
+    if (!quality.snapshotAuditPassed) issues.push("快照校验未通过");
+    if (quality.validSeconds === 0) issues.push("无有效盘口价格秒");
+    return "盘口价格不可回放；" + Array.from(new Set(issues)).join("；");
+  }
+  function groupLabel(window, choices) {
+    const usable = choices.filter(market => priceUsable(window, qualityFor(window, market))).length;
+    if (usable) return "含可回放盘口价格 " + usable + "/" + choices.length + " 个结果";
+    return choices.length ? Array.from(new Set(choices.map(market => priceLabel(window, qualityFor(window, market))))).join("；")
+      : priceLabel(window, null);
+  }
 
   function element(tag, value = "") {
     const node = document.createElement(tag);
@@ -196,7 +233,7 @@ const browserScript = String.raw`
     }
     select.replaceChildren(fragment);
     select.disabled = entries.length === 0;
-    select.value = entries.length ? entries[0][0] : "";
+    select.value = entries.length ? (entries.find(entry => entry[2]) || entries[0])[0] : "";
   }
 
   function renderQuality() {
@@ -206,18 +243,17 @@ const browserScript = String.raw`
       && quality.observedWindowComplete === true && quality.snapshotAuditPassed === true);
     const lines = [];
     if (!currentWindow) lines.push("暂无比赛数据；不可回放。");
-    else if (!known) lines.push("结束时间未知，无法确定最后 " + summary.windowSeconds + " 秒；不可回放。");
-    else if (currentWindow.finishConflict) lines.push("结束时间来源冲突；不可回放。");
-    else lines.push(ready ? "质量通过（可回放）" : "质量未通过 · 不可回放");
+    else lines.push(priceLabel(currentWindow, quality));
+    if (known && !currentWindow.finishConflict && quality) lines.push(ready ? "质量通过（可回放）" : "综合质量未通过（严格回放条件）");
     if (outcomes.value) lines.push("结果 token：" + outcomes.value);
     if (quality) {
       lines.push("整秒有效 " + quality.validSeconds + "/" + quality.expectedSeconds + " · 缺失 " + quality.missingSeconds
         + " · 过期 " + quality.staleSeconds + " · 部分缺失 " + quality.partialSeconds + " · 已关闭 " + quality.closedSeconds);
       lines.push("观测窗口完整：" + (quality.observedWindowComplete ? "是" : "否") + " · 比分上下文 " + quality.contextSeconds
-        + " 秒 · 快照校验：" + (quality.snapshotAuditPassed ? "通过" : "未通过") + "（一致 " + quality.snapshotMatches
+        + "/" + quality.expectedSeconds + " 秒 · 快照校验：" + (quality.snapshotAuditPassed ? "通过" : "未通过") + "（一致 " + quality.snapshotMatches
         + " / 不一致 " + quality.snapshotMismatches + " / 不可比较 " + quality.snapshotNotComparable + "）");
       if (quality.reasons.length) lines.push("质量原因：" + reasons(quality.reasons));
-    } else if (currentWindow) lines.push("缺少该结果的质量记录；不可回放。");
+    }
     byId("quality").textContent = lines.join("\n");
     byId("quality").setAttribute("data-ready", String(ready));
   }
@@ -226,9 +262,12 @@ const browserScript = String.raw`
     currentWindow = summary.windows.find(window => window.key === matches.value) || null;
     const choices = new Map();
     for (const market of currentWindow ? currentWindow.markets : []) {
-      if (!choices.has(market.marketId)) choices.set(market.marketId, market.question + " · " + market.marketType);
+      if (!choices.has(market.marketId)) choices.set(market.marketId, []);
+      choices.get(market.marketId).push(market);
     }
-    options(markets, Array.from(choices));
+    options(markets, Array.from(choices, ([id, tokens]) => [id,
+      tokens[0].question + " · " + tokens[0].marketType + " · " + groupLabel(currentWindow, tokens),
+      tokens.some(market => priceUsable(currentWindow, qualityFor(currentWindow, market)))]));
     byId("window-info").textContent = !currentWindow ? "无比赛窗口" : knownWindow(currentWindow)
       ? dateTime(currentWindow.startAtMs) + " → " + dateTime(currentWindow.endAtMs) + " · 结束依据：" + currentWindow.finishSources.join("、")
       : "结束时间未知：没有可定位的最后 " + summary.windowSeconds + " 秒窗口。";
@@ -237,7 +276,9 @@ const browserScript = String.raw`
 
   function renderMarket() {
     const choices = currentWindow ? currentWindow.markets.filter(market => market.marketId === markets.value) : [];
-    options(outcomes, choices.map(market => [market.tokenId, market.outcome + (market.closed ? "（已关闭）" : "")]));
+    options(outcomes, choices.map(market => [market.tokenId,
+      market.outcome + (market.closed ? "（已关闭）" : "") + " · " + priceLabel(currentWindow, qualityFor(currentWindow, market)),
+      priceUsable(currentWindow, qualityFor(currentWindow, market))]));
     return renderToken();
   }
 
@@ -277,14 +318,15 @@ const browserScript = String.raw`
       button.addEventListener("click", () => selectSecond(row));
       timeCell.append(button);
       tr.append(timeCell);
-      const status = element("td", label(statusLabels, row.status) + (row.wholeSecondValid ? "" : "（整秒不完整）"));
+      const status = element("td", label(statusLabels, row.status)
+        + (!row.wholeSecondValid && ["observed", "carried"].includes(row.status) ? "（整秒不完整）" : ""));
       status.setAttribute("title", "订单簿接收 " + dateTime(row.bookObservedAtMs) + "；来源时间 " + dateTime(row.bookSourceAtMs)
         + "；订单簿年龄 " + text(row.bookAgeMs) + "ms；数据流年龄 " + text(row.feedAgeMs) + "ms");
       tr.append(status);
       const values = [row.score, text(row.period) + " / " + text(row.clock), row.bookUpdates, row.bestBid,
         range(row.minBestBid, row.maxBestBid), row.bestAsk, range(row.minBestAsk, row.maxBestAsk), row.stateChangeCount,
         label(contextLabels, row.contextStatus) + " · " + text(row.contextAgeMs) + "ms",
-        reasons(row.reasons) || (row.wholeSecondValid ? "—" : "本秒证据不完整：" + label(statusLabels, row.status))];
+        reasons(row.reasons) || (row.wholeSecondValid ? "—" : label(statusLabels, row.status))];
       for (const value of values) tr.append(element("td", value));
       rowNodes.push({ row, tr, button });
       fragment.append(tr);
@@ -389,19 +431,73 @@ const browserScript = String.raw`
     }
     byId(id).replaceChildren(fragment);
   }
+  function loopbackDepthUrl() {
+    if (typeof location === "undefined") return null;
+    const name = data.depthFile;
+    // A basename only: no URLs, paths, encoded separators, parent segments or controls.
+    if (typeof name !== "string" || !name || name === "." || name.includes("..") || /[^A-Za-z0-9_.-]/.test(name)) return null;
+    try {
+      const page = new URL(location.href);
+      if (!["http:", "https:"].includes(page.protocol) || !["127.0.0.1", "localhost"].includes(page.hostname)) return null;
+      const url = new URL("./" + name, page);
+      if (url.origin !== page.origin) return null;
+      url.username = ""; url.password = "";
+      return url.href;
+    } catch { return null; }
+  }
+  async function readRemoteDepth(row, signal) {
+    const bytes = row.depthBytes, end = row.depthOffset + bytes - 1;
+    if (bytes > 16 * 1024 * 1024) throw new Error("所选秒深度过大（超过 16 MiB）；请选择本地文件读取");
+    let response = null, reader = null;
+    try {
+      response = await fetch(remoteDepthUrl, { method: "GET", headers: { Range: "bytes=" + row.depthOffset + "-" + end },
+        mode: "same-origin", credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer", signal });
+      if (signal.aborted) throw new Error("读取已取消");
+      // Never consume a full-file fallback, a different range, or a compressed byte stream.
+      if (response.status !== 206) throw new Error("服务器未返回所选字节范围（需要 HTTP 206）");
+      if (response.headers.get("Content-Range") !== "bytes " + row.depthOffset + "-" + end + "/" + data.depthFileBytes) {
+        throw new Error("响应字节范围或文件大小与索引不符");
+      }
+      const length = response.headers.get("Content-Length"), encoding = response.headers.get("Content-Encoding");
+      if (length !== null && length !== String(bytes)) throw new Error("响应字节长度与索引不符");
+      if (encoding !== null && encoding !== "identity") throw new Error("不支持压缩的字节范围响应");
+      if (!response.body) throw new Error("没有深度响应内容");
+      reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      let received = 0, line = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (signal.aborted) throw new Error("读取已取消");
+        if (done) break;
+        received += value.byteLength;
+        if (received > bytes) throw new Error("响应内容超出所选字节范围");
+        line += decoder.decode(value, { stream: true });
+      }
+      if (received !== bytes) throw new Error("响应内容不足所选字节范围");
+      return line + decoder.decode();
+    } finally {
+      if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      else if (response && response.body) await response.body.cancel().catch(() => {});
+    }
+  }
   async function readDepth() {
     const version = ++readVersion, row = selectedRow, file = localFile;
+    if (depthRequest) depthRequest.abort();
+    depthRequest = null;
     byId("depth-bids").replaceChildren();
     byId("depth-asks").replaceChildren();
     if (!row) { byId("depth-status").textContent = "没有可检查的秒。"; return; }
-    if (!file) { byId("depth-status").textContent = "已选择该秒；请选择匹配的本地深度文件。"; return; }
+    if (!file && !remoteDepthUrl) { byId("depth-status").textContent = "已选择该秒；请选择匹配的本地深度文件。"; return; }
     byId("depth-status").textContent = "正在读取所选秒的字节范围…";
     try {
-      if (file.size !== data.depthFileBytes) throw new Error("文件大小不符");
+      if (file && file.size !== data.depthFileBytes) throw new Error("文件大小不符");
       const depthOffset = row.depthOffset, depthBytes = row.depthBytes, end = depthOffset + depthBytes;
       if (!Number.isSafeInteger(depthOffset) || depthOffset < 0 || !Number.isSafeInteger(depthBytes) || depthBytes <= 0
-        || !Number.isSafeInteger(end) || end > file.size) throw new Error("字节索引无效或超出文件范围");
-      const line = await file.slice(depthOffset, depthOffset + depthBytes).text();
+        || !Number.isSafeInteger(data.depthFileBytes) || data.depthFileBytes < 0
+        || !Number.isSafeInteger(end) || end > data.depthFileBytes) throw new Error("字节索引无效或超出文件范围");
+      const controller = file ? null : new AbortController();
+      depthRequest = controller;
+      const line = file ? await file.slice(depthOffset, depthOffset + depthBytes).text() : await readRemoteDepth(row, controller.signal);
       // Selection/file changes invalidate pending reads before either parsing or displaying them.
       if (version !== readVersion) return;
       const full = JSON.parse(line);
@@ -420,33 +516,38 @@ const browserScript = String.raw`
       if (version !== readVersion) return;
       byId("depth-bids").replaceChildren();
       byId("depth-asks").replaceChildren();
-      byId("depth-status").textContent = "读取失败：" + text(error && error.message ? error.message : error);
+      byId("depth-status").textContent = "读取失败：" + text(error && error.message ? error.message : error)
+        + (file ? "" : "；可选择匹配的本地文件读取。");
+    } finally {
+      if (version === readVersion) depthRequest = null;
     }
   }
 
   byId("run-info").textContent = "采集 " + summary.runId + " · 各结果最后 " + summary.windowSeconds + " 秒 · "
     + dateTime(summary.firstReceivedAtMs) + " → " + dateTime(summary.lastReceivedAtMs);
   byId("depth-file-hint").textContent = "需要文件：" + data.depthFile + " · 精确大小 " + data.depthFileBytes + " 字节";
+  byId("file-status").textContent = remoteDepthUrl ? "本地服务器自动读取所选秒；也可选择本地文件优先读取。"
+    : "离线或外部站点不自动请求深度数据；请选择匹配的本地文件。";
   for (const warning of summary.warnings) byId("warnings").append(element("li", warning));
   for (const window of summary.windows) {
     if (!knownWindow(window)) byId("warnings").append(element("li", "结束时间未知：" + window.title + "；无法确定最后 " + summary.windowSeconds + " 秒。"));
   }
-  options(matches, summary.windows.map(window => [window.key, window.title + (knownWindow(window) ? "" : "（结束时间未知）")]));
+  options(matches, summary.windows.map(window => [window.key, window.title + " · " + groupLabel(window, window.markets),
+    window.markets.some(market => priceUsable(window, qualityFor(window, market)))]));
   matches.addEventListener("change", renderWindow);
   markets.addEventListener("change", renderMarket);
   outcomes.addEventListener("change", renderToken);
   byId("depth-file").addEventListener("change", () => {
     const file = byId("depth-file").files[0] || null;
-    localFile = null;
+    localFile = file;
     if (!file) byId("file-status").textContent = "尚未选择本地文件。";
     else if (!Number.isSafeInteger(data.depthFileBytes) || data.depthFileBytes < 0 || file.size !== data.depthFileBytes) {
       byId("file-status").textContent = "文件大小不符：需要 " + data.depthFileBytes + " 字节，所选文件为 " + file.size + " 字节。";
     } else {
-      localFile = file;
       byId("file-status").textContent = "已选择 " + file.name + "（" + file.size + " 字节）；文件留在本机。";
     }
     return readDepth();
   });
-  renderWindow();
+  return renderWindow();
 })();
 `;

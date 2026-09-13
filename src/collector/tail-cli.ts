@@ -21,10 +21,16 @@ export function parseTailCliArgs(args:readonly string[]):TailCliArgs{
     else if(command==="export")switch(flag){
       case "--window-seconds":options.windowSeconds=positive(value(args,index++));break;
       case "--finish-labels":options.finishLabelsFile=value(args,index++);break;
+      case "--finish-facts":options.finishFactsFile=value(args,index++);break;
       case "--event-slugs":options.eventSlugs=value(args,index++).split(",").map(s=>s.trim());break;
       case "--max-feed-silence-ms":options.maxFeedSilenceMs=positive(value(args,index++));break;
       case "--sports-stale-after-ms":options.sportsStaleAfterMs=positive(value(args,index++));break;
       case "--max-clock-drift-ms":options.maxClockDriftMs=positive(value(args,index++));break;
+      case "--clock-policy":{
+        const policy=value(args,index++);
+        if(policy!=="strict"&&policy!=="flag-backsteps")invalid("clock policy must be strict or flag-backsteps");
+        options.clockPolicy=policy;break;
+      }
       case "--max-line-bytes":options.maxLineBytes=positive(value(args,index++));break;
       case "--shock-threshold":options.shockThreshold=positive(value(args,index++),false);break;
       default:invalid("unknown export option "+flag);
@@ -46,9 +52,13 @@ export function parseTailCliArgs(args:readonly string[]):TailCliArgs{
 const HELP=`Public orderbook evidence, no orders. Use completed collector runs.
 export --run-dir PATH [--output-dir NEW_PATH] [--window-seconds 300]
   [--event-slugs CSV] [--finish-labels FILE] [--max-feed-silence-ms 30000]
+  [--finish-facts FILE]
   [--sports-stale-after-ms 60000] [--shock-threshold 0.1]
+  [--clock-policy strict|flag-backsteps] [--max-clock-drift-ms 5000]
+Clock policy defaults to strict. flag-backsteps marks bounded receipt-clock uncertainty in quality.
 labels --run-dir PATH --output-dir NEW_PATH [--proxy-url URL] [--timeout-ms 15000]
 labels saves later Gamma finish evidence; export uses it only for boundaries, never past scores.
+finish-facts imports normalized journal finish boundaries with original run/sequence/frame provenance.
 The viewer is offline; select its seconds.ndjson file locally for full-depth inspection.
 Missing/partial seconds stay explicit. No overwrite or interpolation of missing books.`;
 export async function runTailCli(args:readonly string[],deps:TailCliDependencies={}):Promise<unknown>{

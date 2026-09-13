@@ -46,6 +46,16 @@ function event(): CollectorEvent {
   };
 }
 
+function lifecycleEvent(id: string, closed = false, finishedAtMs?: number): CollectorEvent {
+  const base = event();
+  const rawMarket = { id: `${id}-market`, slug: `${id}-winner`, conditionId: `${id}-condition`, question: id,
+    outcomes: ["Yes", "No"], clobTokenIds: [`${id}-yes`, `${id}-no`], closed, sportsMarketType: "moneyline" };
+  return { ...base, eventId: id, eventSlug: id, gameId: `${id}-game`, title: id,
+    markets: [{ ...base.markets[0]!, marketId: rawMarket.id, marketSlug: rawMarket.slug, conditionId: rawMarket.conditionId,
+      tokenIds: rawMarket.clobTokenIds, closed, collectable: !closed, raw: rawMarket }],
+    raw: { id, slug: id, gameId: `${id}-game`, closed, markets: [rawMarket], ...(finishedAtMs === undefined ? {} : { finishedTimestamp: new Date(finishedAtMs).toISOString() }) } };
+}
+
 test("same-game related markets are subscribed and their lookup is retained",async()=>{
   const root=await mkdtemp(join(tmpdir(),"poly-related-integration-"));temporaryDirectories.push(root);
   const streams=new FakeStreams();const parent=event();
@@ -163,6 +173,74 @@ function memoryRuntime(options: CollectorOptions = {}, overrides: CollectorDepen
     get journalCreations() { return journalCreations; }
   };
 }
+
+describe("continuous match retention", () => {
+  test("a discovery metadata burst drains storage instead of overflowing before subscriptions start", async () => {
+    const root = await mkdtemp(join(tmpdir(), "poly-discovery-backpressure-")); temporaryDirectories.push(root);
+    const events = Array.from({ length: 8 }, (_, i) => {
+      const value = lifecycleEvent(`game-${i}`); value.raw.description = "x".repeat(6000); return value;
+    });
+    const streams = new FakeStreams();
+    const runtime = createCollector({ rootDir: root, runId: "burst", durationSeconds: 0, maxBufferBytes: 32_000 }, {
+      discover: async () => events, createStreams: () => streams, request: async () => ({ bids: [], asks: [] })
+    });
+    const result = await runtime.run();
+    expect(streams.starts[0]).toHaveLength(16);
+    const records = await readJournalRecords(result.runDirectory);
+    const metadata = records.records.filter(row => row.kind === "event_metadata");
+    expect(metadata).toHaveLength(8);
+    expect(metadata[0]!.data).toMatchObject({ event: events[0]!.raw });
+    expect(metadata[0]!.data).not.toHaveProperty("normalized.raw");
+  });
+
+  test("keeps observed tokens through post-finish grace, excludes closed tokens from HTTP polling and admits the next match", async () => {
+    let now = 1000;
+    let listed = [lifecycleEvent("A"), lifecycleEvent("B")];
+    const requested: string[] = [];
+    const fixture = memoryRuntime({ postFinishRetentionMs: 1000 } as CollectorOptions, {
+      now: () => now, discover: async () => listed,
+      request: async url => { requested.push(new URL(url).searchParams.get("token_id")!); return {}; }
+    });
+    try {
+      await fixture.runtime.start();
+      now = 2000; listed = [lifecycleEvent("A", true, 1900), lifecycleEvent("B")];
+      await fixture.runtime.discoverOnce();
+      expect(fixture.runtime.tokenIds).toEqual(["A-yes", "A-no", "B-yes", "B-no"]);
+      requested.length = 0;
+      await fixture.runtime.snapshotOnce();
+      expect(requested).toEqual(["B-yes", "B-no"]);
+      now = 2900; await fixture.runtime.discoverOnce();
+      now = 3001; listed = [...listed, lifecycleEvent("C")]; await fixture.runtime.discoverOnce();
+      expect(fixture.runtime.tokenIds).toEqual(["B-yes", "B-no", "C-yes", "C-no"]);
+      expect(fixture.records).toContainEqual(expect.objectContaining({ kind: "event_retired", data: expect.objectContaining({ eventId: "A" }) }));
+      expect(fixture.stream.stopped).toBe(false);
+    } finally { await fixture.runtime.stop(); }
+  });
+
+  test("an explicit finish retires an event after grace even when Gamma still says closed=false", async () => {
+    let now = 1000; let current = lifecycleEvent("A");
+    const fixture = memoryRuntime({ postFinishRetentionMs: 1000 } as CollectorOptions, { now: () => now, discover: async () => [current] });
+    try {
+      await fixture.runtime.start();
+      now = 2000; current = lifecycleEvent("A", false, 1900); await fixture.runtime.discoverOnce();
+      now = 3001; await fixture.runtime.discoverOnce();
+      expect(fixture.runtime.tokenIds).toEqual([]);
+      now = 4000; await fixture.runtime.discoverOnce();
+      expect(fixture.runtime.tokenIds).toEqual([]);
+    } finally { await fixture.runtime.stop(); }
+  });
+
+  test("scheduled metadata expiry cannot terminate a live match", async () => {
+    const current = lifecycleEvent("A"); current.raw.endDate = new Date(0).toISOString();
+    const fixture = memoryRuntime({ postFinishRetentionMs: 1 } as CollectorOptions, { discover: async () => [current] });
+    try { await fixture.runtime.start(); await fixture.runtime.discoverOnce(); expect(fixture.runtime.tokenIds).toEqual(["A-yes", "A-no"]); }
+    finally { await fixture.runtime.stop(); }
+  });
+
+  test.each([-1, 1.5, NaN])("rejects invalid finish retention %s", postFinishRetentionMs => {
+    expect(() => createCollector({ postFinishRetentionMs } as CollectorOptions)).toThrow("postFinishRetentionMs");
+  });
+});
 
 async function journalRecords(root: string, runId: string): Promise<RecordInput[]> {
   const directory = join(root, runId);
@@ -460,7 +538,7 @@ describe("collector audited lifecycle regressions", () => {
     });
     expect(fixture.records.at(-1)?.kind).toBe("session_end");
     expect(fixture.timers.intervals.size + fixture.timers.timeouts.size).toBe(0);
-    expect(fixture.cleanup).toEqual(["streams", "flush", "close"]);
+    expect(fixture.cleanup.slice(fixture.cleanup.indexOf("streams"))).toEqual(["streams", "flush", "close"]);
   });
 
   test("C14 finite duration applies while journal startup is stalled", async () => {
@@ -525,7 +603,7 @@ describe("collector audited lifecycle regressions", () => {
 
     expect(await running).toEqual({ status: "rejected", reason: failure });
     expect(fixture.streamOptions).toBeUndefined();
-    expect(fixture.cleanup).toEqual(["flush", "close"]);
+    expect(fixture.cleanup).toEqual(["flush", "flush", "close"]);
     expect(fixture.timers.intervals.size + fixture.timers.timeouts.size).toBe(0);
   });
 
@@ -792,7 +870,7 @@ describe("collector request lifecycle", () => {
 
     expect(await settled(discovering)).toMatchObject({ status: "fulfilled" });
     expect(await running).toEqual({ status: "rejected", reason: failure });
-    expect(fixture.cleanup).toEqual(["streams", "flush", "close"]);
+    expect(fixture.cleanup.slice(fixture.cleanup.indexOf("streams"))).toEqual(["streams", "flush", "close"]);
     expect(fixture.timers.intervals.size).toBe(0);
   });
 
@@ -817,7 +895,7 @@ describe("collector request lifecycle", () => {
     expect(fixture.stream.updates).toEqual([]);
     expect(fixture.runtime.tokenIds).toEqual(["token-yes", "token-no"]);
     expect(fixture.records.at(-1)?.kind).toBe("session_end");
-    expect(fixture.cleanup).toEqual(["streams", "flush", "close"]);
+    expect(fixture.cleanup.slice(fixture.cleanup.indexOf("streams"))).toEqual(["streams", "flush", "close"]);
   });
 
   test("stop waits for asynchronous stream teardown before closing the journal", async () => {

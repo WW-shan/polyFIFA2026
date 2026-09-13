@@ -2,7 +2,7 @@
 
 Research and implementation workspace for a Polymarket World Cup single-match tail-entry bot.
 
-The current public-data research track is tennis-first and studies advance resting BUY orders. It is separate from the World Cup taker/execution logic below. Start with [the final-five-minute order-book replay and data-quality report](docs/second-replay-acceptance.md), then [the initial public-trade backtest](docs/tennis-research-2026-09-11.md). Sport expansion follows data validation.
+The public-data research track records tennis and table-tennis markets for advance resting-order research. It is separate from the World Cup taker/execution logic below. Start with [the continuous collector and status page](docs/continuous-collector.md); [the earlier five-minute replay report](docs/second-replay-acceptance.md) describes a historical validation sample, not today's live collection.
 
 Start here:
 
@@ -42,6 +42,19 @@ npm run typecheck
 
 The standalone collector preserves public Gamma metadata, CLOB book/trade frames, Sports score frames, HTTP snapshots, connection epochs, and receipt clocks for later research. It does not use trading credentials or place orders. See `docs/sports-collector.md` for scope, quality rules, and export commands.
 
+For continuous collection on this Mac:
+
+```sh
+npm run collect:start
+npm run collect:status
+# Stop only this collector; keep all collected data.
+npm run collect:stop
+```
+
+The status page is **http://127.0.0.1:8765/**. Configuration is in `collector.config.json`; its proxy is specific to this machine. The user LaunchAgent keeps the collector running after the terminal closes, and `collect:start` prevents idle sleep while it runs. Closing the laptop lid, shutting down, losing connectivity, or reaching the 20 GiB disk reserve can still interrupt collection. No raw data is automatically deleted. See [operation and quality rules](docs/continuous-collector.md) before changing machines or storage.
+
+The older finite collection commands below remain available for diagnostics:
+
 ```bash
 npm run collect -- --duration-seconds 60 --event-slugs <one-public-event-slug>
 npm run collect:export -- --run-dir data/collector/<runId>
@@ -67,7 +80,7 @@ npm run collect:tail -- --run-dir data/collector/tennis-tail-next \
 npm run collect:tail -- --help
 ```
 
-Every output directory must be new. Omit `--finish-labels` when the journal already contains explicit finish evidence. Open `viewer.html`, select the match/market/outcome, then select the adjacent `seconds.ndjson` locally to inspect exact depth. The viewer makes no network requests.
+Every output directory must be new. Omit `--finish-labels` when the journal already contains explicit finish evidence. Open `viewer.html` and select the match/market/outcome. When served by the local status service, exact depth is read automatically using bounded same-origin byte ranges. For an offline file, select the adjacent `seconds.ndjson`. The viewer makes no external-site requests.
 
 The window ends at the source's explicit match-finish label, not scheduled `endDate`, market closure, or an independently inferred set/half finish. Compare book coverage, snapshot audits and score freshness separately in `quality.json`; a complete book window does not imply a complete live score feed. Late finish-label refreshes never backfill scores or market state. See the [Chinese acceptance report](docs/second-replay-acceptance.md) for sample evidence and remaining source limits.
 

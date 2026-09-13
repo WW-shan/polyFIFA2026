@@ -75,7 +75,7 @@ function copyField(target: Record<string, unknown>, key: string, value: unknown)
   const id = identifier(value);
   if (id !== undefined) target[key] = id;
 }
-function metadataMappings(data: unknown): ReplayMarketMapping[] {
+function metadataMappings(data: unknown, tokenIds?: ReadonlySet<string>): ReplayMarketMapping[] {
   const wrapper = objectValue(data);
   const event = objectValue(wrapper?.normalized) ?? objectValue(wrapper?.event) ?? wrapper;
   if (!event) return [];
@@ -85,10 +85,13 @@ function metadataMappings(data: unknown): ReplayMarketMapping[] {
     const market = objectValue(item);
     if (!market) continue;
     const raw = objectValue(market.raw) ?? market;
-    const tokens = arrayValue(market.tokenIds ?? market.clobTokenIds).map(identifier);
+    const rawTokens = arrayValue(market.tokenIds ?? market.clobTokenIds);
+    const tokens = rawTokens.map(identifier);
     const outcomes = arrayValue(market.outcomes).map(textValue);
     if (tokens.length === 0 || tokens.length !== outcomes.length || tokens.some(token => token === undefined)) continue;
     for (let index = 0; index < tokens.length; index += 1) {
+      const rawToken = rawTokens[index];
+      if (tokenIds !== undefined && (typeof rawToken !== "string" || !tokenIds.has(rawToken))) continue;
       const mapping: Record<string, unknown> = { tokenId: tokens[index]!, data: raw };
       copyField(mapping, "eventId", event.eventId ?? event.id);
       copyField(mapping, "eventSlug", event.eventSlug ?? event.slug);
@@ -119,13 +122,25 @@ export class JournalReplay {
   private runId: string | undefined;
   private readonly staleAfterMs: number;
   private readonly onInvalidation: ReplayOptions["onInvalidation"];
+  private readonly tokenIds: ReadonlySet<string> | undefined;
 
   constructor(options: ReplayOptions = {}) {
+    this.tokenIds = options.tokenIds === undefined ? undefined : new Set(options.tokenIds);
     this.staleAfterMs = options.sportsStaleAfterMs ?? 60_000;
     this.onInvalidation = options.onInvalidation;
     if (!Number.isFinite(this.staleAfterMs) || this.staleAfterMs < 0) throw new Error("REPLAY_OPTIONS_INVALID: sportsStaleAfterMs");
   }
   get markets(): ReplayMarketMapping[] { return [...this.mappings.values()]; }
+
+  private frameToken(frame: Record<string, unknown>): string | undefined {
+    // Numeric wire IDs retain their legacy interpretation only in all-token replay.
+    return this.tokenIds === undefined ? assetId(frame) : textValue(frame.asset_id ?? frame.assetId ?? frame.token_id ?? frame.tokenId);
+  }
+
+  private skipToken(token: string | undefined): boolean {
+    // Missing attribution must reach the existing fail-closed validation paths.
+    return token !== undefined && this.tokenIds !== undefined && !this.tokenIds.has(token);
+  }
 
   /** Read-only status: absent depth is missing; disallowed or invalidated depth is invalid. */
   getBookStatus(connectionId: string, tokenId: string): "valid" | "invalid" | "missing" {
@@ -151,6 +166,7 @@ export class JournalReplay {
 
   private invalidateToken(connection: string, token: string | undefined, reason: string, pending?: PendingBookConsistency): void {
     if (!token) { this.invalidate(connection, reason); return; }
+    if (this.skipToken(token)) return;
     const state = this.books.get(connection)?.get(token);
     if (state?.valid) this.quality.connectionInvalidations += 1;
     if (state) {
@@ -196,7 +212,7 @@ export class JournalReplay {
     this.previousSequence = record.sequence;
     this.previousMonotonic = monotonic;
     if (record.source === "gamma" && record.kind === "event_metadata") {
-      for (const mapping of metadataMappings(record.data)) this.mappings.set(mapping.tokenId, mapping);
+      for (const mapping of metadataMappings(record.data, this.tokenIds)) this.mappings.set(mapping.tokenId, mapping);
     } else if (record.source === "collector") {
       this.collectorRecord(record);
     } else if (record.kind === "ws_message" && record.source === "sports") {
@@ -220,13 +236,15 @@ export class JournalReplay {
       this.subscriptions.delete(connection);
     } else if (record.kind === "subscription") {
       const data = objectValue(record.data);
-      const ids = arrayValue(data?.assets_ids).map(identifier).filter((value): value is string => value !== undefined);
+      const rawIds = arrayValue(data?.assets_ids);
+      const ids = rawIds.map(this.tokenIds === undefined ? identifier : textValue).filter((value): value is string => value !== undefined);
       const tokens = this.subscriptions.get(connection) ?? new Set<string>();
       this.subscriptions.set(connection, tokens);
       if (data?.type === "market") {
         this.invalidate(connection, "subscription_reset");
         tokens.clear();
       }
+      if (this.tokenIds !== undefined && ids.length !== rawIds.length) this.invalidate(connection, "malformed_subscription");
       for (const id of ids) {
         if (data?.operation === "unsubscribe") tokens.delete(id);
         else tokens.add(id);
@@ -325,9 +343,10 @@ export class JournalReplay {
       } else if (type === "market_resolved") {
         this.marketResolved(connection, frame);
       } else if (["last_trade_price", "trade", "public_trade"].includes(type)) {
+        const tokenId = this.frameToken(frame);
+        if (this.skipToken(tokenId)) continue;
         const price = decimal(frame.price, true);
         const size = decimal(frame.size ?? frame.amount);
-        const tokenId = assetId(frame);
         if (!tokenId || !price || !size) { this.quality.unknownFrames += 1; continue; }
         const trade: ReplayTradeRow = {
           sequence: record.sequence, receivedAt: record.receivedAt, receivedAtMs: record.receivedAtMs,
@@ -336,8 +355,10 @@ export class JournalReplay {
         if (textValue(frame.side)) trade.side = textValue(frame.side)!;
         batch.trades.push(trade);
       } else {
+        const token = this.frameToken(frame);
+        if (this.skipToken(token)) continue;
         this.quality.unknownFrames += 1;
-        this.invalidateToken(connection, assetId(frame), "unknown_frame");
+        this.invalidateToken(connection, token, "unknown_frame");
       }
       if (batch.quotes.length || batch.trades.length) yield batch;
     }
@@ -348,21 +369,28 @@ export class JournalReplay {
   }
 
   private marketResolved(connection: string, frame: Record<string, unknown>): void {
-    const tokens = new Set(arrayValue(frame.assets_ids).map(identifier).filter((token): token is string => token !== undefined));
-    const token = assetId(frame);
+    const rawIds = arrayValue(frame.assets_ids);
+    const ids = rawIds.map(this.tokenIds === undefined ? identifier : textValue).filter((token): token is string => token !== undefined);
+    const tokens = new Set(ids);
+    const token = this.frameToken(frame);
+    const rawToken = frame.asset_id ?? frame.assetId ?? frame.token_id ?? frame.tokenId;
+    const malformed = this.tokenIds !== undefined && (ids.length !== rawIds.length || (rawToken !== undefined && token === undefined));
+    // Unattributable lifecycle damage invalidates depth; it cannot establish a market closure.
+    if (malformed) { this.quality.unknownFrames += 1; this.invalidate(connection, "malformed_market_resolved"); }
     if (token !== undefined) tokens.add(token);
     const condition = identifier(frame.conditionId ?? frame.condition_id ?? frame.market);
     if (condition !== undefined) for (const mapping of this.mappings.values()) {
       if (mapping.conditionId === condition) tokens.add(mapping.tokenId);
     }
     // A missing identity cannot justify closing every market on this connection.
-    if (tokens.size === 0) { this.quality.unknownFrames += 1; return; }
+    if (tokens.size === 0) { if (!malformed) this.quality.unknownFrames += 1; return; }
     for (const tokenId of tokens) this.invalidateToken(connection, tokenId, "market_resolved");
   }
 
   private bookFrame(record: ReplayJournalRecord, frame: Record<string, unknown>, batch: ReplayBatch, index: number): void {
     const connection = record.connectionId!;
-    const token = assetId(frame);
+    const token = this.frameToken(frame);
+    if (this.skipToken(token)) return;
     const bids = levelMap(frame.bids);
     const asks = levelMap(frame.asks);
     const sourceTime = timestamp(frame.timestamp);
@@ -396,19 +424,33 @@ export class JournalReplay {
 
   private changeFrame(record: ReplayJournalRecord, frame: Record<string, unknown>, batch: ReplayBatch, index: number): void {
     const connection = record.connectionId!;
+    const frameToken = this.frameToken(frame);
     const changes = frame.price_changes ?? frame.priceChanges;
-    if (!Array.isArray(changes)) { this.quality.invalidBookUpdates += 1; this.invalidateToken(connection, assetId(frame), "malformed_delta"); return; }
+    if (!Array.isArray(changes)) {
+      if (this.skipToken(frameToken)) return;
+      this.quality.invalidBookUpdates += 1; this.invalidateToken(connection, frameToken, "malformed_delta"); return;
+    }
+    if (this.tokenIds !== undefined && frameToken === undefined && (frame.asset_id ?? frame.assetId ?? frame.token_id ?? frame.tokenId) !== undefined) {
+      // An ambiguous parent cannot safely discard assertions that might belong to a selected child.
+      this.quality.invalidBookUpdates += 1; this.invalidate(connection, "malformed_delta"); return;
+    }
     const groups = new Map<string, Record<string, unknown>[]>();
+    let firstToken: string | undefined;
+    let multipleTokens = false;
     for (const item of changes) {
       const change = objectValue(item);
-      const token = change ? assetId(change) : undefined;
+      const token = change ? this.frameToken(change) : undefined;
       if (!change || !token) { this.quality.invalidBookUpdates += 1; this.invalidate(connection, "malformed_delta"); return; }
+      firstToken ??= token;
+      if (token !== firstToken) multipleTokens = true;
+      if (this.skipToken(token)) continue;
       const group = groups.get(token) ?? [];
       group.push(change);
       groups.set(token, group);
     }
     for (const [token, group] of groups) {
-      this.tokenChanges(record, frame, token, group, batch, index, groups.size === 1 || assetId(frame) === token);
+      // Filtering siblings must not turn a multi-token frame's top prices into this token's assertions.
+      this.tokenChanges(record, frame, token, group, batch, index, !multipleTokens || frameToken === token);
     }
   }
 

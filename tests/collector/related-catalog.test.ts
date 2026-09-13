@@ -325,7 +325,7 @@ describe("related catalog options and audit records", () => {
     const requests: RequestAudit[] = [];
     const recorded: PageAudit[] = [];
     await expect(expandRelatedEvents([seed()], { now: () => nowMs }, {
-      ...pages([response]), onRequest: (audit) => requests.push(audit), onPage: (page) => recorded.push(page)
+      ...pages([response]), onRequest: (audit) => requests.push(audit), onPage: (page) => { recorded.push(page); }
     })).rejects.toMatchObject({ name: "RELATED_CATALOG_RESPONSE_INVALID" });
     expect(requests).toHaveLength(1);
     expect(recorded).toHaveLength(1);
@@ -341,7 +341,7 @@ describe("related catalog options and audit records", () => {
     await expect(expandRelatedEvents([seed()], { now: () => current }, {
       request: async () => { current += 750; throw failure; },
       onRequest: (audit) => requests.push(audit),
-      onPage: (page) => recorded.push(page)
+      onPage: (page) => { recorded.push(page); }
     })).rejects.toBe(failure);
     expect(requests).toHaveLength(1);
     expect(requests[0]).toEqual({

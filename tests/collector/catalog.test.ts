@@ -295,7 +295,7 @@ describe("sports catalog discovery", () => {
     const recorded: unknown[] = [];
     const audited: unknown[] = [];
     const result = await discoverSportsEvents({ dateWindow: "game-start", sports: ["soccer", "tennis"], pageSize: 2, now: () => nowMs }, {
-      ...deps, onPage: (page) => recorded.push(page.response), onRequest: (request) => audited.push(request.response)
+      ...deps, onPage: (page) => { recorded.push(page.response); }, onRequest: (request) => audited.push(request.response)
     });
 
     expect(result.map((item) => item.eventId)).toEqual(["tennis"]);
@@ -321,7 +321,7 @@ describe("sports catalog discovery", () => {
     const deps = pages([first, second, last]);
     const recorded: Parameters<NonNullable<CatalogDependencies["onPage"]>>[0][] = [];
 
-    const events = await discoverSportsEvents({ pageSize: 2, now: () => nowMs }, { ...deps, onPage: (page) => recorded.push(page) });
+    const events = await discoverSportsEvents({ pageSize: 2, now: () => nowMs }, { ...deps, onPage: (page) => { recorded.push(page); } });
 
     expect(events.map((item) => item.eventId)).toEqual(["1", "2", "3"]);
     expect(events.map((item) => item.sport)).toEqual(["soccer", "tennis", "cs2"]);
@@ -339,7 +339,7 @@ describe("sports catalog discovery", () => {
     const recorded: Parameters<NonNullable<CatalogDependencies["onPage"]>>[0][] = [];
     const result = await discoverSportsEvents({ now: () => current }, {
       request: async () => { current += 1500; return raw; },
-      onPage: (page) => recorded.push(page)
+      onPage: (page) => { recorded.push(page); }
     });
 
     expect(result).toHaveLength(1);
@@ -402,7 +402,7 @@ describe("sports catalog discovery", () => {
     const raw = event("1", { slug, sport: "nba", closed: true, startTime: "1999-01-01T00:00:00Z", endDate: "1999-01-01T00:00:00Z" });
     const deps = pages([raw]);
     const recorded: unknown[] = [];
-    const result = await discoverSportsEvents({ ...options, baseUrl: "https://gamma.example.test/", eventSlugs: [slug, slug], sports: ["soccer"], now: () => nowMs }, { ...deps, onPage: (page) => recorded.push(page.response) });
+    const result = await discoverSportsEvents({ ...options, baseUrl: "https://gamma.example.test/", eventSlugs: [slug, slug], sports: ["soccer"], now: () => nowMs }, { ...deps, onPage: (page) => { recorded.push(page.response); } });
 
     expect(result.map((item) => item.eventSlug)).toEqual([slug]);
     expect(deps.urls).toHaveLength(1);
@@ -414,7 +414,7 @@ describe("sports catalog discovery", () => {
 
   test.each([null, {}, { error: "rate limited" }, { events: {} }, "[]"])("rejects malformed successful response %j", async (response) => {
     const recorded: unknown[] = [];
-    await expect(discoverSportsEvents({}, { ...pages([response]), onPage: (page) => recorded.push(page.response) })).rejects.toThrow("CATALOG_RESPONSE_INVALID");
+    await expect(discoverSportsEvents({}, { ...pages([response]), onPage: (page) => { recorded.push(page.response); } })).rejects.toThrow("CATALOG_RESPONSE_INVALID");
     expect(recorded).toEqual([response]);
   });
 
@@ -493,7 +493,7 @@ describe("single collector event lookup", () => {
     const deps = pages([raw]);
     const recorded: Parameters<NonNullable<CatalogDependencies["onPage"]>>[0][] = [];
     const before = Date.now();
-    const result = await fetchCollectorEvent("game/1", { ...deps, onPage: (page) => recorded.push(page) }, "https://gamma.example.test/v1/");
+    const result = await fetchCollectorEvent("game/1", { ...deps, onPage: (page) => { recorded.push(page); } }, "https://gamma.example.test/v1/");
     const after = Date.now();
 
     expect(result.eventId).toBe("1");

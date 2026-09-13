@@ -29,6 +29,12 @@ export interface ReplayInvalidation {
   provisional?: boolean;
 }
 export interface ReplayOptions {
+  /**
+   * Exact string token IDs for books, trades and mappings; undefined selects all, [] selects none.
+   * Known excluded token frames do not contribute frame/book/trade diagnostics.
+   * Sports context and journal/connection validation remain global.
+   */
+  tokenIds?: readonly string[];
   sportsStaleAfterMs?: number;
   maxLineBytes?: number;
   /** Synchronous, including repeated invalidations; the caller owns the current record's time. */

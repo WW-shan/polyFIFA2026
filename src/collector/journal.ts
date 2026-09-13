@@ -19,10 +19,24 @@ export interface JournalOptions {
   onError?: (error: unknown) => void;
 }
 
+export interface JournalCheckpoint {
+  runId: string;
+  sourceRunDirectory: string;
+  sequence: number;
+  receivedAtMs: number;
+  segments: string[];
+}
+
+interface CheckpointWaiter {
+  resolve: (checkpoint: JournalCheckpoint) => void;
+  reject: (error: unknown) => void;
+}
+
 interface PendingRecord {
   line: string;
   bytes: number;
   date: string;
+  checkpoint?: CheckpointWaiter & { sequence: number; receivedAtMs: number };
 }
 
 function asDate(value: Date | number): Date {
@@ -59,6 +73,7 @@ export class CollectorJournal implements RecordSink {
   private readonly monotonicNs: () => bigint | number;
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly queue: PendingRecord[] = [];
+  private readonly checkpointWaiters = new Set<CheckpointWaiter>();
   private readonly ready: Promise<void>;
   private drainPromise: Promise<void> | undefined;
   private closePromise: Promise<void> | undefined;
@@ -124,6 +139,18 @@ export class CollectorJournal implements RecordSink {
   }
 
   record(input: RecordInput): JournalRecord {
+    return this.enqueue(input);
+  }
+
+  checkpoint(): Promise<JournalCheckpoint> {
+    // The executor enqueues synchronously: frames received after this call can
+    // never move ahead of the cutoff while its file is being synced or closed.
+    return new Promise((resolve, reject) => {
+      this.enqueue({ source: "collector", kind: "checkpoint_end", data: { sealed: true } }, { resolve, reject });
+    });
+  }
+
+  private enqueue(input: RecordInput, waiter?: CheckpointWaiter): JournalRecord {
     if (this.closed || this.closing) throw new Error("JOURNAL_CLOSED");
     if (this.errorReported) throw new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
 
@@ -149,7 +176,12 @@ export class CollectorJournal implements RecordSink {
     }
 
     this.sequence = sequence;
-    this.queue.push({ line, bytes, date: utcDate(received) });
+    const pending: PendingRecord = { line, bytes, date: utcDate(received) };
+    if (waiter) {
+      pending.checkpoint = { ...waiter, sequence, receivedAtMs: record.receivedAtMs };
+      this.checkpointWaiters.add(pending.checkpoint);
+    }
+    this.queue.push(pending);
     this.queuedBytes += bytes;
     this.scheduleDrain();
     return record;
@@ -226,7 +258,18 @@ export class CollectorJournal implements RecordSink {
       const pending = this.queue.shift();
       if (!pending) return;
       await this.writeRecord(pending);
-      this.queuedBytes -= pending.bytes;
+      if (pending.checkpoint) {
+        await this.closeFile();
+        // The single writer stays behind this barrier until the sealed list is
+        // captured. No later segment can enter this checkpoint's prefix.
+        const segments = await listJournalSegments(this.runDirectory);
+        this.queuedBytes -= pending.bytes;
+        this.checkpointWaiters.delete(pending.checkpoint);
+        pending.checkpoint.resolve({ runId: this.runId, sourceRunDirectory: this.runDirectory,
+          sequence: pending.checkpoint.sequence, receivedAtMs: pending.checkpoint.receivedAtMs, segments });
+      } else {
+        this.queuedBytes -= pending.bytes;
+      }
     }
   }
 
@@ -275,6 +318,9 @@ export class CollectorJournal implements RecordSink {
     this.queuedBytes = 0;
     if (this.errorReported) return;
     this.errorReported = true;
+    const failure = new Error("JOURNAL_STORAGE_ERROR", { cause: this.fatalError });
+    for (const waiter of this.checkpointWaiters) waiter.reject(failure);
+    this.checkpointWaiters.clear();
     try {
       this.onError?.(error);
     } catch {

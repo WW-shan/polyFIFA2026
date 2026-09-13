@@ -62,6 +62,7 @@ export async function exportTail(input:TailOptions):Promise<TailExportResult>{
     await writeFile(join(outputDirectory,"quality.json"),JSON.stringify(summary,null,2)+"\n",{flag:"wx"});
     await writeFile(join(outputDirectory,"manifest.json"),JSON.stringify({status:"complete",sourceRunId:summary.runId,sourceRunDirectory:resolve(options.runDirectory),
       finishLabelsFile:options.finishLabelsFile?resolve(options.finishLabelsFile):null,createdAt:new Date().toISOString(),depthFile:"seconds.ndjson",depthFileBytes,
+      finishFactsFile:options.finishFactsFile?resolve(options.finishFactsFile):null,
       seconds:summary.seconds,changes:summary.changes,stateChanges:summary.stateChanges,audits:summary.audits,rawRecords:summary.rawRecords,
       readyTokens:summary.tokens.filter(t=>t.readyForReplay).length,tokenCount:summary.tokens.length})+"\n",{flag:"wx"});
     return {outputDirectory,viewerPath,summary};

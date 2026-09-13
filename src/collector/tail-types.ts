@@ -1,4 +1,25 @@
 import type { ReplayLevel } from "./replay-types.js";
+import type { JournalRecord } from "./types.js";
+
+export type TailClockPolicy = "strict" | "flag-backsteps";
+export type TailClockReceipt = Pick<JournalRecord, "sequence" | "receivedAt" | "receivedAtMs" | "monotonicNs" | "source" | "kind"> & {
+  connectionId: string | null;
+};
+export interface TailClockIssue {
+  kind: "receipt-wall-clock-backstep";
+  // Inclusive wall bounds from the original receipts, never adjusted timestamps.
+  startAtMs: number; endAtMs: number;
+  previous: TailClockReceipt; current: TailClockReceipt;
+}
+
+/** A finish observed in an original journal; its raw body remains at that run/sequence/frame. */
+export interface TailFinishFact {
+  eventId: string | null; eventSlug: string | null; gameId: string | null;
+  atMs: number; observedAtMs: number;
+  source: "gamma.finishedTimestamp" | "sports.finishedAt";
+  sourceRunId: string; sourceRunDirectory: string | null;
+  sequence: number; frameIndex: number;
+}
 
 export interface TailMarket {
   eventId: string; eventSlug: string; gameId: string | null;
@@ -32,7 +53,9 @@ export interface TailWindow {
   key: string; eventIds: string[]; eventSlugs: string[]; title: string; gameId: string | null;
   startAtMs: number | null; endAtMs: number | null; finishSources: string[]; finishConflict: boolean;
   markets: TailMarket[];
-  finishEvidence?: Array<{atMs:number;observedAtMs:number;source:string;eventSlug:string|null;sourceFile?:string}>;
+  clockIssues?: TailClockIssue[];
+  finishEvidence?: Array<{atMs:number;observedAtMs:number;source:string;eventSlug:string|null;sourceFile?:string;
+    eventId?:string|null;gameId?:string|null;sourceRunId?:string;sourceRunDirectory?:string|null;sequence?:number;frameIndex?:number}>;
 }
 export type TailBookStatus = "observed" | "carried" | "partial" | "missing" | "invalid" | "feed_stale" | "outside_run" | "not_yet_known" | "closed";
 export interface TailSecond {
@@ -50,6 +73,8 @@ export interface TailSecond {
   contextAgeMs: number | null; contextStatus: "present" | "missing" | "stale" | "disconnected";
   score: unknown; period: unknown; clock: unknown; stateChangeCount: number;
   reasons: string[];
+  // References to TailClockIssue.current.sequence in the window/summary diagnostics.
+  clockIssueSequences?: number[];
 }
 export interface TailBookChange {
   windowKey: string; tokenId: string; sequence: number; frameIndex: number;
@@ -79,13 +104,16 @@ export interface TailTokenQuality {
   snapshotMatches: number; snapshotMismatches: number; snapshotNotComparable: number;
   seedSnapshotMatches: number; seedSnapshotMismatches: number; seedSnapshotNotComparable: number;
   observedWindowComplete: boolean; snapshotAuditPassed: boolean; readyForReplay: boolean;
+  clockAffectedSeconds?: number;
   reasons: string[];
 }
 export interface TailOptions {
   runDirectory: string; outputDirectory?: string; eventSlugs?: string[]; windowSeconds?: number;
   maxFeedSilenceMs?: number; sportsStaleAfterMs?: number; maxClockDriftMs?: number; shockThreshold?: number;
+  clockPolicy?: TailClockPolicy;
   maxLineBytes?: number;
   finishLabelsFile?: string;
+  finishFactsFile?: string;
 }
 export interface TailSummary {
   schemaVersion: 1; basis: "received-order-book-tail";
@@ -93,6 +121,8 @@ export interface TailSummary {
   windowSeconds: number; records: number; seconds: number; changes: number; stateChanges: number; audits: number;
   windows: TailWindow[]; tokens: TailTokenQuality[]; warnings: string[];
   journalQuality: import("./replay-types.js").ReplayQuality;
+  clockPolicy?: TailClockPolicy;
+  clockIssues?: TailClockIssue[];
   rawRecords?: number;
 }
 export interface TailSink {

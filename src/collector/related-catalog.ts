@@ -57,7 +57,7 @@ async function requestPage(url: string, deps: CatalogDependencies, now: () => nu
   }
   const requestEndedAt = timestamp(now);
   deps.onRequest?.({ url, requestStartedAt, requestEndedAt, response });
-  deps.onPage?.({ url, requestStartedAt, requestEndedAt, response });
+  await deps.onPage?.({ url, requestStartedAt, requestEndedAt, response });
   return response;
 }
 

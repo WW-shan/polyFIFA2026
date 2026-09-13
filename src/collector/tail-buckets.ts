@@ -15,6 +15,7 @@ function good(status:TailBookStatus):boolean{return status==="observed"||status=
 export class TailBuckets {
   private index=0;
   private started=false;
+  private clockIssueSequences:number[]=[];
   private readonly stats=new Map<string,Stats>();
   constructor(readonly window:TailWindow,private readonly live:TailLiveState,private readonly options:EffectiveTailOptions){}
   contains(ms:number):boolean{return this.window.startAtMs!==null&&this.window.endAtMs!==null&&ms>=this.window.startAtMs&&ms<this.window.endAtMs;}
@@ -32,6 +33,8 @@ export class TailBuckets {
   }
   private seed():void{
     const at=this.window.startAtMs!+this.index*1000;
+    this.clockIssueSequences=(this.window.clockIssues??[])
+      .filter(issue=>issue.startAtMs<at+1000&&issue.endAtMs>=at).map(issue=>issue.current.sequence);
     this.stats.clear();
     for(const market of this.window.markets){
       const status=this.status(market.tokenId,at),prices=good(status)?top(this.live.books.get(market.tokenId)):{bid:null,ask:null};
@@ -40,6 +43,9 @@ export class TailBuckets {
     }
   }
   async advance(toMs:number,emit:(row:TailSecond)=>void|Promise<void>):Promise<void>{
+    // Chronology follows captured sequence; the cursor never goes backward.
+    // Pre-scanned clock-affected bins are not precise wall-time reconstructions.
+    // Original receipts and source times are retained even for late-bin updates.
     if(this.window.startAtMs===null||this.window.endAtMs===null||toMs<this.window.startAtMs)return;
     if(!this.started){this.started=true;this.seed();}
     while(this.index<this.options.windowSeconds&&this.window.startAtMs+(this.index+1)*1000<=toMs){
@@ -83,7 +89,7 @@ export class TailBuckets {
     const start=this.window.startAtMs!+this.index*1000,end=start+1000,stats=this.stats.get(market.tokenId)!;
     const current=this.live.books.get(market.tokenId),base=this.status(market.tokenId,end-.001);
     let status:TailBookStatus=base;
-    const whole=good(base)&&stats.startValid&&!stats.bad;
+    const whole=good(base)&&stats.startValid&&!stats.bad&&this.clockIssueSequences.length===0;
     if(good(base))status=whole?(stats.updates?"observed":"carried"):"partial";
     else if(base==="closed"&&!stats.startClosed)status="partial";
     if(start<this.live.firstMs||end>this.live.lastMs)status="outside_run";
@@ -92,6 +98,7 @@ export class TailBuckets {
     const source=current?.quote.serverTimestamp;
     const sourceAt=source!==undefined&&/^\d+$/.test(source)&&Number.isSafeInteger(Number(source))?Number(source):null;
     const reasons:string[]=[];
+    if(this.clockIssueSequences.length)reasons.push("receipt-wall-clock-backstep");
     if(this.window.finishConflict)reasons.push("conflicting-finish-labels");
     if(!whole&&status!=="closed")reasons.push(status);
     if(stats.bad)reasons.push("within-second-invalidation");
@@ -101,6 +108,7 @@ export class TailBuckets {
     if(usable&&sourceAt!==null&&(sourceAt>end+this.options.maxClockDriftMs||(end>1e11&&sourceAt<1e11)))reasons.push("book-source-clock-invalid");
     return {windowKey:this.window.key,eventSlug:market.eventSlug,gameId:market.gameId,marketId:market.marketId,conditionId:market.conditionId,
       question:market.question,marketType:market.marketType,tokenId:market.tokenId,outcome:market.outcome,secondIndex:this.index,startAtMs:start,endAtMs:end,
+      ...(this.clockIssueSequences.length?{clockIssueSequences:[...this.clockIssueSequences]}:{}),
       secondsBeforeFinish:this.options.windowSeconds-this.index,status,wholeSecondValid:whole&&status!=="outside_run",connectionId:current?.quote.connectionId??null,
       bids:usable?current!.quote.bids:null,asks:usable?current!.quote.asks:null,bookObservedAtMs:current?.quote.receivedAtMs??null,
       bookSourceAtMs:sourceAt,bookAgeMs:current?end-current.quote.receivedAtMs:null,
