@@ -9,6 +9,8 @@ export interface CatalogOptions {
   lookbackHours?: number;
   aheadHours?: number;
   allOpen?: boolean;
+  /** Opt-in single-match scope for discoverContinuousEvents; finite discovery is unchanged. */
+  singleMatchOnly?: boolean;
   pageSize?: number;
   maxPages?: number;
   now?: () => number;

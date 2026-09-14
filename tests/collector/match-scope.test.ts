@@ -1,0 +1,235 @@
+import { describe, expect, test } from "vitest";
+import { collectableTokenIds, normalizeCollectorEvent, type CatalogOptions } from "../../src/collector/catalog.js";
+import { discoverContinuousEvents, type DiscoveryIssue } from "../../src/collector/continuous-discovery.js";
+import { EventLifecycle } from "../../src/collector/lifecycle.js";
+import { classifyMatchScope } from "../../src/collector/match-scope.js";
+
+const now = Date.parse("2026-09-14T12:00:00.000Z");
+const startTime = new Date(now).toISOString();
+
+function market(id: string, overrides: Record<string, unknown> = {}) {
+  return { id, slug: id, conditionId: `condition-${id}`, question: "Match winner", sportsMarketType: "moneyline",
+    outcomes: ["Yes", "No"], clobTokenIds: [`${id}-yes`, `${id}-no`], volume: 0, liquidity: 0,
+    outcomePrices: '["1","0"]', closed: false, ...overrides };
+}
+
+function event(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { id, slug: id, title: "ITF: Aziz Dougaz vs. Skander Mansouri", gameId: null, sport: "tennis",
+    tags: [{ slug: "tennis" }], startTime, markets: [market(id)], ...overrides };
+}
+
+async function discover(roots: Record<string, unknown>[], options: CatalogOptions = { singleMatchOnly: true }, related: Record<string, unknown>[] = []) {
+  const requests: URL[] = [];
+  const issues: DiscoveryIssue[] = [];
+  const pages: unknown[] = [];
+  const result = await discoverContinuousEvents({ allOpen: true, now: () => now, ...options }, {
+    request: async value => {
+      const url = new URL(value); requests.push(url);
+      if (url.pathname === "/events") return roots;
+      if (url.pathname === "/events/keyset") return { events: related.filter(raw => String(raw.gameId) === url.searchParams.get("game_id")) };
+      throw new Error(`Unexpected fixture URL: ${value}`);
+    },
+    onPage: page => { pages.push(page.response); }
+  }, [{ name: "tennis", tagId: "864" }], issue => issues.push(issue));
+  return { result, requests, issues, pages };
+}
+
+describe("single-match continuous discovery", () => {
+  test.each<CatalogOptions>([{}, { singleMatchOnly: false }])("preserves existing discovery unless requested: %j", async options => {
+    const roots = [event("match"), event("outright", { title: "US Open Winner" }), event("unknown", { title: "Tennis special", markets: [] })];
+    const { result } = await discover(roots, options);
+    expect(result.map(value => value.eventId)).toEqual(["match", "outright", "unknown"]);
+  });
+
+  test("accepts match game IDs, including numeric zero and nested event metadata", async () => {
+    const roots = [event("match", { gameId: 0 }), event("nested", { gameId: undefined, eventMetadata: { gameId: 123 } })];
+    const { result, requests } = await discover(roots);
+    expect(result.map(value => value.gameId)).toEqual(["0", "123"]);
+    expect(requests.filter(url => url.pathname.endsWith("/keyset")).map(url => url.searchParams.get("game_id"))).toEqual(["0", "123"]);
+  });
+
+  test.each([
+    { title: "ITF M15 Monastir: Aziz Dougaz vs. Skander Mansouri", sport: null, tags: [{ slug: "itf" }] },
+    { title: "Setka Cup: Oleksandr Tymofieiev vs. Yurii Misiats", sport: "table-tennis", tags: [{ slug: "setka-cup" }] },
+    { title: "TT Elite Series: Jakub Goldir v. Jakub Zelinka", sport: null, tags: [] },
+    { title: "ITF Women's Doubles: E. Pridankina / E. Maklakova vs. M. Kozyreva / V. Miroshnichenko" },
+    { title: "N. Lammons / J. Withrow versus M. Purcell / J. Thompson" },
+    { title: "Table Tennis: Ivan Ivanov - Oleksandr Petrov" },
+    { title: "US Open Final: Carlos Alcaraz vs. Jannik Sinner — Match Winner" },
+    { title: "NBA Regular Season: Lakers vs. Celtics — Total Points", sport: "nba" }
+  ])("retains a real no-gameId match shape: $title", async raw => {
+    const root = event("match", raw);
+    const { result, requests } = await discover([root]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.gameId).toBeNull();
+    expect(result[0]!.raw).toBe(root);
+    expect(result[0]!.markets[0]!.tokenIds).toEqual(["match-yes", "match-no"]);
+    expect(requests).toHaveLength(1);
+  });
+
+  test.each([
+    { participants: ["Aziz Dougaz", "Skander Mansouri"] },
+    { teams: [{ name: "N. Lammons / J. Withrow" }, { name: "M. Purcell / J. Thompson" }] },
+    { markets: [market("match", { outcomes: ["Oleksandr Tymofieiev", "Yurii Misiats"], gameStartTime: startTime })] }
+  ])("accepts participant evidence with sports market or scheduled-start evidence: %j", async evidence => {
+    const { result } = await discover([event("match", { title: "ITF Court 3", startTime: undefined, ...evidence })]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.gameId).toBeNull();
+  });
+
+  test("accepts a scheduled match when the sports market type is missing", async () => {
+    const { result } = await discover([event("match", { markets: [market("match", { sportsMarketType: undefined })] })]);
+    expect(result).toHaveLength(1);
+  });
+
+  test.each([
+    "US Open Winner", "2026 US Open (Women's) Winner", "Will Carlos Alcaraz win the US Open?",
+    "Who will win Wimbledon 2027?", "2026 ATP Year-End No. 1", "WTA year-end top 10 ranking",
+    "ATP Rankings: Sinner vs. Alcaraz at end of 2026", "Will Iga Swiatek end 2026 ranked #1?",
+    "Which player will win the most ATP titles in 2026?", "Carlos Alcaraz 2026 Season: total aces",
+    "How many Grand Slams will Novak Djokovic win in 2026?", "NBA 2026-27 regular season points leader",
+    "$10 Tennis Coupon: Sinner vs. Alcaraz", "Will my tennis parlay coupon win?"
+  ])("excludes clearly non-match scope: %s", async title => {
+    const { result, requests, pages } = await discover([event("excluded", { title })]);
+    expect(result).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(pages).toHaveLength(1);
+  });
+
+  test("a game ID cannot turn a coupon or tournament winner into a single match", async () => {
+    const { result, requests } = await discover([
+      event("coupon", { title: "Tennis Coupon", gameId: "coupon-game" }),
+      event("outright", { title: "US Open Winner", gameId: "outright-game" })
+    ]);
+    expect(result).toEqual([]);
+    expect(requests).toHaveLength(1);
+  });
+
+  test("uses outright market questions when an event title alone is inconclusive", async () => {
+    const { result } = await discover([event("outright", { title: "US Open 2026", markets: [
+      market("sinner", { question: "Will Jannik Sinner win the US Open?" }),
+      market("alcaraz", { question: "Will Carlos Alcaraz win the US Open?" })
+    ] })]);
+    expect(result).toEqual([]);
+  });
+
+  test("retains related side markets and both outcomes regardless of volume, price, or closure", async () => {
+    const root = event("root", { gameId: "game" });
+    const types = ["total", "tennis_first_set_winner", "exact_score", "future_market_type"];
+    const child = event("child", { gameId: "game", parentEventId: "root", title: "First set and more markets",
+      markets: types.map((type, index) => market(type, { sportsMarketType: type, closed: index === 3 })) });
+    const { result } = await discover([root], { singleMatchOnly: true }, [child]);
+    expect(result.map(value => value.eventId)).toEqual(["root", "child"]);
+    expect(result[1]!.raw).toBe(child);
+    const retained = result[1]!.markets;
+    expect(retained.map(value => value.raw.sportsMarketType)).toEqual(types);
+    for (const [index, value] of retained.entries()) {
+      expect(value.outcomes).toEqual(["Yes", "No"]);
+      expect(value.tokenIds).toEqual([`${types[index]}-yes`, `${types[index]}-no`]);
+      expect(value.raw.volume).toBe(0);
+      expect(value.raw.outcomePrices).toBe('["1","0"]');
+    }
+    expect(collectableTokenIds(result)).toEqual(["root-yes", "root-no", ...types.slice(0, 3).flatMap(type => [`${type}-yes`, `${type}-no`])]);
+  });
+
+  test("filters explicitly non-match companions as well as profile roots", async () => {
+    const { result } = await discover([event("root", { gameId: "game" })], { singleMatchOnly: true }, [
+      event("coupon", { gameId: "game", title: "Matchday coupon" }),
+      event("side", { gameId: "game", title: "First set winner" })
+    ]);
+    expect(result.map(value => value.eventId)).toEqual(["root", "side"]);
+  });
+
+  test("retains explicit parent-linked side markets without inventing a game ID", async () => {
+    const root = event("root");
+    const side = event("side", { title: "Total sets", parentEventId: "root", markets: [market("sets", { outcomes: ["Over", "Under"] })] });
+    const grandchild = event("grandchild", { title: "Exact score", parentEventId: "side" });
+    const unrelated = event("unrelated", { title: "Total sets", parentEventId: "missing", markets: [market("unrelated", { outcomes: ["Over", "Under"] })] });
+    const coupon = event("coupon", { title: "Tennis coupon", parentEventId: "root" });
+    const { result, requests, issues } = await discover([grandchild, side, root, unrelated, coupon]);
+    expect(result.map(value => value.eventId)).toEqual(["grandchild", "side", "root"]);
+    expect(result.map(value => value.gameId)).toEqual([null, null, null]);
+    expect(result[1]!.markets[0]!.outcomes).toEqual(["Over", "Under"]);
+    expect(result[1]!.raw).toBe(side);
+    expect(requests).toHaveLength(1);
+    expect(issues.map(issue => issue.key)).toEqual(["unrelated"]);
+  });
+
+  test("does not invent identity for ambiguous events", async () => {
+    const unknown = event("unknown", { title: "Tennis special", startTime: undefined, markets: [] });
+    const { result, requests, issues } = await discover([unknown]);
+    expect(result).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(issues).toEqual([{ scope: "match-scope", key: "unknown", message: expect.stringContaining("AMBIGUOUS_MATCH_SCOPE") }]);
+    expect(normalizeCollectorEvent(unknown)!.gameId).toBeNull();
+  });
+
+  test("metadata endDate neither excludes a match nor establishes its actual finish", async () => {
+    const { result } = await discover([event("match", { endDate: "2000-01-01T00:00:00Z" })]);
+    expect(result).toHaveLength(1);
+    const lifecycle = new EventLifecycle(1);
+    expect(lifecycle.select(result, now).tokenIds).toEqual(["match-yes", "match-no"]);
+    expect(lifecycle.states[0]).toMatchObject({ gameId: null, phase: "watching", finishedAtMs: null, terminalObservedAtMs: null });
+  });
+});
+
+describe("match scope classification", () => {
+  test.each(["ITF: TBD vs. TBD", "ITF: Aziz Dougaz vs. Aziz Dougaz", "ITF: TBD vs. Aziz Dougaz"])(
+    "distinguishes unresolved participants from known matches: %s", title => {
+      const normalized = normalizeCollectorEvent(event("unknown", { title }))!;
+      expect(classifyMatchScope(normalized)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+      expect(normalized.gameId).toBeNull();
+    }
+  );
+
+  test("requires match evidence beyond participant names and metadata dates", () => {
+    const normalized = normalizeCollectorEvent(event("unknown", {
+      startTime: undefined, startDate: startTime, endDate: startTime,
+      markets: [market("unknown", { sportsMarketType: undefined, gameStartTime: "invalid" })]
+    }))!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "ambiguous", reason: "missing-match-evidence" });
+  });
+
+  test("does not confuse a tournament final's match question with an outright", async () => {
+    const root = event("final", { title: "US Open Final: Carlos Alcaraz vs. Jannik Sinner", markets: [
+      market("final", { question: "Will Carlos Alcaraz win the US Open final?" })
+    ] });
+    expect(classifyMatchScope(normalizeCollectorEvent(root)!)).toMatchObject({ kind: "single-match" });
+    expect((await discover([root])).result).toHaveLength(1);
+  });
+
+  test("keeps an actual year-end finals match and its per-match statistical question", async () => {
+    const root = event("final", { title: "ATP Year-End Finals: Carlos Alcaraz vs. Jannik Sinner", markets: [
+      market("aces", { question: "How many aces will Alcaraz serve in the 2026 ATP Finals match?", sportsMarketType: "totals" })
+    ] });
+    expect(classifyMatchScope(normalizeCollectorEvent(root)!)).toMatchObject({ kind: "single-match" });
+    expect((await discover([root])).result).toHaveLength(1);
+  });
+
+  test.each([
+    "Sinner vs. Alcaraz: Who will win more titles this season?",
+    "Sinner vs. Alcaraz: Who will serve more aces throughout the season?",
+    "Sinner vs. Alcaraz: season statistics",
+    "Sinner vs. Alcaraz: career statistics"
+  ])("recognizes multi-match statistics despite a versus title: %s", title => {
+    expect(classifyMatchScope(normalizeCollectorEvent(event("season-stats", { title }))!))
+      .toEqual({ kind: "non-match", reason: "season-or-statistic" });
+  });
+
+  test.each(["outright", "tournament_winner", "season_winner", "futures"])("recognizes explicit non-match market type %s", sportsMarketType => {
+    const normalized = normalizeCollectorEvent(event("special", { title: "Tennis special", markets: [
+      market("winner", { sportsMarketType, outcomes: ["Iga Swiatek", "Aryna Sabalenka"] })
+    ] }))!;
+    expect(classifyMatchScope(normalized)).toMatchObject({ kind: "non-match" });
+  });
+
+  test("does not promote circular parent links or mutate the supplied identities", async () => {
+    const first = event("first", { title: "First set", parentEventId: "second" });
+    const second = event("second", { title: "Second set", parentEventId: "first" });
+    const before = JSON.stringify([first, second]);
+    const { result, issues } = await discover([first, second]);
+    expect(result).toEqual([]);
+    expect(issues.map(issue => issue.key)).toEqual(["first", "second"]);
+    expect(JSON.stringify([first, second])).toBe(before);
+  });
+});

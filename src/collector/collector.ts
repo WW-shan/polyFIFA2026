@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { setMaxListeners } from "node:events";
 import { fetchJson } from "../polymarket/http.js";
 import {
@@ -11,7 +12,7 @@ import { createJournal } from "./journal.js";
 import { expandRelatedEvents } from "./related-catalog.js";
 import { EventLifecycle, type EventLifecycleSelection, type EventLifecycleState } from "./lifecycle.js";
 import { createPublicStreams, type PublicStreamsOptions, type StreamTimerApi } from "./streams.js";
-import type { CollectorEvent, JsonRequestOptions, JsonRequester, RecordInput, RecordSink } from "./types.js";
+import type { CollectorEvent, JournalRecord, JsonRequestOptions, JsonRequester, RecordInput, RecordSink } from "./types.js";
 
 export interface CollectorStreamLike {
   start(tokens: readonly string[]): Promise<void> | void;
@@ -22,6 +23,8 @@ export interface CollectorStreamLike {
 export interface CollectorJournalLike extends RecordSink {
   readonly runId: string;
   readonly runDirectory: string;
+  /** Wrappers should forward the receipt to enable compact discovery provenance. */
+  record(input: RecordInput): JournalRecord | void;
   flush(): Promise<void>;
   close(): Promise<void>;
 }
@@ -41,6 +44,8 @@ export interface CollectorOptions {
   eventSlugs?: string[];
   dateWindow?: "metadata-end" | "game-start";
   includeRelatedEvents?: boolean;
+  /** Replace duplicate discovery page bodies with references to their HTTP records. */
+  compactDiscoveryPages?: boolean;
   lookbackHours?: number;
   aheadHours?: number;
   allOpen?: boolean;
@@ -85,6 +90,12 @@ export interface CollectorRunResult {
 
 type EffectiveCollectorOptions = Required<Omit<CollectorOptions, "runId" | "proxyUrl" | "durationSeconds" | "postFinishRetentionMs">>
   & Pick<CollectorOptions, "runId" | "proxyUrl" | "durationSeconds" | "postFinishRetentionMs">;
+
+type DiscoveryPage = Parameters<NonNullable<CatalogDependencies["onPage"]>>[0];
+type DiscoveryResponses = WeakMap<object, {
+  url: string;
+  responseRef: { runId: string; sequence: number; sha256: string; bytes: number };
+}>;
 
 export type CollectorStatus = "idle" | "starting" | "running" | "stopping" | "stopped" | "failed";
 
@@ -133,6 +144,7 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     eventSlugs: [...(options.eventSlugs ?? [])],
     dateWindow: options.dateWindow ?? "metadata-end",
     includeRelatedEvents: options.includeRelatedEvents ?? false,
+    compactDiscoveryPages: options.compactDiscoveryPages ?? false,
     lookbackHours: options.lookbackHours ?? 48,
     aheadHours: options.aheadHours ?? 24,
     allOpen: options.allOpen ?? false,
@@ -448,9 +460,11 @@ export class CollectorRuntime {
       pageSize: this.options.pageSize,
       maxPages: this.options.maxPages
     };
+    // Only small receipts are retained, weakly, for this sweep's response objects.
+    const responses: DiscoveryResponses | undefined = this.options.compactDiscoveryPages ? new WeakMap() : undefined;
     const catalogDependencies: CatalogDependencies = {
-      request: (url, options) => this.catalogRequest(url, options),
-      onPage: (page) => this.recordControlled({ source: "gamma", kind: "discovery_page", data: page })
+      request: (url, options) => this.catalogRequest(url, options, responses),
+      onPage: (page) => this.recordDiscoveryPage(page, responses)
     };
     let discovered: CollectorEvent[];
     try {
@@ -529,7 +543,7 @@ export class CollectorRuntime {
     }
   }
 
-  private catalogRequest(url: string, options?: JsonRequestOptions): Promise<unknown> {
+  private catalogRequest(url: string, options?: JsonRequestOptions, responses?: DiscoveryResponses): Promise<unknown> {
     if (!this.collecting) return Promise.reject(this.cancellation.signal.reason);
     return this.trackRequest((async () => {
       const requestStartedAt = dateValue(this.now()).toISOString();
@@ -542,23 +556,69 @@ export class CollectorRuntime {
         throw error;
       }
       const requestEndedAt = dateValue(this.now()).toISOString();
-      await this.recordControlled({ source: "gamma", kind: "http_request", data: { url, requestStartedAt, requestEndedAt, response } }, true);
+      let serialized: string | undefined;
+      if (responses && typeof response === "object" && response !== null) {
+        try {
+          serialized = JSON.stringify(response);
+          // Snapshot before journal admission can wait. Each HTTP observation gets
+          // its own value even if a custom transport reuses/mutates one object.
+          if (serialized !== undefined) response = JSON.parse(serialized) as unknown;
+        } catch (error) {
+          this.fail(error);
+          throw error;
+        }
+      }
+      const input: RecordInput = { source: "gamma", kind: "http_request", data: { url, requestStartedAt, requestEndedAt, response } };
+      await this.recordControlled(input, true, receipt => {
+        if (!responses || serialized === undefined || typeof response !== "object" || response === null
+          || !receipt || receipt.runId !== this.journal?.runId || receipt.source !== "gamma" || receipt.kind !== "http_request"
+          || receipt.data !== input.data || !Number.isSafeInteger(receipt.sequence) || receipt.sequence < 1) return;
+        responses.set(response, { url, responseRef: {
+          runId: receipt.runId, sequence: receipt.sequence,
+          sha256: createHash("sha256").update(serialized).digest("hex"), bytes: Buffer.byteLength(serialized)
+        } });
+      });
       return response;
     })());
+  }
+
+  private recordDiscoveryPage(page: DiscoveryPage, responses?: DiscoveryResponses): Promise<void> {
+    const response = page.response;
+    if (responses && typeof response === "object" && response !== null) {
+      const recorded = responses.get(response);
+      responses.delete(response);
+      if (recorded?.url === page.url && page.requestEndedAt !== undefined) {
+        let serialized: string | undefined;
+        try { serialized = JSON.stringify(response); }
+        catch { /* Fall through to the journal's normal serialization/failure path. */ }
+        // Custom discovery can mutate a request result before invoking onPage.
+        // Identity alone is insufficient evidence for omitting that page's body.
+        if (serialized !== undefined && Buffer.byteLength(serialized) === recorded.responseRef.bytes
+          && createHash("sha256").update(serialized).digest("hex") === recorded.responseRef.sha256) {
+          const { url, requestStartedAt, requestEndedAt } = page;
+          return this.recordControlled({ source: "gamma", kind: "discovery_page_ref",
+            data: { url, requestStartedAt, requestEndedAt, responseRef: recorded.responseRef } });
+        }
+      }
+    }
+    return this.recordControlled({ source: "gamma", kind: "discovery_page", data: page });
   }
 
   private recordMetadata(event: CollectorEvent, status: string): Promise<void> {
     return this.recordControlled({ source: "gamma", kind: "event_metadata", data: { event: event.raw, status } });
   }
 
-  private recordControlled(input: RecordInput, duringStop = false): Promise<void> {
+  private recordControlled(input: RecordInput, duringStop = false, onRecorded?: (record: JournalRecord | void) => void): Promise<void> {
     // Serialize admission, not HTTP work. Every controlled producer shares this
     // barrier; WebSocket recording goes straight to the bounded journal.
     const write = this.controlledWrites.then(async () => {
       if (!this.journal || (!this.collecting && !duringStop) || this.state === "stopped" || this.state === "failed") return;
       if (duringStop) await this.journal.flush();
       else await this.untilStopped(() => this.journal!.flush());
-      if (this.collecting || duringStop) this.journal.record(input);
+      if (this.collecting || duringStop) {
+        const receipt = this.journal.record(input);
+        onRecorded?.(receipt);
+      }
     });
     // Own even an ignored callback rejection, while returning it to callers that
     // await the page. A storage failure remains fatal with its original cause.
