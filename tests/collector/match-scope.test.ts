@@ -521,3 +521,44 @@ describe("consolidated scope evidence", () => {
       .toMatchObject({ kind: "single-match" });
   });
 });
+
+describe("dated match questions and outcome units", () => {
+  test.each([
+    "How many aces will Sinner serve in the 2026 ATP Finals match against Alcaraz?",
+    "How many aces will Sinner serve in the 2026 ATP Finals match against Alcaraz (including tiebreaks)?",
+    "How many aces will Sinner serve in the 2026 ATP Finals match (including tiebreaks)?"
+  ])("retains an identified match's qualified totals question: %s", async question => {
+    const raw = event("event-301", {
+      title: "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz", gameId: "g1", volume: 0,
+      markets: [market("market-301", { sportsMarketType: "totals", question, outcomes: ["Over", "Under"] })]
+    });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "single-match", reason: "game-id" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.raw).toBe(raw);
+    expect(result[0]!.markets[0]!.outcomes).toEqual(["Over", "Under"]);
+    expect(collectableTokenIds(result)).toEqual(["market-301-yes", "market-301-no"]);
+    expect(issues).toEqual([]);
+  });
+
+  test.each(["games", "sets", "points"])("keeps untyped amount-and-%s outcomes ambiguous", async unit => {
+    const outcomes = [`Over 2.5 ${unit}`, `Under 2.5 ${unit}`];
+    const raw = event("event-302", { title: "ITF Court 3", gameId: null, startTime, volume: 0,
+      markets: [market("market-302", { sportsMarketType: undefined, outcomes })] });
+    const normalized = normalizeCollectorEvent(raw)!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+    expect(normalized.markets[0]!.outcomes).toEqual(outcomes);
+    const { result, issues } = await discover([raw]);
+    expect(result).toEqual([]);
+    expect(issues).toEqual([{ scope: "match-scope", key: "event-302", message: "AMBIGUOUS_MATCH_SCOPE: missing-participants" }]);
+  });
+
+  test.each([
+    "Who will have the most match wins in 2026?",
+    "How many match wins will Sinner have during the 2026 season (including tiebreaks)?"
+  ])("still excludes explicit annual totals on a named match: %s", question => {
+    const raw = event("event-303", { title: "ATP Year-End Finals: Jannik Sinner vs. Carlos Alcaraz", gameId: "g1",
+      markets: [market("market-303", { sportsMarketType: "totals", question })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
+  });
+});

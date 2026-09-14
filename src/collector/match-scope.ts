@@ -28,7 +28,7 @@ const categoryPairs = [
 
 function categoryLabel(value: string): string {
   // Unsigned thresholds affect category matching only, not names like Schalke 04.
-  return value.replace(/\s+\d+(?:\.\d+)?$/, "")
+  return value.replace(/\s+\d+(?:\.\d+)?(?:\s+\p{L}+)?$/u, "")
     .replace(/^1st\b/, "first").replace(/^2nd\b/, "second")
     .replace(/^(first|second) (?:half|set|period|quarter|map)$/, "$1");
 }
@@ -70,26 +70,29 @@ function matchupTitle(title: string): boolean {
     : side.split(/:|\s+[-–—]\s+/)[0]!));
 }
 
-function singleContestReference(label: string): boolean {
+function singleContestReference(label: string, matchIdentity = false): boolean {
+  // An identified event can qualify its match reference with an opponent or
+  // a parenthetical rule. The year in that reference dates the match.
+  if (matchIdentity && /\b(?:in|during|at|for) (?:the|this|that) [^:;?!]*\b(?:match|game|set|round|quarterfinal|semifinal|final)(?=\s*(?:[(?.!,]|$)|\s+(?:against|between|with|on|at|in)\b)/.test(label)) return true;
   // A match/game/set can modify an annual count ("match wins"). Only a
   // reference to a particular contest establishes a single-match statistic.
   return /\b(?:this|that) (?:match|game|set|round|quarterfinal|semifinal|final)\b/.test(label)
     || /\b(?:match|game|set|round|quarterfinal|semifinal|final)(?: in 20\d{2})?\s*[?.!]*$/.test(label);
 }
 
-function longTermStatistic(label: string, matchup: boolean): boolean {
+function longTermStatistic(label: string, matchup: boolean, matchIdentity: boolean): boolean {
   if (/\b(?:season(?:al)?|career) (?:statistics|stats|totals?|records?)\b/.test(label)) return true;
-  if (!matchup && /\b(?:season(?:al)?|career)\b/.test(label) && !singleContestReference(label)) return true;
+  if (!matchup && /\b(?:season(?:al)?|career)\b/.test(label) && !singleContestReference(label, matchIdentity)) return true;
   // A match heading cannot override the period of a later statistics question.
   return label.split(":").some(clause => {
     const wholePeriod = /\b(?:in|during|throughout|over|for) (?:the )?(?:calendar year )?20\d{2}\b/.test(clause)
       || /\b(?:(?:this|next|last|entire|full|whole|calendar) (?:year|season)|(?:during|throughout|over) (?:the )?(?:year|season))\b/.test(clause);
     const quantity = /\b(?:most|more|fewest|fewer|how many|number of|totals?)\b/.test(clause);
-    return wholePeriod && quantity && !singleContestReference(clause);
+    return wholePeriod && quantity && !singleContestReference(clause, matchIdentity);
   });
 }
 
-function nonMatchReason(value: string, matchup = matchupTitle(value)): NonMatchReason | undefined {
+function nonMatchReason(value: string, matchup = matchupTitle(value), matchIdentity = false): NonMatchReason | undefined {
   const label = value.toLowerCase().replace(/[-_–—]+/g, " ").replace(/\s+/g, " ");
   const contest = /\b(?:match|game|round|quarterfinal|semifinal|final|set)\b/.test(label);
   if (/\b(?:coupons?|parlay|accumulator)\b/.test(label)) return "coupon";
@@ -100,7 +103,7 @@ function nonMatchReason(value: string, matchup = matchupTitle(value)): NonMatchR
   const yearEnd = /\byear end\b|\bend\s+(?:of\s+)?(?:20\d{2}|(?:the\s+)?year)\b/.test(rankingLabel);
   if (/\brankings?\b/.test(label)
     || (rank && yearEnd)) return "ranking";
-  if (longTermStatistic(label, matchup)) return "season-or-statistic";
+  if (longTermStatistic(label, matchup, matchIdentity)) return "season-or-statistic";
   if (/\boutright\b/.test(label) || (!matchup && !contest
     && /\b(?:win|winner|winners|champion|champions)\b/.test(label)
     && /\b(?:tournament|championship|cup|league|open|wimbledon|roland garros|masters|finals)\b/.test(label))) return "tournament-outright";
@@ -110,22 +113,23 @@ function nonMatchReason(value: string, matchup = matchupTitle(value)): NonMatchR
 /** Classify scope only. This never manufactures a game ID or a finish clock. */
 export function classifyMatchScope(event: CollectorEvent): MatchScope {
   const titleMatchup = matchupTitle(event.title);
-  const excluded = nonMatchReason(event.title, titleMatchup) ?? nonMatchReason(event.eventSlug, titleMatchup);
+  const participants = titleMatchup || participantPair(event.raw.participants) || participantPair(event.raw.teams)
+    || event.markets.some(outcomeParticipants);
+  const matchIdentity = event.gameId !== null || participants;
+  const excluded = nonMatchReason(event.title, titleMatchup, matchIdentity) ?? nonMatchReason(event.eventSlug, titleMatchup, matchIdentity);
   if (excluded) return { kind: "non-match", reason: excluded };
   // A generic event title can still contain an entire tournament-winner slate.
   const marketReasons = event.markets.map(market => {
     const type = text(market.raw.sportsMarketType).toLowerCase();
     if (type === "season_winner") return "season-or-statistic" as const;
     if (["outright", "tournament_winner", "championship_winner", "futures"].includes(type)) return "tournament-outright" as const;
-    return nonMatchReason(market.question);
+    return nonMatchReason(market.question, matchupTitle(market.question), matchIdentity);
   });
   if (marketReasons.length > 0 && marketReasons.every(reason => reason !== undefined)) {
     return { kind: "non-match", reason: marketReasons[0]! };
   }
   if (event.gameId !== null) return { kind: "single-match", reason: "game-id" };
 
-  const participants = titleMatchup || participantPair(event.raw.participants) || participantPair(event.raw.teams)
-    || event.markets.some(outcomeParticipants);
   if (!participants) return { kind: "ambiguous", reason: "missing-participants" };
   const sportsMarket = event.markets.some(market => text(market.raw.sportsMarketType) !== "");
   // Gamma startDate/endDate are metadata dates, not scheduled match clocks.
