@@ -574,4 +574,17 @@ describe("dated match questions and outcome units", () => {
     expect(issues).toEqual([]);
     expect(requests).toHaveLength(1);
   });
+
+  test.each(["ending", "opening", "closing"])("preserves season compound modifiers: season-%s", async modifier => {
+    const question = `How many aces will Sinner serve in the 2026 season-${modifier} match against Alcaraz?`;
+    const raw = event("event-305", {
+      title: "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz", gameId: "g1", volume: 0,
+      markets: [market("market-305", { sportsMarketType: "totals", question, outcomes: ["Over", "Under"] })]
+    });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "single-match", reason: "game-id" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.raw).toBe(raw);
+    expect(issues).toEqual([]);
+  });
 });
