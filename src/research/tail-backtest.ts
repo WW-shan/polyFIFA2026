@@ -242,9 +242,8 @@ function validateSettlements(input: TailBacktestInput, tokens: Map<string, Index
       typeof settlement.payout === "number" && Number.isFinite(settlement.payout) && settlement.payout >= 0 && settlement.payout <= 1 &&
       (settlement.source === "gamma-resolved-prices" || settlement.source === "clob-winner-flags") && time(settlement.observedAtMs) && id(settlement.sourceUrl),
     "invalid settlement schema/provenance");
-    let url: URL;
-    try { url = new URL(settlement.sourceUrl); } catch { inputError("invalid settlement source URL"); }
-    check((url.protocol === "https:" || url.protocol === "http:") && url.hostname && !url.username && !url.password, "invalid settlement source URL");
+    // Provenance may identify confirmed archived evidence (file:, urn:, etc.). Do not fetch or normalize it.
+    try { new URL(settlement.sourceUrl); } catch { inputError("invalid settlement provenance URI"); }
     const token = tokens.get(settlement.tokenId);
     check(token && token.market.marketId === settlement.marketId && token.market.conditionId === settlement.conditionId, "settlement identity mismatch");
     check(token.settlement === null, "duplicate settlement token");

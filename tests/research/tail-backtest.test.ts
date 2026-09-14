@@ -429,6 +429,31 @@ describe("strict archive and option validation", () => {
     expect(backtestTailArchives([data], options).trials[0]).toMatchObject({ tokenId: "A", payoutPerShare: 0, modeledPnl: -3.5 });
   });
 
+  test.each(["file:///synthetic/evidence/confirmed%20market.json#response-0", "urn:sha256:confirmed-market-response"])(
+    "accepts and preserves settlement provenance URI %s", sourceUrl => {
+      const data = withChanges(archive(), [trade(1, entry + 100)]);
+      data.settlements!.forEach(settlement => { settlement.sourceUrl = sourceUrl; });
+      const trial = backtestTailArchives([data], options).trials[0]!;
+      expect(trial).toMatchObject({ eligible: true, tokenId: "A", referenceBid: "0.95", modeledFilledShares: 5,
+        payoutPerShare: 0, modeledPnl: -3.5, settlement: { source: "gamma-resolved-prices", sourceUrl } });
+      expect(trial.settlementVector.every(settlement => settlement.sourceUrl === sourceUrl)).toBe(true);
+    }
+  );
+
+  test.each(["", "   ", "not-a-uri"])("rejects empty or malformed settlement provenance %j", sourceUrl => {
+    const data = archive(); data.settlements!.forEach(settlement => { settlement.sourceUrl = sourceUrl; });
+    expect(() => backtestTailArchives([data], options)).toThrow("TAIL_BACKTEST_INPUT_INVALID");
+  });
+
+  test("proposed market metadata cannot supply a settlement or alter the entry side", () => {
+    const data = withChanges(archive(), [trade(1, entry + 100)]); delete data.settlements;
+    data.summary.windows[0]!.markets.forEach(market => {
+      market.raw = { umaResolutionStatus: "proposed", outcomePrices: ["0", "1"], clobTokenIds: ["A", "B"] };
+    });
+    expect(backtestTailArchives([data], options).trials[0]).toMatchObject({ tokenId: "A", eligible: true, modeledFilledShares: 5,
+      settlement: null, settlementVector: [], payoutPerShare: null, modeledPnl: null, pnlEligible: false });
+  });
+
   test.each<(data: TailBacktestInput) => void>([
     data => { data.settlements![0]!.conditionId = "other"; },
     data => { data.settlements![0]!.marketId = "other"; },

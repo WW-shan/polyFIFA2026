@@ -16,6 +16,7 @@ export interface TailSettlement {
   payout: number;
   source: "gamma-resolved-prices" | "clob-winner-flags";
   observedAtMs: number;
+  /** Nonempty provenance URI, including file: archives or URNs; retained verbatim and never fetched here. */
   sourceUrl: string;
 }
 
