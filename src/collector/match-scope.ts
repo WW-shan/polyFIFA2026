@@ -95,7 +95,9 @@ function longTermStatistic(label: string, matchup: boolean, matchIdentity: boole
 }
 
 function nonMatchReason(value: string, matchup = matchupTitle(value), matchIdentity = false): NonMatchReason | undefined {
-  const label = value.toLowerCase().replace(/[-_–—]+/g, " ").replace(/\s+/g, " ");
+  // Keep compound modifiers as one token instead of creating a season period.
+  const label = value.toLowerCase().replace(/\bseason[-_–—]+(ending|opening|closing)\b/g, "season$1")
+    .replace(/[-_–—]+/g, " ").replace(/\s+/g, " ");
   const contest = /\b(?:match|game|round|quarterfinal|semifinal|final|set)\b/.test(label);
   if (/\b(?:coupons?|parlay|accumulator)\b/.test(label)) return "coupon";
   // "Year-End Finals" names a competition; participant seed/rank labels there
