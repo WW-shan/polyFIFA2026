@@ -18,6 +18,7 @@
     "collect:start": "tsx src/collector/continuous-cli.ts start --config collector.config.json --keep-awake",
     "collect:stop": "tsx src/collector/continuous-cli.ts stop --config collector.config.json",
     "collect:status": "tsx src/collector/continuous-cli.ts status --config collector.config.json",
+    "collect:compact": "tsx src/collector/storage-cli.ts compact",
     "research": "tsx src/research/cli.ts",
     "research:download": "tsx src/research/cli.ts download",
     "research:backtest": "tsx src/research/cli.ts backtest",

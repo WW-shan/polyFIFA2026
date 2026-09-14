@@ -3,12 +3,15 @@ import { link, lstat, mkdir, open, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CollectorJournal, JournalCheckpoint } from "./journal.js";
 import { assertJournalRecord } from "./journal-reader.js";
+import { readJournalSegmentPrefix, readJournalSegmentSuffix, resolveJournalSegment } from "./journal-segments.js";
 
 const MAX_CHECKPOINT_LINE_BYTES = 64 * 1024;
 const MAX_SEGMENT_HEADER_BYTES = 64 * 1024;
 
 interface SnapshotSegment {
   source: string;
+  logicalSource: string;
+  compressed: boolean;
   target: string;
   stamp: Stats;
 }
@@ -46,16 +49,23 @@ async function validateCutoff(path: string, stamp: Stats, checkpoint: JournalChe
     assertUnchanged(stamp, await file.stat());
     // The collector marker is small even when the preceding raw frame is huge.
     // Read only this bounded suffix, never copy or buffer the journal itself.
-    const length = Math.min(stamp.size, MAX_CHECKPOINT_LINE_BYTES);
-    const buffer = Buffer.alloc(length);
-    let offset = 0;
-    while (offset < length) {
-      const { bytesRead } = await file.read(buffer, offset, length - offset, stamp.size - length + offset);
-      if (bytesRead === 0) throw new Error("JOURNAL_SNAPSHOT_CHANGED: incomplete cutoff read");
-      offset += bytesRead;
+    const compressed = path.endsWith(".gz");
+    // One extra decoded byte proves whether a maximum-size last line has an
+    // actual preceding newline. Encoded gzip size says nothing about this.
+    const buffer = compressed ? await readJournalSegmentSuffix({ path, compressed, stamp }, MAX_CHECKPOINT_LINE_BYTES + 1)
+      : Buffer.alloc(Math.min(stamp.size, MAX_CHECKPOINT_LINE_BYTES));
+    const length = buffer.length;
+    if (!compressed) {
+      let offset = 0;
+      while (offset < length) {
+        const { bytesRead } = await file.read(buffer, offset, length - offset, stamp.size - length + offset);
+        if (bytesRead === 0) throw new Error("JOURNAL_SNAPSHOT_CHANGED: incomplete cutoff read");
+        offset += bytesRead;
+      }
     }
     const start = buffer.lastIndexOf(10, length - 2) + 1;
-    if (buffer[length - 1] !== 10 || (start === 0 && stamp.size > length)) {
+    const hasEarlierBytes = compressed ? length > MAX_CHECKPOINT_LINE_BYTES : stamp.size > length;
+    if (buffer[length - 1] !== 10 || (start === 0 && hasEarlierBytes)) {
       throw new Error("JOURNAL_SNAPSHOT_INVALID: incomplete checkpoint marker");
     }
     let record: unknown;
@@ -80,12 +90,16 @@ async function firstSequence(segment: SnapshotSegment, checkpoint: JournalCheckp
   const file = await open(segment.source, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     assertUnchanged(segment.stamp, await file.stat());
-    const length = Math.min(segment.stamp.size, MAX_SEGMENT_HEADER_BYTES), buffer = Buffer.alloc(length);
-    let offset = 0;
-    while (offset < length) {
-      const { bytesRead } = await file.read(buffer, offset, length - offset, offset);
-      if (bytesRead === 0) throw new Error("JOURNAL_SNAPSHOT_CHANGED: incomplete header read");
-      offset += bytesRead;
+    const buffer = segment.compressed ? await readJournalSegmentPrefix({ path: segment.source, compressed: true, stamp: segment.stamp }, MAX_SEGMENT_HEADER_BYTES)
+      : Buffer.alloc(Math.min(segment.stamp.size, MAX_SEGMENT_HEADER_BYTES));
+    const length = buffer.length;
+    if (!segment.compressed) {
+      let offset = 0;
+      while (offset < length) {
+        const { bytesRead } = await file.read(buffer, offset, length - offset, offset);
+        if (bytesRead === 0) throw new Error("JOURNAL_SNAPSHOT_CHANGED: incomplete header read");
+        offset += bytesRead;
+      }
     }
     const newline = buffer.indexOf(10);
     let record: unknown;
@@ -96,7 +110,9 @@ async function firstSequence(segment: SnapshotSegment, checkpoint: JournalCheckp
         // Journal serialization puts all required envelope fields before data.
         // Validate that original metadata without reading a large raw payload.
         const prefix = buffer.toString("utf8"), dataOffset = prefix.indexOf(',"data":');
-        if (segment.stamp.size <= length || dataOffset < 0) throw new Error("missing bounded journal header");
+        if ((segment.compressed ? length < MAX_SEGMENT_HEADER_BYTES : segment.stamp.size <= length) || dataOffset < 0) {
+          throw new Error("missing bounded journal header");
+        }
         record = JSON.parse(prefix.slice(0, dataOffset) + ',"data":null}') as unknown;
       }
       assertJournalRecord(record);
@@ -155,10 +171,17 @@ export async function sealJournalSnapshot(journal: CollectorJournal, outputDirec
 
   const segments: SnapshotSegment[] = [];
   for (const name of checkpoint.segments) {
-    const source = join(checkpoint.sourceRunDirectory, name), target = join(runDirectory, name);
-    const stamp = await lstat(source);
+    const logicalSource = join(checkpoint.sourceRunDirectory, name);
+    const physical = await resolveJournalSegment(logicalSource).catch(error => {
+      if (error instanceof Error && error.message.startsWith("JOURNAL_SEGMENT_INVALID")) {
+        throw new Error("JOURNAL_SNAPSHOT_INVALID: sealed segment is not a regular file", { cause: error });
+      }
+      throw error;
+    });
+    const source = physical.path, target = join(runDirectory, name + (physical.compressed ? ".gz" : ""));
+    const stamp = physical.stamp;
     if (!stamp.isFile() || stamp.size === 0) throw new Error("JOURNAL_SNAPSHOT_INVALID: segment is not a regular sealed file");
-    segments.push({ source, target, stamp });
+    segments.push({ source, logicalSource, compressed: physical.compressed, target, stamp });
   }
   const last = segments[segments.length - 1]!;
   await validateCutoff(last.source, last.stamp, checkpoint);

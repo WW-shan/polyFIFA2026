@@ -1,6 +1,7 @@
-import { createReadStream } from "node:fs";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { listJournalSegments } from "./journal.js";
+import { readJournalSegment } from "./journal-segments.js";
 import { objectValue } from "./replay-values.js";
 import type { JournalRecord } from "./types.js";
 import type { ReplayOptions, ReplayQuality } from "./replay-types.js";
@@ -32,11 +33,12 @@ export async function scanJournal(
   const maxLineBytes = options.maxLineBytes ?? 64 * 1024 * 1024;
   if (!Number.isSafeInteger(maxLineBytes) || maxLineBytes < 1) throw new Error("REPLAY_OPTIONS_INVALID: maxLineBytes");
   for (const segment of segments) {
-    const stream = createReadStream(join(runDirectory, segment), { encoding: "utf8", highWaterMark: 64 * 1024 });
+    const stream = readJournalSegment(join(runDirectory, segment));
+    const decoder = new StringDecoder("utf8");
     let pending = "";
     try {
       for await (const chunk of stream) {
-        pending += String(chunk);
+        pending += decoder.write(chunk);
         let newline: number;
         while ((newline = pending.indexOf("\n")) !== -1) {
           const line = pending.slice(0, newline);
@@ -50,12 +52,14 @@ export async function scanJournal(
         }
         if (Buffer.byteLength(pending) > maxLineBytes) throw new Error("REPLAY_LINE_TOO_LARGE");
       }
+      pending += decoder.end();
+      if (Buffer.byteLength(pending) > maxLineBytes) throw new Error("REPLAY_LINE_TOO_LARGE");
       if (pending.length > 0) {
         quality.incompleteFinalLines += 1;
         onDamage();
       }
     } finally {
-      stream.destroy();
+      await stream.return(undefined);
     }
   }
   return segments;

@@ -231,7 +231,7 @@ export async function rawRunBytes(runDirectory: string): Promise<number> {
   let bytes = 0n;
   // Stream directory entries and stat one file at a time; never read raw data.
   for await (const entry of directory) {
-    const match = /^\d{4}-\d{2}-\d{2}-\d{6,}\.ndjson$/.exec(entry.name);
+    const match = /^\d{4}-\d{2}-\d{2}-\d{6,}\.ndjson(?:\.gz)?$/.exec(entry.name);
     if (!entry.isFile() || match?.[0] !== entry.name) continue;
     try {
       const stamp = await lstat(join(runDirectory, entry.name), { bigint: true });

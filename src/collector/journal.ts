@@ -3,6 +3,7 @@ import { mkdir, open, readdir } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import type { JournalRecord, RecordInput, RecordSink } from "./types.js";
+import { JOURNAL_SEGMENT_PATTERN, readJournalSegmentPrefix } from "./journal-segments.js";
 
 const DEFAULT_ROOT_DIR = "data/collector";
 const DEFAULT_MAX_SEGMENT_BYTES = 64 * 1024 * 1024;
@@ -334,13 +335,13 @@ export async function createJournal(options: JournalOptions = {}): Promise<Colle
 }
 
 export async function listJournalSegments(runDirectory: string): Promise<string[]> {
-  const names = (await readdir(runDirectory)).filter((name) => /^\d{4}-\d{2}-\d{2}-\d{6,}\.ndjson$/.test(name));
+  const names = [...new Set((await readdir(runDirectory)).map(name => name.endsWith(".gz") ? name.slice(0, -3) : name)
+    .filter(name => JOURNAL_SEGMENT_PATTERN.test(name)))];
   const segments: Array<{ name: string; sequence: number | undefined }> = [];
-  const header = Buffer.alloc(SEGMENT_HEADER_BYTES);
   // Older archives restarted the index on each UTC date. Only the record
   // sequence, not the filename's date or index, identifies their actual order.
   for (const name of names) {
-    segments.push({ name, sequence: await firstSegmentSequence(join(runDirectory, name), header) });
+    segments.push({ name, sequence: await firstSegmentSequence(join(runDirectory, name)) });
   }
   return segments.sort((left, right) => {
     if (left.sequence !== right.sequence) {
@@ -352,19 +353,10 @@ export async function listJournalSegments(runDirectory: string): Promise<string[
   }).map(({ name }) => name);
 }
 
-async function firstSegmentSequence(path: string, header: Buffer): Promise<number | undefined> {
-  const file = await open(path, "r");
-  try {
-    let length = 0;
-    let newline = -1;
-    while (length < header.length && newline < 0) {
-      const { bytesRead } = await file.read(header, length, header.length - length, length);
-      if (bytesRead === 0) break;
-      newline = header.subarray(length, length + bytesRead).indexOf(10);
-      if (newline >= 0) newline += length;
-      length += bytesRead;
-    }
-    const firstLine = header.toString("utf8", 0, newline < 0 ? length : newline);
+async function firstSegmentSequence(path: string): Promise<number | undefined> {
+    const header = await readJournalSegmentPrefix(path, SEGMENT_HEADER_BYTES);
+    const newline = header.indexOf(10);
+    const firstLine = header.toString("utf8", 0, newline < 0 ? header.length : newline);
     let sequence: unknown;
     try {
       sequence = (JSON.parse(firstLine) as { sequence?: unknown } | null)?.sequence;
@@ -378,7 +370,4 @@ async function firstSegmentSequence(path: string, header: Buffer): Promise<numbe
     // Keep empty or unreadable tails in the result so replay can account for
     // them. Never invent a sequence based on a date that may have rolled back.
     return typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0 ? sequence : undefined;
-  } finally {
-    await file.close();
-  }
 }

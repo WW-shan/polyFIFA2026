@@ -1,8 +1,9 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { listJournalSegments } from "./journal.js";
+import { resolveJournalSegment } from "./journal-segments.js";
 import { scanJournal } from "./journal-reader.js";
 import { emptyReplayQuality } from "./replay-types.js";
 import { objectValue } from "./replay-values.js";
@@ -96,7 +97,8 @@ export function tailOptions(options: TailOptions): EffectiveTailOptions {
 }
 export async function journalStamp(directory:string):Promise<string>{
   const files=await listJournalSegments(directory);
-  return JSON.stringify(await Promise.all(files.map(async file=>{const s=await stat(join(directory,file));return [file,s.size,s.mtimeMs];})));
+  return JSON.stringify(await Promise.all(files.map(async file=>{const physical=await resolveJournalSegment(join(directory,file));
+    const s=physical.stamp;return [file,s.size,s.mtimeMs,physical.compressed,s.dev,s.ino];})));
 }
 export async function scanTailCatalog(options:EffectiveTailOptions):Promise<TailCatalog>{
   const stamp=await journalStamp(options.runDirectory);
