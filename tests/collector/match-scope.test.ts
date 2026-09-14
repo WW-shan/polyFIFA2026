@@ -233,3 +233,116 @@ describe("match scope classification", () => {
     expect(JSON.stringify([first, second])).toBe(before);
   });
 });
+
+describe("match scope review regressions", () => {
+  test("retains ranked participants in an actual Year-End Finals match", async () => {
+    const title = "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz";
+    const raw = event("ranked-finals", { title, gameId: "real-game", markets: [market("finals", { question: title })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "single-match", reason: "game-id" });
+    const { result, issues } = await discover([raw]);
+    expect(result.map(value => value.eventId)).toEqual(["ranked-finals"]);
+    expect(result[0]!.raw).toBe(raw);
+    expect(issues).toEqual([]);
+  });
+
+  test("excludes a ranking prediction when its rank precedes the end-of-year phrase", async () => {
+    const raw = event("year-position", { title: "ATP No. 1 at the end of 2026: Sinner vs. Alcaraz" });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "ranking" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toEqual([]);
+    expect(issues).toEqual([]);
+  });
+
+  test("excludes annual match-count predictions with a versus title", async () => {
+    const raw = event("annual-count", { title: "Sinner vs. Alcaraz: Who will win more matches in 2026?" });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
+    expect((await discover([raw])).result).toEqual([]);
+  });
+
+  test("leaves generic parity outcomes explicitly ambiguous without participant identity", async () => {
+    const raw = event("parity", { title: "Tennis special", markets: [
+      market("parity", { outcomes: ["Odd", "Even"], sportsMarketType: "total_games_odd_even" })
+    ] });
+    const normalized = normalizeCollectorEvent(raw)!;
+    expect(normalized).toMatchObject({ gameId: null, parentEventId: null });
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toEqual([]);
+    expect(issues).toEqual([{ scope: "match-scope", key: "parity", message: "AMBIGUOUS_MATCH_SCOPE: missing-participants" }]);
+    expect(normalized.markets[0]!.outcomes).toEqual(["Odd", "Even"]);
+  });
+});
+
+describe("match scope review boundary cases", () => {
+  test.each([
+    "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz",
+    "WTA Year-End Finals: World No. 1 Aryna Sabalenka vs. World No. 2 Iga Swiatek",
+    "ATP Year-End Finals: #1 Jannik Sinner vs. #2 Carlos Alcaraz",
+    "ATP Year-End Tour Finals: top-ranked Jannik Sinner vs. No. 2 Carlos Alcaraz",
+    "ATP Year-End Championship: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz"
+  ])("retains an actual Finals match without gameId: %s", async title => {
+    const raw = event("finals-fixture", { title, markets: [market("fixture", { question: title })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "single-match", reason: "participants-and-match-evidence" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.gameId).toBeNull();
+    expect(issues).toEqual([]);
+  });
+
+  test.each([
+    "Sinner vs. Alcaraz: ATP No. 1 at the end of 2026",
+    "ATP No. 1 at the end of the year: Sinner vs. Alcaraz",
+    "ATP Finals: Who will be year-end No. 1, Sinner or Alcaraz?",
+    "ATP Year-End Finals: Sinner vs. Alcaraz — Who will end 2026 ranked No. 1?"
+  ])("excludes ranking targets independently of rank/date order or Finals wording: %s", title => {
+    expect(classifyMatchScope(normalizeCollectorEvent(event("position-target", { title }))!))
+      .toEqual({ kind: "non-match", reason: "ranking" });
+  });
+
+  test.each([
+    "Sinner vs. Alcaraz: Who will win the most matches in 2026?",
+    "Sinner vs. Alcaraz: How many matches will Sinner win in 2026?"
+  ])("excludes related annual match-count expressions: %s", title => {
+    expect(classifyMatchScope(normalizeCollectorEvent(event("annual-total", { title }))!))
+      .toEqual({ kind: "non-match", reason: "season-or-statistic" });
+  });
+
+  test.each([
+    "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz — Match winner",
+    "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz — How many games in this match?",
+    "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz — Who will serve more aces in this match?"
+  ])("retains actual Finals match statistics: %s", title => {
+    const raw = event("match-statistic", { title, markets: [market("stats", { question: title, sportsMarketType: "totals" })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toMatchObject({ kind: "single-match" });
+  });
+
+  test.each([
+    { sportsMarketType: "moneyline", outcomes: ["Odd", "Even"] },
+    { sportsMarketType: undefined, outcomes: ["Odd", "Even"] },
+    { sportsMarketType: "total_games", outcomes: ["High", "Low"] },
+    { sportsMarketType: "moneyline", outcomes: ["Higher", "Lower"] },
+    { sportsMarketType: "match_period", outcomes: ["First Half", "Second Half"] }
+  ])("does not infer participants from generic outcome labels: %j", fields => {
+    const raw = event("category", { title: "Tennis special", markets: [market("category", fields)] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+  });
+
+  test.each(["moneyline", "tennis_first_set_winner", undefined])("retains named outcome-only participants with type %s and a scheduled start", sportsMarketType => {
+    const raw = event("itf-court", { title: "ITF Court 3", markets: [
+      market("players", { sportsMarketType, outcomes: ["Aziz Dougaz", "Skander Mansouri"] })
+    ] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toMatchObject({ kind: "single-match" });
+  });
+
+  test.each([
+    { title: "Odd vs. Brann" },
+    { title: "League match", teams: [{ name: "Odd" }, { name: "Brann" }] }
+  ])("preserves known participants and all parity outcomes: %j", identity => {
+    const raw = event("known-match", { ...identity, sport: "soccer", markets: [
+      market("parity", { sportsMarketType: "total_goals_odd_even", outcomes: ["Odd", "Even"] })
+    ] });
+    const normalized = normalizeCollectorEvent(raw)!;
+    expect(classifyMatchScope(normalized)).toMatchObject({ kind: "single-match" });
+    expect(normalized.markets[0]!.outcomes).toEqual(["Odd", "Even"]);
+  });
+});

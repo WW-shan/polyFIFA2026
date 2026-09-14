@@ -1,4 +1,4 @@
-import type { CollectorEvent } from "./types.js";
+import type { CollectorEvent, CollectorMarket } from "./types.js";
 
 type NonMatchReason = "coupon" | "ranking" | "season-or-statistic" | "tournament-outright";
 export type MatchScope =
@@ -22,6 +22,18 @@ function participantPair(value: unknown): boolean {
   return first !== "" && second !== "" && first !== second;
 }
 
+function outcomeParticipants(market: CollectorMarket): boolean {
+  const type = text(market.raw.sportsMarketType).toLowerCase();
+  // Winner labels can name opponents. Categorical markets need independent
+  // identity; an untyped market can still use names plus a scheduled start.
+  if (type !== "" && type !== "moneyline" && !/(?:^|_)winner$/.test(type)) return false;
+  return participantPair(market.outcomes) && !market.outcomes.some(value => {
+    const label = text(value);
+    return /^(?:odd|even|high|low|higher|lower|both|neither|none|other|first|second)$/i.test(label)
+      || /^(?:over|under|above|below)\b|^(?:first|second)\s+(?:half|set|period)$/i.test(label);
+  });
+}
+
 function matchupTitle(title: string): boolean {
   const versus = title.split(/\s+(?:vs\.?|versus)\s+/i);
   // Prefer explicit "vs"; a doubles participant's "V." is a name initial.
@@ -35,13 +47,17 @@ function nonMatchReason(value: string, matchup = matchupTitle(value)): NonMatchR
   const label = value.toLowerCase().replace(/[-_–—]+/g, " ");
   const contest = /\b(?:match|game|round|quarterfinal|semifinal|final|set)\b/.test(label);
   if (/\b(?:coupons?|parlay|accumulator)\b/.test(label)) return "coupon";
+  // "Year-End Finals" names a competition; participant seed/rank labels there
+  // are not a prediction. Other year-end targets in the same title still count.
+  const rankingLabel = label.replace(/\byear end(?=\s+(?:(?:atp|wta|tour)\s+)?(?:finals?|championships?)\b)/g, "");
+  const rank = /\b(?:ranked|no\.?\s*\d+|number\s+\d+|top\s*\d+)\b|#\d+\b/.test(rankingLabel);
+  const yearEnd = /\byear end\b|\bend\s+(?:of\s+)?(?:20\d{2}|(?:the\s+)?year)\b/.test(rankingLabel);
   if (/\brankings?\b/.test(label)
-    || (/\byear end\b/.test(label) && /\b(?:ranked|no\.?\s*1|top\s*\d+)|#\d+/.test(label))
-    || /\bend\s+(?:of\s+)?(?:20\d{2}|the year)\b.*\b(?:ranked|no\.?\s*1|#1)\b/.test(label)) return "ranking";
+    || (rank && yearEnd)) return "ranking";
   if ((!matchup && !contest && /\b(?:season|seasonal|career)\b/.test(label))
     || /\b(?:(?:this|next|entire|full) season|(?:throughout|during) (?:the )?season|(?:season(?:al)?|career) (?:statistics|stats))\b/.test(label)
     || (!contest && /\b(?:20\d{2}|year|season|career)\b/.test(label)
-      && /\b(?:most|more|how many)\b.*\b(?:titles|grand slams|tournaments|aces|wins|goals|points)\b/.test(label))) return "season-or-statistic";
+      && /\b(?:most|more|how many)\b.*\b(?:titles|grand slams|tournaments|matches|aces|wins|goals|points)\b/.test(label))) return "season-or-statistic";
   if (/\boutright\b/.test(label) || (!matchup && !contest
     && /\b(?:win|winner|winners|champion|champions)\b/.test(label)
     && /\b(?:tournament|championship|cup|league|open|wimbledon|roland garros|masters|finals)\b/.test(label))) return "tournament-outright";
@@ -66,7 +82,7 @@ export function classifyMatchScope(event: CollectorEvent): MatchScope {
   if (event.gameId !== null) return { kind: "single-match", reason: "game-id" };
 
   const participants = titleMatchup || participantPair(event.raw.participants) || participantPair(event.raw.teams)
-    || event.markets.some(market => participantPair(market.outcomes));
+    || event.markets.some(outcomeParticipants);
   if (!participants) return { kind: "ambiguous", reason: "missing-participants" };
   const sportsMarket = event.markets.some(market => text(market.raw.sportsMarketType) !== "");
   // Gamma startDate/endDate are metadata dates, not scheduled match clocks.
