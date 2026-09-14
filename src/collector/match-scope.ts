@@ -11,15 +11,35 @@ function text(value: unknown): string {
 }
 
 function participant(value: unknown): string {
-  const name = text(typeof value === "object" && value !== null && "name" in value ? value.name : value);
-  if (!/\p{L}/u.test(name) || /^(?:yes|no|over|under|draw|tie|tbd|tba|home|away|to be determined|to be announced)$/i.test(name)) return "";
-  return name.toLowerCase();
+  // Canonicalize only for identity checks; the supplied outcome labels stay raw.
+  const name = text(typeof value === "object" && value !== null && "name" in value ? value.name : value)
+    .toLowerCase().replace(/\s+/g, " ")
+    .replace(/\s*\(\s*[+−-]?\d+(?:\.\d+)?\s*\)$/, "")
+    .replace(/\s+[+−-]\d+(?:\.\d+)?$/, "").trim();
+  if (!/\p{L}/u.test(name) || /^(?:tbd|tba|to be determined|to be announced)$/.test(name)) return "";
+  return name;
+}
+
+const categoryPairs = [
+  ["yes", "no"], ["odd", "even"], ["over", "under"], ["home", "away"],
+  ["high", "low"], ["higher", "lower"], ["above", "below"], ["first", "second"],
+  ["both", "neither"], ["none", "other"], ["draw", "tie"]
+] as const;
+
+function categoryLabel(value: string): string {
+  // Unsigned thresholds affect category matching only, not names like Schalke 04.
+  return value.replace(/\s+\d+(?:\.\d+)?$/, "")
+    .replace(/^1st\b/, "first").replace(/^2nd\b/, "second")
+    .replace(/^(first|second) (?:half|set|period|quarter|map)$/, "$1");
 }
 
 function participantPair(value: unknown): boolean {
   if (!Array.isArray(value) || value.length !== 2) return false;
   const first = participant(value[0]), second = participant(value[1]);
-  return first !== "" && second !== "" && first !== second;
+  if (first === "" || second === "" || first === second) return false;
+  const left = categoryLabel(first), right = categoryLabel(second);
+  // Reject opposing categories as a pair; a club named Odd can still face Brann.
+  return !categoryPairs.some(([a, b]) => (left === a && right === b) || (left === b && right === a));
 }
 
 function outcomeParticipants(market: CollectorMarket): boolean {
@@ -27,24 +47,50 @@ function outcomeParticipants(market: CollectorMarket): boolean {
   // Winner, spread and handicap labels can name opponents. Categorical markets
   // need independent identity; untyped markets can use names plus a start.
   if (type !== "" && type !== "moneyline" && !/(?:^|_)(?:winner|spreads?|handicaps?)$/.test(type)) return false;
-  return participantPair(market.outcomes) && !market.outcomes.some(value => {
-    const label = text(value);
-    return /^(?:odd|even|high|low|higher|lower|both|neither|none|other|first|second)$/i.test(label)
-      || /^(?:over|under|above|below)\b|^(?:first|second)\s+(?:half|set|period)$/i.test(label);
-  });
+  return participantPair(market.outcomes);
+}
+
+function marketHeading(value: string): boolean {
+  return /^(?:(?:men'?s|women'?s|singles|doubles|match|tournament|game|set|first|second|1st|2nd)\s+)*(?:winner|moneyline|totals?|spreads?|handicaps?|more markets)$/i.test(value.trim());
 }
 
 function matchupTitle(title: string): boolean {
   const versus = title.split(/\s+(?:vs\.?|versus)\s+/i);
   // Prefer explicit "vs"; a doubles participant's "V." is a name initial.
   const short = versus.length > 1 ? versus : title.split(/\s+(?:v\.?|V)\s+/);
-  const sides = short.length > 1 ? short : title.split(/\s+[-–—]\s+/);
+  let sides = short;
+  if (sides.length === 1) {
+    sides = title.split(/\s+[-–—]\s+/);
+    // Dashes can delimit a market heading instead of an opponent. Remove a
+    // heading suffix, then require two actual sides in the remaining title.
+    while (sides.length > 0 && marketHeading(sides.at(-1)!)) sides.pop();
+    if (sides.some(marketHeading)) return false;
+  }
   return participantPair(sides.map((side, index) => index === 0 ? side.split(":").at(-1)!
     : side.split(/:|\s+[-–—]\s+/)[0]!));
 }
 
+function singleContestReference(label: string): boolean {
+  // A match/game/set can modify an annual count ("match wins"). Only a
+  // reference to a particular contest establishes a single-match statistic.
+  return /\b(?:this|that) (?:match|game|set|round|quarterfinal|semifinal|final)\b/.test(label)
+    || /\b(?:match|game|set|round|quarterfinal|semifinal|final)(?: in 20\d{2})?\s*[?.!]*$/.test(label);
+}
+
+function longTermStatistic(label: string, matchup: boolean): boolean {
+  if (/\b(?:season(?:al)?|career) (?:statistics|stats|totals?|records?)\b/.test(label)) return true;
+  if (!matchup && /\b(?:season(?:al)?|career)\b/.test(label) && !singleContestReference(label)) return true;
+  // A match heading cannot override the period of a later statistics question.
+  return label.split(":").some(clause => {
+    const wholePeriod = /\b(?:in|during|throughout|over|for) (?:the )?(?:calendar year )?20\d{2}\b/.test(clause)
+      || /\b(?:(?:this|next|last|entire|full|whole|calendar) (?:year|season)|(?:during|throughout|over) (?:the )?(?:year|season))\b/.test(clause);
+    const quantity = /\b(?:most|more|fewest|fewer|how many|number of|totals?)\b/.test(clause);
+    return wholePeriod && quantity && !singleContestReference(clause);
+  });
+}
+
 function nonMatchReason(value: string, matchup = matchupTitle(value)): NonMatchReason | undefined {
-  const label = value.toLowerCase().replace(/[-_–—]+/g, " ");
+  const label = value.toLowerCase().replace(/[-_–—]+/g, " ").replace(/\s+/g, " ");
   const contest = /\b(?:match|game|round|quarterfinal|semifinal|final|set)\b/.test(label);
   if (/\b(?:coupons?|parlay|accumulator)\b/.test(label)) return "coupon";
   // "Year-End Finals" names a competition; participant seed/rank labels there
@@ -54,10 +100,7 @@ function nonMatchReason(value: string, matchup = matchupTitle(value)): NonMatchR
   const yearEnd = /\byear end\b|\bend\s+(?:of\s+)?(?:20\d{2}|(?:the\s+)?year)\b/.test(rankingLabel);
   if (/\brankings?\b/.test(label)
     || (rank && yearEnd)) return "ranking";
-  if ((!matchup && !contest && /\b(?:season|seasonal|career)\b/.test(label))
-    || /\b(?:(?:this|next|entire|full) season|(?:throughout|during) (?:the )?season|(?:season(?:al)?|career) (?:statistics|stats))\b/.test(label)
-    || (!contest && /\b(?:20\d{2}|year|season|career)\b/.test(label)
-      && /\b(?:most|more|how many)\b.*\b(?:titles|grand slams|tournaments|matches|aces|wins|goals|points)\b/.test(label))) return "season-or-statistic";
+  if (longTermStatistic(label, matchup)) return "season-or-statistic";
   if (/\boutright\b/.test(label) || (!matchup && !contest
     && /\b(?:win|winner|winners|champion|champions)\b/.test(label)
     && /\b(?:tournament|championship|cup|league|open|wimbledon|roland garros|masters|finals)\b/.test(label))) return "tournament-outright";

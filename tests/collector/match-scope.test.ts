@@ -106,10 +106,12 @@ describe("single-match continuous discovery", () => {
   });
 
   test("uses outright market questions when an event title alone is inconclusive", async () => {
-    const { result } = await discover([event("outright", { title: "US Open 2026", markets: [
+    const raw = event("event-109", { title: "US Open 2026", markets: [
       market("sinner", { question: "Will Jannik Sinner win the US Open?" }),
       market("alcaraz", { question: "Will Carlos Alcaraz win the US Open?" })
-    ] })]);
+    ] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "tournament-outright" });
+    const { result } = await discover([raw]);
     expect(result).toEqual([]);
   });
 
@@ -212,7 +214,7 @@ describe("match scope classification", () => {
     "Sinner vs. Alcaraz: season statistics",
     "Sinner vs. Alcaraz: career statistics"
   ])("recognizes multi-match statistics despite a versus title: %s", title => {
-    expect(classifyMatchScope(normalizeCollectorEvent(event("season-stats", { title }))!))
+    expect(classifyMatchScope(normalizeCollectorEvent(event("event-110", { title }))!))
       .toEqual({ kind: "non-match", reason: "season-or-statistic" });
   });
 
@@ -390,5 +392,132 @@ describe("named-side spread and handicap review", () => {
     expect(result).toHaveLength(1);
     expect(result[0]!.gameId).toBeNull();
     expect(result[0]!.markets[0]!.outcomes).toEqual(outcomes);
+  });
+});
+
+describe("consolidated scope evidence", () => {
+  test("does not turn a descriptive winner dash into opponents", async () => {
+    const raw = event("event-201", { title: "US Open - Winner", volume: 0, markets: [
+      market("market-201", { question: "Will Carlos Alcaraz win?", sportsMarketType: undefined, outcomes: ["Yes", "No"] })
+    ] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "tournament-outright" });
+    expect((await discover([raw])).result).toEqual([]);
+  });
+
+  test("recognizes home/away roles through handicap annotations without changing labels", async () => {
+    const outcomes = ["Home (-1.5)", "Away (+1.5)"];
+    const raw = event("event-202", { title: "ITF Court 3", volume: 0,
+      markets: [market("market-202", { sportsMarketType: "handicap", outcomes })] });
+    const normalized = normalizeCollectorEvent(raw)!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+    expect(normalized.markets[0]!.outcomes).toEqual(outcomes);
+    expect(normalized.raw).toBe(raw);
+    const { result, issues } = await discover([raw]);
+    expect(result).toEqual([]);
+    expect(issues).toEqual([{ scope: "match-scope", key: "event-202", message: "AMBIGUOUS_MATCH_SCOPE: missing-participants" }]);
+  });
+
+  test.each(["title", "question"])("detects annual match wins in the %s with a neutral slug", async field => {
+    const prediction = "Sinner vs. Alcaraz: Who will have the most match wins in 2026?";
+    const raw = event("event-203", { title: field === "title" ? prediction : "ITF Court 3", volume: 0,
+      markets: [market("market-203", { question: field === "question" ? prediction : "Match winner",
+        outcomes: ["Jannik Sinner", "Carlos Alcaraz"] })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toEqual([]);
+    expect(issues).toEqual([]);
+  });
+
+  test("accepts a named club even when its name is also a category word", async () => {
+    const outcomes = ["Odd", "Brann"];
+    const raw = event("event-204", { title: "Soccer match", sport: "soccer", volume: 0,
+      markets: [market("market-204", { sportsMarketType: "spread", outcomes })] });
+    const normalized = normalizeCollectorEvent(raw)!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "single-match", reason: "participants-and-match-evidence" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.gameId).toBeNull();
+    expect(result[0]!.markets[0]!.outcomes).toEqual(outcomes);
+    expect(collectableTokenIds(result)).toEqual(["market-204-yes", "market-204-no"]);
+    expect(issues).toEqual([]);
+  });
+
+  test.each([
+    ["Away (+1.5)", "Home (-1.5)"], ["Home(-2.5)", "Away(+2.5)"],
+    ["Even (-1.5)", "Odd (+1.5)"], ["Under (2.5)", "Over (2.5)"],
+    ["Under 2.5", "Over 2.5"], ["First Half", "Second Half"], ["1st Half", "2nd Half"]
+  ])("recognizes an annotated categorical pair %s / %s", (first, second) => {
+    const outcomes = [first, second];
+    const normalized = normalizeCollectorEvent(event("event-211", { title: "ITF Court 3",
+      markets: [market("market-211", { sportsMarketType: "handicap", outcomes })] }))!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+    expect(normalized.markets[0]!.outcomes).toEqual(outcomes);
+  });
+
+  test.each([
+    ["Brann", "Odd"], ["Odd (-1.5)", "Brann (+1.5)"], ["High Point", "Longwood"],
+    ["Overton", "Underhill"], ["Schalke 04", "Schalke 08"]
+  ])("preserves distinct named sides %s / %s", (first, second) => {
+    const outcomes = [first, second];
+    const normalized = normalizeCollectorEvent(event("event-212", { title: "Soccer match",
+      markets: [market("market-212", { sportsMarketType: "spread", outcomes })] }))!;
+    expect(classifyMatchScope(normalized)).toMatchObject({ kind: "single-match" });
+    expect(normalized.markets[0]!.outcomes).toEqual(outcomes);
+  });
+
+  test("handicap annotations cannot make one participant into two opponents", () => {
+    const normalized = normalizeCollectorEvent(event("event-213", { title: "ITF Court 3", markets: [
+      market("market-213", { sportsMarketType: "handicap", outcomes: ["Aziz Dougaz (-1.5)", "Aziz Dougaz (+1.5)"] })
+    ] }))!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+  });
+
+  test.each(["US Open — Winner", "Winner - US Open", "US Open - Women's Singles Winner"])(
+    "keeps market-heading dashes out of participant evidence: %s", title => {
+      const normalized = normalizeCollectorEvent(event("event-214", { title,
+        markets: [market("market-214", { question: "Will Carlos Alcaraz win?", sportsMarketType: undefined })] }))!;
+      expect(classifyMatchScope(normalized)).toEqual({ kind: "non-match", reason: "tournament-outright" });
+    }
+  );
+
+  test.each([
+    "US Open: Jannik Sinner - Carlos Alcaraz",
+    "US Open: Jannik Sinner - Carlos Alcaraz - Match Winner"
+  ])("retains dashed match titles and their market headings: %s", title => {
+    expect(classifyMatchScope(normalizeCollectorEvent(event("event-215", { title }))!)).toMatchObject({ kind: "single-match" });
+  });
+
+  test.each([
+    "How many aces will Sinner serve in the 2026 ATP Finals match?",
+    "Sinner vs. Alcaraz: Who will win more games in this match in 2026?",
+    "Sinner vs. Alcaraz: Their first meeting this season"
+  ])("keeps a match reference distinct from an annual statistic: %s", title => {
+    const normalized = normalizeCollectorEvent(event("event-216", { title, markets: [
+      market("market-216", { question: title, outcomes: ["Jannik Sinner", "Carlos Alcaraz"] })
+    ] }))!;
+    expect(classifyMatchScope(normalized)).toMatchObject({ kind: "single-match" });
+  });
+
+  test.each([
+    "Sinner vs. Alcaraz: Who will have the most game wins in 2026?",
+    "Sinner vs. Alcaraz: Who will have the most set wins in 2026?",
+    "Sinner vs. Alcaraz: Who will have more match victories during the year?"
+  ])("uses the statistic's period rather than a bare contest noun: %s", title => {
+    const normalized = normalizeCollectorEvent(event("event-217", { title }))!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
+  });
+
+  test.each([
+    "Sinner vs. Alcaraz Match: Who will have the most match wins in 2026?",
+    "Sinner vs. Alcaraz: This match: Who will have the most match wins in 2026?"
+  ])("does not let a match heading override a later annual question: %s", title => {
+    const normalized = normalizeCollectorEvent(event("event-218", { title }))!;
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
+  });
+
+  test("keeps a per-match reference before the quantitative question", () => {
+    const title = "Sinner vs. Alcaraz: In this match in 2026, who will win more games?";
+    expect(classifyMatchScope(normalizeCollectorEvent(event("event-219", { title }))!))
+      .toMatchObject({ kind: "single-match" });
   });
 });
