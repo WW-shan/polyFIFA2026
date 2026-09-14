@@ -561,4 +561,17 @@ describe("dated match questions and outcome units", () => {
       markets: [market("market-303", { sportsMarketType: "totals", question })] });
     expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
   });
+
+  test.each(["before", "including"])("explicit season scope outranks later match references: %s", async relation => {
+    const question = `How many match wins will Sinner have during the 2026 season ${relation} the ATP Finals match against Alcaraz?`;
+    const raw = event("event-304", {
+      title: "ATP Year-End Finals: No. 1 Jannik Sinner vs. No. 2 Carlos Alcaraz", gameId: "g1", volume: 0,
+      markets: [market("market-304", { sportsMarketType: "totals", question, outcomes: ["Over", "Under"] })]
+    });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
+    const { result, issues, requests } = await discover([raw]);
+    expect(result).toEqual([]);
+    expect(issues).toEqual([]);
+    expect(requests).toHaveLength(1);
+  });
 });

@@ -88,7 +88,9 @@ function longTermStatistic(label: string, matchup: boolean, matchIdentity: boole
     const wholePeriod = /\b(?:in|during|throughout|over|for) (?:the )?(?:calendar year )?20\d{2}\b/.test(clause)
       || /\b(?:(?:this|next|last|entire|full|whole|calendar) (?:year|season)|(?:during|throughout|over) (?:the )?(?:year|season))\b/.test(clause);
     const quantity = /\b(?:most|more|fewest|fewer|how many|number of|totals?)\b/.test(clause);
-    return wholePeriod && quantity && !singleContestReference(clause, matchIdentity);
+    // An explicit season period takes precedence over a later match reference.
+    const seasonPeriod = /\b(?:in|during|throughout|over|for) (?:the )?20\d{2} season\b/.test(clause);
+    return wholePeriod && quantity && (seasonPeriod || !singleContestReference(clause, matchIdentity));
   });
 }
 
