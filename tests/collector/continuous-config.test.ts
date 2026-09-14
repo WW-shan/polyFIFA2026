@@ -34,7 +34,12 @@ describe("continuous configuration", () => {
       clobWsUrl: "wss://ws-subscriptions-clob.polymarket.com/ws/market",
       sportsWsUrl: "wss://sports-api.polymarket.com/ws",
       retryDelayMs: 5_000,
-      exportTimeoutMs: 600_000
+      exportTimeoutMs: 600_000,
+      compressionEnabled: false,
+      compressionIntervalMs: 60_000,
+      compressionMaxSegments: 4,
+      compressionTimeoutMs: 120_000,
+      singleMatchOnly: true
     } satisfies ContinuousConfig);
     expect(readFile).not.toHaveBeenCalled();
   });
@@ -60,6 +65,8 @@ describe("continuous configuration", () => {
       discoveryIntervalMs: 1, snapshotIntervalMs: 2, httpTimeoutMs: 3,
       postFinishRetentionMs: 0, pulseIntervalMs: 4, minFreeBytes: 1, port: 1,
       lookbackHours: 0.25, aheadHours: 0, retryDelayMs: 5, exportTimeoutMs: 6,
+      compressionEnabled: true, compressionIntervalMs: 7, compressionMaxSegments: 3, compressionTimeoutMs: 8,
+      singleMatchOnly: false,
       proxyUrl: "http://proxy-user:proxy-secret@127.0.0.1:8080",
       gammaBaseUrl: "http://gamma.fixture.test/api/",
       clobBaseUrl: "https://clob.fixture.test/api",

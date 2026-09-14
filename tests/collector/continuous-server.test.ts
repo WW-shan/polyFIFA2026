@@ -25,7 +25,8 @@ beforeEach(async () => {
     schemaVersion: 1, instanceId: "instance-test", pid: 123, startedAtMs: 1_000, updatedAtMs: 20_000,
     dataRoot, port: 0, mode: "collecting", runId: "run-test", runDirectory: join(dataRoot, "runs", "run-test"),
     receivedRecords: 42, lastRecordAtMs: 15_000, freeBytes: 25_000_000_000, rawBytes: 4096, queuedBytes: 128,
-    desiredTokens: 3, games: [], connections: [], errors: []
+    desiredTokens: 3, games: [], connections: [], errors: [],
+    compression: { enabled: false, running: false, lastCompletedAtMs: null, compressedSegments: 0, logicalBytesSaved: 0, lastError: null }
   };
 });
 
@@ -136,6 +137,17 @@ async function archiveFixture() {
 }
 
 describe("continuous loopback status server", () => {
+  test("shows compression activity separately from disk-paused collection", async () => {
+    status.mode = "paused_disk";
+    status.compression = { enabled: true, running: true, lastCompletedAtMs: 19_000,
+      compressedSegments: 2, logicalBytesSaved: 1024 ** 3, lastError: null };
+    const view = await openDashboard(await start());
+    expect(view.get("mode").textContent).toContain("已暂停");
+    expect(view.get("compression-mode").textContent).toContain("压缩中");
+    expect(view.get("compression-saved").textContent).toContain("1.00 GiB");
+    expect(view.get("compression-segments").textContent).toBe("2");
+  });
+
   test("serves the current getter snapshot with no caching or configuration fields", async () => {
     const server = await start();
     const first = await http(server.port);

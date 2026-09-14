@@ -8,10 +8,11 @@ import { discoverContinuousEvents } from "./continuous-discovery.js";
 import type { ContinuousConfig } from "./continuous-config.js";
 import { ContinuousState, type CapturedGame } from "./continuous-state.js";
 import { runTailExport } from "./continuous-export.js";
+import { runJournalCompression } from "./continuous-compression.js";
 import { sealJournalSnapshot } from "./sealed-journal.js";
 import { startContinuousServer } from "./continuous-server.js";
 import { acquireCaptureLock, availableDiskBytes, rawRunBytes, readCaptureState, writeCaptureState } from "./continuous-storage.js";
-import type { JsonRequester, RecordInput } from "./types.js";
+import type { JsonRequester, JournalRecord, RecordInput } from "./types.js";
 import { metadataFromRecord } from "./tail-context.js";
 
 export interface ContinuousDependencies {
@@ -20,6 +21,7 @@ export interface ContinuousDependencies {
   diskBytes?: typeof availableDiskBytes;
   startServer?: typeof startContinuousServer;
   runExport?: typeof runTailExport;
+  runCompression?: typeof runJournalCompression;
   sealSnapshot?: typeof sealJournalSnapshot;
   now?: () => number;
   request?: JsonRequester;
@@ -37,6 +39,10 @@ export class ContinuousCollector {
   private captureTask: Promise<void> | undefined;
   private archiveTask: Promise<void> | undefined;
   private archiveCancellation: AbortController | undefined;
+  private compressionTask: Promise<void> | undefined;
+  private compressionCancellation: AbortController | undefined;
+  private nextCompressionAtMs: number;
+  private archiveTurnAfterCompression = false;
   private startTask: Promise<void> | undefined;
   private stopTask: Promise<void> | undefined;
   private pulseTask: Promise<void> | undefined;
@@ -56,6 +62,8 @@ export class ContinuousCollector {
   constructor(readonly config: ContinuousConfig, private readonly dependencies: ContinuousDependencies = {}) {
     this.now = dependencies.now ?? Date.now;
     this.state = new ContinuousState(config.dataRoot, config.port);
+    this.state.compression.enabled = config.compressionEnabled;
+    this.nextCompressionAtMs = this.now() + config.compressionIntervalMs;
     this.done = new Promise<void>((resolve, reject) => { this.resolveDone = resolve; this.rejectDone = reject; });
     void this.done.catch(() => {});
   }
@@ -87,7 +95,7 @@ export class ContinuousCollector {
       });
     }, this.config.pulseIntervalMs);
   }
-  private record(journal: CollectorJournal, input: RecordInput): void {
+  private record(journal: CollectorJournal, input: RecordInput): JournalRecord {
     const record = journal.record(input);
     this.state.observe(record);
     const mono = BigInt(record.monotonicNs);
@@ -104,13 +112,14 @@ export class ContinuousCollector {
       }
       this.clock.lastWall = record.receivedAtMs; this.clock.lastMono = mono;
     }
+    return record;
   }
   private startCapture(): void {
     if (this.runtime || this.stopping) return;
     const config = this.config;
     const dependencies: CollectorDependencies = {
       now: this.now,
-      discover: (options, deps) => discoverContinuousEvents(options, deps, config.profiles, issue => {
+      discover: (options, deps) => discoverContinuousEvents({ ...options, singleMatchOnly: config.singleMatchOnly }, deps, config.profiles, issue => {
         this.state.issue(`discovery:${issue.scope}`, `${issue.key}: ${issue.message}`, this.now());
         if (this.journal) this.record(this.journal, { source: "collector", kind: "discovery_scope_error", data: issue });
       }),
@@ -128,7 +137,7 @@ export class ContinuousCollector {
       dateWindow: "game-start", lookbackHours: config.lookbackHours, aheadHours: config.aheadHours,
       discoveryIntervalMs: config.discoveryIntervalMs, snapshotIntervalMs: config.snapshotIntervalMs,
       httpTimeoutMs: config.httpTimeoutMs, postFinishRetentionMs: config.postFinishRetentionMs, reconciliationConcurrency: 4,
-      backgroundInitialSnapshots: true, snapshotBatchSize: 50
+      backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true
     }, dependencies);
     this.runtime = runtime;
     this.state.mode = "starting";
@@ -175,13 +184,45 @@ export class ContinuousCollector {
     if (this.journal) this.state.rawBytes = await rawRunBytes(this.journal.runDirectory);
     if (!this.pausedForDisk && this.journal && this.runtime?.status === "running") await this.refreshMissingFinish(this.journal);
     if (this.stopping) return;
-    if (!this.pausedForDisk && !this.archiveTask && this.journal && this.runtime?.status === "running") {
-      const game = this.state.readyToArchive(this.journal.runId, this.now())[0];
-      if (game) this.beginArchive(game, this.journal);
-    }
+    const game = !this.pausedForDisk && !this.archiveTask && !this.compressionTask && this.journal && this.runtime?.status === "running"
+      ? this.state.readyToArchive(this.journal.runId, this.now())[0] : undefined;
+    if (this.config.compressionEnabled && !this.compressionTask && !this.archiveTask && this.now() >= this.nextCompressionAtMs
+      && (!this.runtime || this.runtime.status === "running") && (!game || !this.archiveTurnAfterCompression)) this.beginCompression();
+    if (game && !this.archiveTask && !this.compressionTask && this.journal) this.beginArchive(game, this.journal);
     await this.persist();
   }
+  private beginCompression(): void {
+    const controller = new AbortController();
+    this.compressionCancellation = controller;
+    const signal = AbortSignal.any([controller.signal, this.cancellation.signal]);
+    this.nextCompressionAtMs = this.now() + this.config.compressionIntervalMs;
+    this.state.compression.running = true;
+    const activeRunDirectory = this.journal?.runDirectory;
+    this.compressionTask = (async () => {
+      const roots = [await this.ownedDirectory("runs"), await this.ownedDirectory("checkpoints")];
+      signal.throwIfAborted();
+      const result = await (this.dependencies.runCompression ?? runJournalCompression)({ roots,
+        ...(activeRunDirectory ? { activeRunDirectory } : {}), maxSegments: this.config.compressionMaxSegments,
+        timeoutMs: this.config.compressionTimeoutMs }, signal);
+      this.state.compression.compressedSegments += result.compressedSegments;
+      this.state.compression.logicalBytesSaved += result.logicalBytesSaved;
+      this.state.compression.lastCompletedAtMs = this.now();
+      this.state.compression.lastError = null;
+    })().catch(error => {
+      if (!this.stopping) {
+        this.state.compression.lastError = String(error).slice(0, 2000);
+        this.state.issue("compression", error, this.now());
+      }
+    }).finally(() => {
+      this.state.compression.running = false;
+      this.nextCompressionAtMs = this.now() + this.config.compressionIntervalMs;
+      this.archiveTurnAfterCompression = true;
+      this.compressionTask = undefined; this.compressionCancellation = undefined;
+      void this.persist().catch(error => this.state.issue("state", error));
+    });
+  }
   private beginArchive(game: CapturedGame, journal: CollectorJournal): void {
+    this.archiveTurnAfterCompression = false;
     const controller = new AbortController();
     this.archiveCancellation = controller;
     const signal = AbortSignal.any([controller.signal, this.cancellation.signal]);
@@ -315,9 +356,11 @@ export class ContinuousCollector {
   private async cleanup(): Promise<void> {
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.archiveCancellation?.abort(new Error("CONTINUOUS_STOPPED"));
+    this.compressionCancellation?.abort(new Error("CONTINUOUS_STOPPED"));
     await this.runtime?.stop().catch(error => this.state.issue("capture", error));
     await this.captureTask;
     await this.archiveTask;
+    await this.compressionTask;
     this.state.mode = "stopped";
     try { await this.persist(); }
     finally {

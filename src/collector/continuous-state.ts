@@ -27,6 +27,10 @@ export interface CapturedGame {
   archive?: ArchiveState;
 }
 export interface CaptureConnection { id: string; source: string; open: boolean; lastMessageAtMs: number | null }
+export interface CompressionState {
+  enabled: boolean; running: boolean; lastCompletedAtMs: number | null;
+  compressedSegments: number; logicalBytesSaved: number; lastError: string | null;
+}
 export interface ContinuousStatus {
   schemaVersion: 1; instanceId: string; pid: number; startedAtMs: number; updatedAtMs: number;
   dataRoot: string; port: number; mode: "starting" | "collecting" | "restarting" | "paused_disk" | "stopping" | "stopped";
@@ -34,6 +38,7 @@ export interface ContinuousStatus {
   freeBytes: number | null; rawBytes: number; queuedBytes: number; desiredTokens: number;
   games: CapturedGame[]; connections: CaptureConnection[];
   errors: Array<{ atMs: number; scope: string; message: string }>;
+  compression?: CompressionState;
 }
 
 export class ContinuousState {
@@ -53,6 +58,8 @@ export class ContinuousState {
   rawBytes = 0;
   queuedBytes = 0;
   desiredTokens = 0;
+  compression: CompressionState = { enabled: false, running: false, lastCompletedAtMs: null,
+    compressedSegments: 0, logicalBytesSaved: 0, lastError: null };
 
   constructor(readonly dataRoot: string, readonly port: number) {}
   setRun(runId: string, runDirectory: string): void {
@@ -197,11 +204,12 @@ export class ContinuousState {
       for (const id of old.eventIds) this.events.delete(id);
     }
   }
-  snapshot(): ContinuousStatus {
+  snapshot(): ContinuousStatus & { compression: CompressionState } {
     return JSON.parse(JSON.stringify({ schemaVersion: 1, instanceId: this.instanceId, pid: process.pid, startedAtMs: this.startedAtMs,
       updatedAtMs: Date.now(), dataRoot: this.dataRoot, port: this.port, mode: this.mode, runId: this.runId, runDirectory: this.runDirectory,
       receivedRecords: this.receivedRecords, lastRecordAtMs: this.lastRecordAtMs, freeBytes: this.freeBytes, rawBytes: this.rawBytes,
-      queuedBytes: this.queuedBytes, desiredTokens: this.desiredTokens, games: [...this.games.values()], connections: [...this.connections.values()], errors: this.errors })) as ContinuousStatus;
+      queuedBytes: this.queuedBytes, desiredTokens: this.desiredTokens, games: [...this.games.values()], connections: [...this.connections.values()], errors: this.errors,
+      compression: this.compression })) as ContinuousStatus & { compression: CompressionState };
   }
   restore(saved: ContinuousStatus): void {
     if (saved.schemaVersion !== 1 || !Array.isArray(saved.games)) throw new Error("CAPTURE_STATE_INVALID");

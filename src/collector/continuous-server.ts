@@ -47,6 +47,10 @@ const browserScript = String.raw`
     byId("desired-tokens").textContent = text(status.desiredTokens);
     byId("raw-bytes").textContent = text(status.rawBytes) + " B";
     byId("queued-bytes").textContent = text(status.queuedBytes) + " B";
+    const compression = status.compression;
+    byId("compression-mode").textContent = !compression || !compression.enabled ? "未启用" : compression.running ? "压缩中" : "等待下轮";
+    byId("compression-segments").textContent = text(compression ? compression.compressedSegments : 0);
+    byId("compression-saved").textContent = ((compression ? compression.logicalBytesSaved : 0) / (1024 ** 3)).toFixed(2) + " GiB";
     byId("connection-counts").textContent = status.connections.filter(connection => connection.open).length + " / " + status.connections.length;
     byId("connections").replaceChildren(...status.connections.map(connection => {
       const row = node("tr");
@@ -115,6 +119,8 @@ const dashboard = `<!doctype html>
 <div><dt>距最后接收</dt><dd id="last-record-age">—</dd></div><div><dt>已接收记录</dt><dd id="received-records">—</dd></div>
 <div><dt>目标 tokens</dt><dd id="desired-tokens">—</dd></div><div><dt>本轮原始字节</dt><dd id="raw-bytes">—</dd></div>
 <div><dt>排队字节</dt><dd id="queued-bytes">—</dd></div><div><dt>已连接 / 总连接</dt><dd id="connection-counts">—</dd></div>
+<div><dt>后台压缩</dt><dd id="compression-mode">—</dd></div><div><dt>本进程已压缩分段</dt><dd id="compression-segments">—</dd></div>
+<div><dt>本进程压缩减少的逻辑字节</dt><dd id="compression-saved">—</dd></div>
 </dl><div class="scroll"><table><thead><tr><th>来源</th><th>连接</th><th>状态</th><th>距最后消息</th></tr></thead><tbody id="connections"></tbody></table></div></section>
 <section><h2>比赛与归档</h2><p id="game-counts"></p><div class="scroll"><table>
 <thead><tr><th>比赛</th><th>阶段</th><th>tokens</th><th>观测计数</th><th>距最后盘口</th><th>价格就绪<br>priceReadyTokens</th><th>严格就绪<br>strictReadyTokens</th><th>已完成归档文件</th></tr></thead>

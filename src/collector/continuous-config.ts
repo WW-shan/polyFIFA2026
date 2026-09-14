@@ -26,6 +26,11 @@ export interface ContinuousConfig {
   sportsWsUrl: string;
   retryDelayMs: number;
   exportTimeoutMs: number;
+  compressionEnabled: boolean;
+  compressionIntervalMs: number;
+  compressionMaxSegments: number;
+  compressionTimeoutMs: number;
+  singleMatchOnly: boolean;
 }
 
 function invalid(message: string): never {
@@ -85,7 +90,12 @@ export function continuousConfig(
     clobWsUrl: "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     sportsWsUrl: "wss://sports-api.polymarket.com/ws",
     retryDelayMs: 5_000,
-    exportTimeoutMs: 600_000
+    exportTimeoutMs: 600_000,
+    compressionEnabled: false,
+    compressionIntervalMs: 60_000,
+    compressionMaxSegments: 4,
+    compressionTimeoutMs: 120_000,
+    singleMatchOnly: true
   };
   const overrides = Object.fromEntries(Object.entries(input).filter(([key, value]) =>
     value !== undefined && (Object.hasOwn(defaults, key) || key === "proxyUrl")
@@ -94,11 +104,16 @@ export function continuousConfig(
 
   for (const field of [
     "discoveryIntervalMs", "snapshotIntervalMs", "httpTimeoutMs", "pulseIntervalMs",
-    "retryDelayMs", "exportTimeoutMs", "minFreeBytes", "port"
+    "retryDelayMs", "exportTimeoutMs", "minFreeBytes", "port",
+    "compressionIntervalMs", "compressionMaxSegments", "compressionTimeoutMs"
   ] as const) {
     if (!Number.isSafeInteger(config[field]) || config[field] < 1) invalid(`${field} must be a positive safe integer`);
   }
   if (config.port > 65_535) invalid("port must be between 1 and 65535");
+  if (typeof config.compressionEnabled !== "boolean") invalid("compressionEnabled must be boolean");
+  if (typeof config.singleMatchOnly !== "boolean") invalid("singleMatchOnly must be boolean");
+  if (config.compressionMaxSegments > 1024) invalid("compressionMaxSegments must be at most 1024");
+  if (config.compressionTimeoutMs > 2_147_483_647) invalid("compressionTimeoutMs exceeds Node's timer limit");
   if (!Number.isSafeInteger(config.postFinishRetentionMs) || config.postFinishRetentionMs < 0) {
     invalid("postFinishRetentionMs must be a nonnegative safe integer");
   }

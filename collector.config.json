@@ -11,5 +11,9 @@
   "snapshotIntervalMs": 60000,
   "postFinishRetentionMs": 600000,
   "minFreeBytes": 21474836480,
+  "compressionEnabled": true,
+  "compressionIntervalMs": 60000,
+  "compressionMaxSegments": 4,
+  "singleMatchOnly": false,
   "port": 8765
 }
