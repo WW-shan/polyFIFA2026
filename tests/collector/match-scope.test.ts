@@ -346,3 +346,49 @@ describe("match scope review boundary cases", () => {
     expect(normalized.markets[0]!.outcomes).toEqual(["Odd", "Even"]);
   });
 });
+
+describe("named-side spread and handicap review", () => {
+  test.each([
+    "spread", "spreads", "handicap", "handicaps", "tennis_first_set_spreads",
+    "tennis_games_handicap", "asian_handicap", "first_half_spread"
+  ])("retains an outcomes-only ITF match with %s", async sportsMarketType => {
+    const outcomes = ["Aziz Dougaz", "Skander Mansouri"];
+    const raw = event("itf-court", { title: "ITF Court 3", gameId: null, startTime, markets: [
+      market("named-sides", { sportsMarketType, outcomes, volume: 0 })
+    ] });
+    const normalized = normalizeCollectorEvent(raw)!;
+    expect(normalized).toMatchObject({ gameId: null, parentEventId: null });
+    expect(classifyMatchScope(normalized)).toEqual({ kind: "single-match", reason: "participants-and-match-evidence" });
+    const { result, requests, issues } = await discover([raw]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.raw).toBe(raw);
+    expect(result[0]!.gameId).toBeNull();
+    expect(result[0]!.markets[0]).toMatchObject({ outcomes, tokenIds: ["named-sides-yes", "named-sides-no"], raw: { volume: 0 } });
+    expect(collectableTokenIds(result)).toEqual(["named-sides-yes", "named-sides-no"]);
+    expect(requests).toHaveLength(1);
+    expect(issues).toEqual([]);
+  });
+
+  test.each(["spread", "spreads", "handicap", "handicaps"].flatMap(sportsMarketType => [
+    ["Odd", "Even"], ["Over", "Under"], ["Over 2.5", "Under 2.5"]
+  ].map(outcomes => ({ sportsMarketType, outcomes }))))("keeps generic outcomes ambiguous with %j", async fields => {
+    const raw = event("unknown-sides", { title: "ITF Court 3", gameId: null, startTime,
+      markets: [market("category", fields)] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "ambiguous", reason: "missing-participants" });
+    const { result, issues } = await discover([raw]);
+    expect(result).toEqual([]);
+    expect(issues).toEqual([{ scope: "match-scope", key: "unknown-sides", message: "AMBIGUOUS_MATCH_SCOPE: missing-participants" }]);
+  });
+
+  test("keeps named doubles opponents and their handicap lines intact", async () => {
+    const outcomes = ["E. Pridankina / E. Maklakova (-2.5)", "M. Kozyreva / V. Miroshnichenko (+2.5)"];
+    const raw = event("doubles", { title: "ITF Court 3", markets: [
+      market("doubles-sides", { sportsMarketType: "handicap", outcomes })
+    ] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toMatchObject({ kind: "single-match" });
+    const { result } = await discover([raw]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.gameId).toBeNull();
+    expect(result[0]!.markets[0]!.outcomes).toEqual(outcomes);
+  });
+});

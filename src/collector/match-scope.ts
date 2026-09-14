@@ -24,9 +24,9 @@ function participantPair(value: unknown): boolean {
 
 function outcomeParticipants(market: CollectorMarket): boolean {
   const type = text(market.raw.sportsMarketType).toLowerCase();
-  // Winner labels can name opponents. Categorical markets need independent
-  // identity; an untyped market can still use names plus a scheduled start.
-  if (type !== "" && type !== "moneyline" && !/(?:^|_)winner$/.test(type)) return false;
+  // Winner, spread and handicap labels can name opponents. Categorical markets
+  // need independent identity; untyped markets can use names plus a start.
+  if (type !== "" && type !== "moneyline" && !/(?:^|_)(?:winner|spreads?|handicaps?)$/.test(type)) return false;
   return participantPair(market.outcomes) && !market.outcomes.some(value => {
     const label = text(value);
     return /^(?:odd|even|high|low|higher|lower|both|neither|none|other|first|second)$/i.test(label)
