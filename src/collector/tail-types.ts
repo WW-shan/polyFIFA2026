@@ -114,6 +114,8 @@ export interface TailOptions {
   maxLineBytes?: number;
   finishLabelsFile?: string;
   finishFactsFile?: string;
+  /** Losslessly compact the generated raw-evidence copy after its writer is sealed. */
+  compressRawEvents?: boolean;
 }
 export interface TailSummary {
   schemaVersion: 1; basis: "received-order-book-tail";

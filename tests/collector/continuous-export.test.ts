@@ -12,7 +12,9 @@ test("exports a completed game in a real child process and reads its actual qual
   const result = await runTailExport({ snapshotDirectory: join(root, "run"), outputDirectory, eventSlugs: ["game"], gameKey: "game:123", timeoutMs: 10_000 });
   expect(result).toMatchObject({ outputDirectory, strictReadyTokens: 0 });
   const quality = JSON.parse(await readFile(join(outputDirectory, "quality.json"), "utf8"));
-  expect(quality.seconds).toBe(600);
+  expect(quality.windowSeconds).toBe(301);
+  expect(quality.seconds).toBe(602);
+  expect(JSON.parse(await readFile(join(outputDirectory, "manifest.json"), "utf8")).rawEventsFile).toBe("raw-events.ndjson.gz");
   expect(result.priceReadyTokens).toBe(quality.tokens.filter((q: { observedWindowComplete: boolean; snapshotAuditPassed: boolean; validSeconds: number }) => q.observedWindowComplete && q.snapshotAuditPassed && q.validSeconds > 0).length);
 }, 15_000);
 

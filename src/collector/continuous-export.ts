@@ -16,7 +16,8 @@ export async function runTailExport(task: TailExportTask, signal?: AbortSignal):
   if (!Number.isSafeInteger(task.timeoutMs) || task.timeoutMs < 1 || !task.eventSlugs.length) throw new Error("TAIL_EXPORT_TASK_INVALID");
   const args = ["--import", "tsx", fileURLToPath(new URL("./tail-cli.ts", import.meta.url)), "export",
     "--run-dir", task.snapshotDirectory, "--output-dir", task.outputDirectory, "--event-slugs", task.eventSlugs.join(","),
-    "--clock-policy", "flag-backsteps", ...(task.finishFactsFile ? ["--finish-facts", task.finishFactsFile] : [])];
+    "--clock-policy", "flag-backsteps", "--window-seconds", "301", "--compress-raw-events",
+    ...(task.finishFactsFile ? ["--finish-facts", task.finishFactsFile] : [])];
   await new Promise<void>((resolve, reject) => {
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
     let output = "", failure: Error | undefined, closed = false;
