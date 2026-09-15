@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { listJournalSegments } from "./journal.js";
 import { readJournalSegment } from "./journal-segments.js";
 import { objectValue } from "./replay-values.js";
@@ -34,27 +33,39 @@ export async function scanJournal(
   if (!Number.isSafeInteger(maxLineBytes) || maxLineBytes < 1) throw new Error("REPLAY_OPTIONS_INVALID: maxLineBytes");
   for (const segment of segments) {
     const stream = readJournalSegment(join(runDirectory, segment));
-    const decoder = new StringDecoder("utf8");
-    let pending = "";
+    let parts: Buffer[] = [], pendingBytes = 0;
+    const takeLine = (): string => {
+      const bytes = parts.length === 1 ? parts[0]! : Buffer.concat(parts, pendingBytes);
+      const line = bytes.toString("utf8");
+      parts = []; pendingBytes = 0;
+      // Invalid UTF-8 becomes replacement characters, whose encoded size can
+      // exceed the raw byte count. Keep the decoded bound as well.
+      if (Buffer.byteLength(line) > maxLineBytes) throw new Error("REPLAY_LINE_TOO_LARGE");
+      return line;
+    };
     try {
       for await (const chunk of stream) {
-        pending += decoder.write(chunk);
-        let newline: number;
-        while ((newline = pending.indexOf("\n")) !== -1) {
-          const line = pending.slice(0, newline);
-          pending = pending.slice(newline + 1);
-          if (Buffer.byteLength(line) > maxLineBytes) throw new Error("REPLAY_LINE_TOO_LARGE");
+        let start = 0;
+        while (start < chunk.length) {
+          // Search each incoming byte at most once; never rescan or copy the
+          // accumulated prefix of multi-megabyte discovery responses.
+          const newline = chunk.indexOf(0x0a, start);
+          const end = newline === -1 ? chunk.length : newline;
+          pendingBytes += end - start;
+          if (pendingBytes > maxLineBytes) throw new Error("REPLAY_LINE_TOO_LARGE");
+          if (end > start) parts.push(chunk.subarray(start, end));
+          if (newline === -1) break;
+          start = newline + 1;
+          const line = takeLine();
           let value: unknown;
           try { value = JSON.parse(line) as unknown; }
           catch { quality.malformedLines += 1; onDamage(); continue; }
           assertJournalRecord(value);
           await onRecord(value);
         }
-        if (Buffer.byteLength(pending) > maxLineBytes) throw new Error("REPLAY_LINE_TOO_LARGE");
       }
-      pending += decoder.end();
-      if (Buffer.byteLength(pending) > maxLineBytes) throw new Error("REPLAY_LINE_TOO_LARGE");
-      if (pending.length > 0) {
+      if (pendingBytes > 0) {
+        takeLine();
         quality.incompleteFinalLines += 1;
         onDamage();
       }
