@@ -22,6 +22,7 @@
     "research": "tsx src/research/cli.ts",
     "research:download": "tsx src/research/cli.ts download",
     "research:backtest": "tsx src/research/cli.ts backtest",
+    "research:books": "tsx src/research/tail-backtest-cli.ts",
     "paper:fixture": "tsx src/cli.ts --mode paper --match-file tests/fixtures/matches/spain-5-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json --stake 97",
     "live:status": "tsx src/cli.ts --mode status",
     "live:watch:worldcup": "tsx src/cli.ts --mode live --watch true --worldcup true --order-type FAK",
