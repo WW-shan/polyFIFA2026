@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { exportTail } from "../../src/collector/tail-export.js";
 import type { JournalRecord } from "../../src/collector/types.js";
 import type { HttpOptions, HttpResponseText } from "../../src/polymarket/http.js";
+import { writeTailBacktestReport } from "../../src/research/tail-backtest-report.js";
 import type { TailBacktestResult } from "../../src/research/tail-backtest-types.js";
 import { eventMetadata, fixtureRecords, writeFixture } from "../collector/tail-fixture.js";
 
@@ -144,13 +145,66 @@ test("defaults sport to unknown and supports report capture without creating an 
 
 test("rejects an existing output directory before fetching or changing its files", async () => {
   const run = await cli(), f = await archive(), before = await readFile(join(f.directory, "manifest.json"));
+  const alias = join(f.root, "parent-alias"); await symlink(f.root, alias, "dir");
   const request = vi.fn(async () => response(resolvedEvent()));
-  const result = await run(["--archive-dir", f.directory, "--output-dir", f.directory, "--fetch-settlements"], { request });
-  expect(result.exitCode).not.toBe(0);
-  expect(result.stderr).toContain("TAIL_BACKTEST_OUTPUT_EXISTS");
+  for (const output of [f.directory, join(alias, "archive")]) {
+    const result = await run(["--archive-dir", f.directory, "--output-dir", output, "--fetch-settlements"], { request });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("TAIL_BACKTEST_OUTPUT_EXISTS");
+  }
   expect(request).not.toHaveBeenCalled();
   expect(await readFile(join(f.directory, "manifest.json"))).toEqual(before);
   expect(await readdir(f.directory)).not.toContain("report.json");
+});
+
+test.each(["direct", "missing-parents", "output-ancestor-alias", "input-ancestor-alias", "second-archive"])(
+  "rejects output nested in an archive before fetching or report writes: %s", async layout => {
+    const run = await cli(), first = await archive();
+    const archives = [first], inputs = [first.directory];
+    let output = join(first.directory, "report");
+    if (layout === "missing-parents") output = join(first.directory, "new-parent", "new-child", "report");
+    if (layout === "output-ancestor-alias" || layout === "input-ancestor-alias") {
+      const alias = join(first.root, "parent-alias"); await symlink(first.root, alias, "dir");
+      if (layout === "output-ancestor-alias") output = join(alias, "archive", "new-parent", "report");
+      else inputs[0] = join(alias, "archive");
+    }
+    if (layout === "second-archive") {
+      const second = await archive(true); archives.push(second); inputs.push(second.directory);
+      output = join(second.directory, "new-parent", "report");
+    }
+    const snapshots = await Promise.all(archives.map(async item => {
+      const names = (await readdir(item.directory)).sort();
+      return { directory: item.directory, names, bytes: await Promise.all(names.map(name => readFile(join(item.directory, name)))) };
+    }));
+    const request = vi.fn(async (url: string) => response(resolvedEvent(url.endsWith("game-two"))));
+    const report = vi.fn(writeTailBacktestReport);
+    const result = await run([...inputs.flatMap(directory => ["--archive-dir", directory]), "--output-dir", output, "--fetch-settlements"], { request, report });
+    expect(result.exitCode, result.stderr).not.toBe(0);
+    expect(result.stderr).toContain("TAIL_BACKTEST_OUTPUT_IN_ARCHIVE");
+    expect(result.stdout).toBe("");
+    expect(request).not.toHaveBeenCalled();
+    expect(report).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    for (const snapshot of snapshots) {
+      expect((await readdir(snapshot.directory)).sort()).toEqual(snapshot.names);
+      for (let i = 0; i < snapshot.names.length; i++) expect(await readFile(join(snapshot.directory, snapshot.names[i]!))).toEqual(snapshot.bytes[i]);
+    }
+  }
+);
+
+test("allows sibling reports with a shared archive-name prefix through ancestor aliases", async () => {
+  const run = await cli(), f = await archive(), names = (await readdir(f.directory)).sort();
+  const alias = join(f.root, "parent-alias"); await symlink(f.root, alias, "dir");
+  const output = join(alias, "archive-report", "new-parent", "report");
+  const request = vi.fn(async () => response({}));
+  const result = await run(["--archive-dir", join(alias, "archive"), "--output-dir", output], { request });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const files = JSON.parse(result.stdout);
+  expect(files.outputDirectory).toBe(output);
+  expect(JSON.parse(await readFile(files.manifestPath, "utf8"))).toMatchObject({ status: "complete" });
+  expect((await readdir(f.directory)).sort()).toEqual(names);
+  expect(request).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 test("rejects an existing output file or dangling symlink before fetching", async () => {

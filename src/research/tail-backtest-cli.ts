@@ -1,5 +1,5 @@
-import { lstat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { lstat, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { backtestTailArchives } from "./tail-backtest.js";
 import { collectTailSettlements, loadTailArchive } from "./tail-backtest-io.js";
@@ -38,7 +38,7 @@ Usage: tsx src/research/tail-backtest-cli.ts --archive-dir PATH [--archive-dir P
   --fetch-settlements                   Opt in to public Gamma/CLOB settlement requests
   --proxy-url URL                       Optional HTTP(S) proxy for those requests
   --help, -h                           Read-only help
-No network by default. Existing output paths are refused. No signing or live execution.
+No network by default. Existing output paths are refused; reports must be outside all input archives. No signing or live execution.
 Outputs: report.json, summary.csv, trials.csv, report.html, inputs.json, optional settlements.json, manifest.json.
 Unresolved PnL stays null; overlapping parameter windows and markets are not portfolio results.
 `;
@@ -113,6 +113,27 @@ async function assertNewOutput(directory: string): Promise<void> {
   throw new Error("TAIL_BACKTEST_OUTPUT_EXISTS: " + directory);
 }
 
+async function assertOutputOutsideArchives(directory: string, archives: readonly LoadedTailArchive[]): Promise<void> {
+  // The destination may have several missing parents. Resolve the existing ancestor's
+  // symlinks without creating directories, then append the still-missing path segments.
+  let ancestor = dirname(directory);
+  for (;;) {
+    try { await lstat(ancestor); break; }
+    catch (error) {
+      const parent = dirname(ancestor);
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === ancestor) throw error;
+      ancestor = parent;
+    }
+  }
+  const canonicalOutput = resolve(await realpath(ancestor), relative(ancestor, directory));
+  for (const { provenance } of archives) {
+    const path = relative(provenance.directory, canonicalOutput);
+    if (path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path))) {
+      throw new Error(`TAIL_BACKTEST_OUTPUT_IN_ARCHIVE: ${directory} is within ${provenance.directory}`);
+    }
+  }
+}
+
 function withSettlements(input: TailBacktestInput, evidence: SettlementCollection): TailBacktestInput {
   const key = (value: { marketId: string; conditionId: string; tokenId: string }) => JSON.stringify([value.conditionId, value.marketId, value.tokenId]);
   const identities = new Set(input.summary.windows.flatMap(window => window.markets.map(key)));
@@ -135,6 +156,7 @@ export async function runTailBacktestCli(args: readonly string[], deps: TailBack
       try { loaded.push(await loadTailArchive(directory, { sport: parsed.sport })); }
       catch (error) { throw new Error(`TAIL_BACKTEST_ARCHIVE_FAILED: ${directory}: ${String(error)}`, { cause: error }); }
     }
+    await assertOutputOutsideArchives(outputDirectory, loaded);
     const inputs = loaded.map(archive => archive.input);
     // Full engine preflight detects duplicate identities and malformed data before any public request.
     let result = backtestTailArchives(inputs, parsed.options);
