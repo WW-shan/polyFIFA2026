@@ -171,6 +171,7 @@ export interface TailBacktestTrial {
   modeledCost: number | null;
   modeledFee: number | null;
   modeledPayout: number | null;
+  /** Netted using exact decimal arithmetic before conversion to numeric output. */
   modeledPnl: number | null;
   payoutPerShare: number | null;
   settlement: TailSettlement | null;
@@ -201,6 +202,7 @@ export interface TailBacktestSummary {
   modeledFilledTrials: number;
   settledFilledTrials: number;
   zeroFillTrials: number;
+  /** Classified from exact net PnL before numeric output rounding. */
   winningFills: number;
   losingFills: number;
   breakEvenFills: number;

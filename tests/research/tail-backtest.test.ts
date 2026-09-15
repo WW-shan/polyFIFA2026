@@ -231,6 +231,56 @@ describe("touch evidence and strict SELL volume", () => {
   });
 });
 
+describe("exact decimal PnL accounting", () => {
+  test.each([1, 3])("classifies %s fully filled shares at 0.80 plus 2500bps as exact break-even", orderShares => {
+    const data = withChanges(archive(), [trade(1, entry + 100, "0.70", "10")]);
+    data.settlements!.forEach(settlement => { settlement.payout = 1 - settlement.payout; });
+    const result = backtestTailArchives([data], { ...options, prices: ["0.80"], shares: orderShares, makerFeeBps: 2_500 });
+    expect(result.summaries[0]).toMatchObject({ winningFills: 0, losingFills: 0, breakEvenFills: 1,
+      modeledPnl: 0, winnings: 0, losses: 0, pnlPerTrial: 0, returnOnFilledCapital: 0 });
+    expect(result.trials[0]).toMatchObject({ modeledFilledShares: orderShares, modeledPayout: orderShares, modeledPnl: 0 });
+  });
+
+  test.each([
+    { price: "0.7999999999999999999999", pnl: 1.25e-22, wins: 1, losses: 0 },
+    { price: "0.8000000000000000000001", pnl: -1.25e-22, wins: 0, losses: 1 }
+  ])("preserves genuine tiny PnL at $price rather than snapping it to break-even", ({ price, pnl, wins, losses }) => {
+    const data = withChanges(archive(), [trade(1, entry + 100, "0.70", "10")]);
+    data.settlements!.forEach(settlement => { settlement.payout = 1 - settlement.payout; });
+    const result = backtestTailArchives([data], { ...options, prices: [price], shares: 1, makerFeeBps: 2_500 });
+    expect(result.trials[0]?.modeledPnl).toBe(pnl);
+    expect(result.summaries[0]).toMatchObject({ modeledPnl: pnl, winningFills: wins, losingFills: losses, breakEvenFills: 0 });
+  });
+
+  test("nets fractional shares, payout and basis points before converting amounts to Numbers", () => {
+    const data = withChanges(archive(), [trade(1, entry + 100, "0.70", "0.3")]);
+    data.settlements![0]!.payout = 0.8005; data.settlements![1]!.payout = 0.1995;
+    const result = backtestTailArchives([data], { ...options, prices: ["0.80"], shares: 1, queueAheadShares: 0.2,
+      fillModel: "sell-through-volume", makerFeeBps: 6.25 });
+    expect(result.trials[0]).toMatchObject({ modeledFilledShares: 0.1, modeledCost: 0.08, modeledFee: 0.00005,
+      modeledPayout: 0.08005, modeledPnl: 0 });
+    expect(result.summaries[0]).toMatchObject({ winningFills: 0, losingFills: 0, breakEvenFills: 1, modeledPnl: 0 });
+  });
+
+  test("summary netting retains a tiny residual when larger profits and losses cancel", () => {
+    const inputs = [
+      { game: "profit", payout: 1, opposite: 0 },
+      { game: "tiny", payout: 0.8000000000000002, opposite: 0.1999999999999998 },
+      { game: "loss", payout: 0.6, opposite: 0.4 }
+    ].map(({ game, payout, opposite }) => {
+      const data = withChanges(archive(), [trade(1, entry + 100, "0.70", "10")]);
+      data.settlements![0]!.payout = payout; data.settlements![1]!.payout = opposite;
+      return distinctGame(data, game);
+    });
+    const config = { ...options, prices: ["0.80"], shares: 1 };
+    const result = backtestTailArchives(inputs, config);
+    expect(result.trials[1]?.modeledPnl).toBe(2e-16);
+    expect(result.summaries[0]).toMatchObject({ modeledPnl: 2e-16, winningFills: 2, losingFills: 1, breakEvenFills: 0,
+      pnlTrialDenominator: 3, filledCapitalDenominator: 2.4 });
+    expect(backtestTailArchives([...inputs].reverse(), config).summaries).toEqual(result.summaries);
+  });
+});
+
 describe("coverage, exclusions and outcome accounting", () => {
   test.each<TailBookStatus>(["partial", "missing", "invalid", "feed_stale", "outside_run", "not_yet_known"])("%s holding data is excluded even if aggregate flags claim completeness", status => {
     const data = archive(); const row = data.seconds.find(row => row.tokenId === "A" && row.secondIndex === 2)!;

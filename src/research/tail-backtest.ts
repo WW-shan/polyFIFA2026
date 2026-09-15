@@ -44,13 +44,34 @@ function rounded(value: number): number { return value === 0 ? 0 : Number(value.
 
 // Fixed decimal units avoid fractional queue dust (e.g. 0.1 + 0.2 - 0.3).
 const SHARE_SCALE = TAIL_BACKTEST_LIMITS.decimalCharacters;
-function units(value: string | number): bigint {
+function units(value: string | number, scale: number = SHARE_SCALE): bigint {
   const [whole = "0", fraction = ""] = decimal(value)!.key.split(".");
-  return BigInt(whole + fraction.padEnd(SHARE_SCALE, "0"));
+  return BigInt(whole + fraction.padEnd(scale, "0"));
 }
 function shares(value: bigint): number {
   const digits = value.toString().padStart(SHARE_SCALE + 1, "0");
   return Number(digits.slice(0, -SHARE_SCALE) + "." + digits.slice(-SHARE_SCALE));
+}
+
+// Number inputs can have at most 324 fractional decimal places (Number.MIN_VALUE).
+// This scale represents every supported shares * price * fee / 10000 exactly; no digits are discarded.
+const NUMBER_SCALE = 324;
+const MONEY_SCALE = SHARE_SCALE * 2 + NUMBER_SCALE + 4;
+const COST_SCALE_FACTOR = 10n ** BigInt(NUMBER_SCALE + 4);
+const PAYOUT_SCALE_FACTOR = 10n ** BigInt(SHARE_SCALE + 4);
+interface ExactAmounts { filled: bigint; cost: bigint; fee: bigint; payout: bigint | null; pnl: bigint | null }
+function exactAmounts(trial: TailBacktestTrial, filled: bigint): ExactAmounts {
+  const costProduct = filled * units(trial.bidPrice);
+  const cost = costProduct * COST_SCALE_FACTOR;
+  const fee = costProduct * units(trial.makerFeeBps, NUMBER_SCALE);
+  const payout = filled === 0n ? 0n : trial.payoutPerShare === null ? null
+    : filled * units(trial.payoutPerShare, NUMBER_SCALE) * PAYOUT_SCALE_FACTOR;
+  return { filled, cost, fee, payout, pnl: payout === null ? null : payout - cost - fee };
+}
+function money(value: bigint): number {
+  const negative = value < 0n;
+  const digits = (negative ? -value : value).toString().padStart(MONEY_SCALE + 1, "0");
+  return rounded(Number((negative ? "-" : "") + digits.slice(0, -MONEY_SCALE) + "." + digits.slice(-MONEY_SCALE)));
 }
 
 function effectiveOptions(input: TailBacktestOptions = {}): EffectiveTailBacktestOptions {
@@ -514,7 +535,7 @@ function addExclusion(trial: TailBacktestTrial, exclusion: TailBacktestExclusion
 }
 
 function trialFor(source: IndexedSource, indexed: IndexedWindow, outcomes: IndexedToken[], bidPrice: string, windowSeconds: number,
-  options: EffectiveTailBacktestOptions): TailBacktestTrial {
+  options: EffectiveTailBacktestOptions, accounting: Map<TailBacktestTrial, ExactAmounts>): TailBacktestTrial {
   const { window } = indexed, market = outcomes[0]!.market;
   // Older TailSummary archives carry explicit source labels without optional compact witnesses.
   const finishKnown = window.endAtMs !== null && window.finishSources.length > 0 &&
@@ -577,7 +598,7 @@ function trialFor(source: IndexedSource, indexed: IndexedWindow, outcomes: Index
   if (!coverage.price.bookEvidenceCoherent) addExclusion(trial, "inconsistent-book-evidence");
   if (options.requireFreshContext && !coverage.context.complete) addExclusion(trial, "context-not-fresh");
   trial.eligible = trial.exclusions.length === 0;
-  if (token) simulate(trial, token, indexed, source, coverage.rows, options);
+  if (token) simulate(trial, token, indexed, source, coverage.rows, options, accounting);
   return trial;
 }
 
@@ -591,7 +612,7 @@ function rememberTouch(trial: TailBacktestTrial, evidence: TailTouchEvidence): v
 }
 
 function simulate(trial: TailBacktestTrial, token: IndexedToken, indexed: IndexedWindow, source: IndexedSource, rows: TailSecond[],
-  options: EffectiveTailBacktestOptions): void {
+  options: EffectiveTailBacktestOptions, accounting: Map<TailBacktestTrial, ExactAmounts>): void {
   const entry = trial.entryAtMs!, expiry = trial.expiryAtMs!;
   const queue = units(options.queueAheadShares), requested = units(options.shares);
   let through = 0n, equal = 0n, touchedShares = 0n;
@@ -632,22 +653,26 @@ function simulate(trial: TailBacktestTrial, token: IndexedToken, indexed: Indexe
   const filled = options.fillModel === "quote-touch-assumed" ? (trial.touched ? requested : 0n) : (available < requested ? available : requested);
   trial.modeledFilledShares = shares(filled);
   trial.firstModeledFillAtMs = filled === 0n ? null : options.fillModel === "quote-touch-assumed" ? trial.firstTouchAtMs : firstVolumeFillAtMs;
-  trial.modeledCost = rounded(trial.modeledFilledShares * Number(trial.bidPrice));
-  trial.modeledFee = rounded(trial.modeledCost * options.makerFeeBps / 10_000);
-  if (filled === 0n) { trial.modeledPayout = 0; trial.modeledPnl = 0; trial.pnlEligible = true; }
-  else if (trial.payoutPerShare !== null) {
-    trial.modeledPayout = rounded(trial.modeledFilledShares * trial.payoutPerShare);
-    trial.modeledPnl = rounded(trial.modeledPayout - trial.modeledCost - trial.modeledFee); trial.pnlEligible = true;
-  }
+  const amounts = exactAmounts(trial, filled); accounting.set(trial, amounts);
+  trial.modeledCost = money(amounts.cost); trial.modeledFee = money(amounts.fee);
+  trial.modeledPayout = amounts.payout === null ? null : money(amounts.payout);
+  trial.modeledPnl = amounts.pnl === null ? null : money(amounts.pnl);
+  trial.pnlEligible = amounts.pnl !== null;
 }
 
-function summarize(trials: TailBacktestTrial[]): TailBacktestSummary[] {
-  const groups = new Map<string, { summary: TailBacktestSummary; games: Set<string>; sources: Set<string> }>();
+interface ExactTotals {
+  filled: bigint; cost: bigint; fee: bigint; unresolvedCost: bigint; unresolvedFee: bigint;
+  payout: bigint; pnl: bigint; winnings: bigint; losses: bigint; capital: bigint;
+}
+function summarize(trials: TailBacktestTrial[], accounting: Map<TailBacktestTrial, ExactAmounts>): TailBacktestSummary[] {
+  const groups = new Map<string, { summary: TailBacktestSummary; games: Set<string>; sources: Set<string>; totals: ExactTotals }>();
   for (const trial of trials) {
     const groupKey = key(trial.sport, trial.marketType, trial.bidPrice, trial.windowSeconds, trial.fillModel);
     let group = groups.get(groupKey);
     if (!group) {
-      group = { games: new Set(), sources: new Set(), summary: {
+      group = { games: new Set(), sources: new Set(), totals: {
+        filled: 0n, cost: 0n, fee: 0n, unresolvedCost: 0n, unresolvedFee: 0n, payout: 0n, pnl: 0n, winnings: 0n, losses: 0n, capital: 0n
+      }, summary: {
         sport: trial.sport, marketType: trial.marketType, bidPrice: trial.bidPrice, windowSeconds: trial.windowSeconds, windowBasis: "match-finish",
         fillModel: trial.fillModel, orderShares: trial.orderShares, queueAheadShares: trial.queueAheadShares, makerFeeBps: trial.makerFeeBps,
         trials: 0, games: 0, sources: 0, eligibleTrials: 0, excludedTrials: 0, unresolvedTrials: 0, pnlEligibleTrials: 0,
@@ -658,7 +683,7 @@ function summarize(trials: TailBacktestTrial[]): TailBacktestSummary[] {
         pnlPerTrial: null, returnOnFilledCapital: null, exclusions: {}
       } }; groups.set(groupKey, group);
     }
-    const summary = group.summary;
+    const { summary, totals } = group;
     summary.trials++; group.games.add(trial.windowKey); group.sources.add(trial.sourceId);
     if (trial.priceCoverage.complete) summary.priceCompleteTrials++;
     if (trial.contextCoverage.complete) summary.contextCompleteTrials++;
@@ -669,30 +694,34 @@ function summarize(trials: TailBacktestTrial[]): TailBacktestSummary[] {
     }
     summary.eligibleTrials++;
     if (trial.touched) summary.touchedTrials++;
-    const filled = trial.modeledFilledShares!, cost = trial.modeledCost!, fee = trial.modeledFee!;
-    summary.modeledFilledShares = rounded(summary.modeledFilledShares + filled);
-    summary.modeledCost = rounded(summary.modeledCost + cost); summary.modeledFees = rounded(summary.modeledFees + fee);
-    if (filled > 0) summary.modeledFilledTrials++; else summary.zeroFillTrials++;
+    const amounts = accounting.get(trial)!, { filled, cost, fee } = amounts;
+    totals.filled += filled; totals.cost += cost; totals.fee += fee;
+    if (filled > 0n) summary.modeledFilledTrials++; else summary.zeroFillTrials++;
     if (!trial.pnlEligible) {
       summary.unresolvedTrials++;
-      summary.unresolvedFilledCost = rounded(summary.unresolvedFilledCost + cost);
-      summary.unresolvedFilledFees = rounded(summary.unresolvedFilledFees + fee);
+      totals.unresolvedCost += cost; totals.unresolvedFee += fee;
       continue;
     }
     summary.pnlEligibleTrials++; summary.pnlTrialDenominator++;
-    const pnl = trial.modeledPnl!;
-    summary.modeledPayout = rounded((summary.modeledPayout ?? 0) + trial.modeledPayout!);
-    summary.modeledPnl = rounded((summary.modeledPnl ?? 0) + pnl);
-    if (filled > 0) {
-      summary.settledFilledTrials++; summary.filledCapitalDenominator = rounded(summary.filledCapitalDenominator + cost + fee);
-      if (pnl > 0) { summary.winningFills++; summary.winnings = rounded(summary.winnings + pnl); }
-      else if (pnl < 0) { summary.losingFills++; summary.losses = rounded(summary.losses - pnl); }
+    const pnl = amounts.pnl!;
+    totals.payout += amounts.payout!; totals.pnl += pnl;
+    if (filled > 0n) {
+      summary.settledFilledTrials++; totals.capital += cost + fee;
+      if (pnl > 0n) { summary.winningFills++; totals.winnings += pnl; }
+      else if (pnl < 0n) { summary.losingFills++; totals.losses -= pnl; }
       else summary.breakEvenFills++;
       if (trial.payoutPerShare !== 0 && trial.payoutPerShare !== 1) summary.splitPayoutFills++;
     }
   }
-  return [...groups.values()].map(({ summary, games, sources }) => {
+  return [...groups.values()].map(({ summary, games, sources, totals }) => {
     summary.games = games.size; summary.sources = sources.size;
+    summary.modeledFilledShares = rounded(shares(totals.filled));
+    summary.modeledCost = money(totals.cost); summary.modeledFees = money(totals.fee);
+    summary.unresolvedFilledCost = money(totals.unresolvedCost); summary.unresolvedFilledFees = money(totals.unresolvedFee);
+    summary.modeledPayout = summary.pnlEligibleTrials > 0 ? money(totals.payout) : null;
+    summary.modeledPnl = summary.pnlEligibleTrials > 0 ? money(totals.pnl) : null;
+    summary.winnings = money(totals.winnings); summary.losses = money(totals.losses);
+    summary.filledCapitalDenominator = money(totals.capital);
     summary.pnlPerTrial = summary.pnlTrialDenominator > 0 ? rounded(summary.modeledPnl! / summary.pnlTrialDenominator) : null;
     summary.returnOnFilledCapital = summary.filledCapitalDenominator > 0 ? rounded(summary.modeledPnl! / summary.filledCapitalDenominator) : null;
     return summary;
@@ -719,21 +748,22 @@ export function backtestTailArchives(inputs: readonly TailBacktestInput[], input
     if (projectedEvidence > TAIL_BACKTEST_LIMITS.evidenceItems) optionsError(`expanded evidence items exceed ${TAIL_BACKTEST_LIMITS.evidenceItems}`);
   }
   const trials: TailBacktestTrial[] = [];
+  const accounting = new Map<TailBacktestTrial, ExactAmounts>();
   for (const source of sources) for (const indexed of source.windows) for (const outcomes of indexed.markets.values())
-    for (const windowSeconds of options.windowsSeconds) for (const price of options.prices) trials.push(trialFor(source, indexed, outcomes, price, windowSeconds, options));
+    for (const windowSeconds of options.windowsSeconds) for (const price of options.prices) trials.push(trialFor(source, indexed, outcomes, price, windowSeconds, options, accounting));
   return {
     schemaVersion: 1, basis: "received-order-book-tail", execution: "hypothetical", options,
     sources: sources.map(({ input }) => ({ sourceId: input.sourceId, sourceRunId: input.summary.runId, sport: input.sport,
       archiveWindowSeconds: input.summary.windowSeconds, firstReceivedAtMs: input.summary.firstReceivedAtMs, lastReceivedAtMs: input.summary.lastReceivedAtMs,
       windowKeys: input.summary.windows.map(window => window.key), warnings: [...input.summary.warnings] })),
-    trials, summaries: summarize(trials), warnings: [
+    trials, summaries: summarize(trials, accounting), warnings: [
       "All fills are hypothetical. Quote-touch-assumed assigns the full requested size to a valid ask or direct SELL touch; it assumes execution without proof of queue position, available depth or latency. Fixed queue-ahead applies only to sell-through-volume.",
       "Sell-through-volume uses direct SELL prints strictly below the limit, subtracts fixed queue-ahead once and caps at requested shares. BUY and equal-price prints supply no strict-through volume; this is not proof of execution.",
       "Entries use retrospective actual match finish and a complete book second known before entry. Match finish is not an observed per-set finish or a live prediction of when the match ends.",
       "Parameter alternatives, overlapping windows and same-game markets are not independent portfolio trades. Do not add their scenario profits as a portfolio return.",
       "A small or tiny in-sample result is not proof of optimal future expectation. Recorded market discovery, receipt timing and hypothetical fills limit the inference.",
       "Price coverage and context freshness are separate. Excluded trials have null modeled amounts; unresolved modeled fills have null PnL and are omitted from profit/return denominators. Complete zero-fills contribute zero PnL.",
-      "Reported PnL uses the resting limit and configured notional maker fee; derived numeric amounts are rounded to 15 significant digits. Raw price strings and exact decimal comparisons are preserved."
+      "Cost, fee, payout and PnL use exact decimal netting and aggregation at the resting limit and configured notional maker fee. Only numeric output amounts are rounded to 15 significant digits; fill classifications use exact net amounts. Raw price strings are preserved."
     ]
   };
 }
