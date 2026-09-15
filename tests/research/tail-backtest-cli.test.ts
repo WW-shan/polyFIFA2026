@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -106,7 +106,7 @@ test("runs a real exported archive offline and preserves exact price strings and
     "--fill-model", "sell-through-volume", "--require-fresh-context"], { request });
   expect(result.exitCode, result.stderr).toBe(0);
   const paths = JSON.parse(result.stdout);
-  expect(paths.reportPath).toBe(join(f.output, "report.json"));
+  expect(paths.reportPath).toBe(join(await realpath(f.root), "report", "report.json"));
   const report = JSON.parse(await readFile(paths.reportPath, "utf8"));
   expect(report.options).toEqual({ prices: ["0.70000000000000001", "0.8000"], windowsSeconds: [60, 180], entryMinBid: "0.9000",
     shares: 2.5, queueAheadShares: .25, makerFeeBps: 12.5, fillModel: "sell-through-volume", requireFreshContext: true });
@@ -196,14 +196,63 @@ test("allows sibling reports with a shared archive-name prefix through ancestor 
   const run = await cli(), f = await archive(), names = (await readdir(f.directory)).sort();
   const alias = join(f.root, "parent-alias"); await symlink(f.root, alias, "dir");
   const output = join(alias, "archive-report", "new-parent", "report");
+  const canonicalOutput = join(await realpath(f.root), "archive-report", "new-parent", "report");
   const request = vi.fn(async () => response({}));
-  const result = await run(["--archive-dir", join(alias, "archive"), "--output-dir", output], { request });
+  const report = vi.fn(writeTailBacktestReport);
+  const result = await run(["--archive-dir", join(alias, "archive"), "--output-dir", output], { request, report });
   expect(result.exitCode, result.stderr).toBe(0);
   const files = JSON.parse(result.stdout);
-  expect(files.outputDirectory).toBe(output);
+  expect(files.outputDirectory).toBe(canonicalOutput);
+  expect(report.mock.calls[0]![1].outputDirectory).toBe(canonicalOutput);
+  for (const key of ["reportPath", "summaryPath", "trialsPath", "htmlPath", "inputsPath", "manifestPath"]) {
+    expect(files[key]).toBe(await realpath(files[key]));
+  }
   expect(JSON.parse(await readFile(files.manifestPath, "utf8"))).toMatchObject({ status: "complete" });
   expect((await readdir(f.directory)).sort()).toEqual(names);
   expect(request).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each(["archive", "other-sibling"])("rejects an output alias retargeted during settlement fetching to %s", async target => {
+  const run = await cli(), f = await archive(), names = (await readdir(f.directory)).sort();
+  const safe = join(f.root, "safe"), other = join(f.root, "other");
+  await mkdir(safe); await mkdir(other);
+  const alias = join(f.root, "output-alias"); await symlink(safe, alias, "dir");
+  const request = vi.fn(async () => {
+    await unlink(alias); await symlink(target === "archive" ? f.directory : other, alias, "dir");
+    return response(resolvedEvent());
+  });
+  const report = vi.fn(writeTailBacktestReport);
+  const result = await run(["--archive-dir", f.directory, "--output-dir", join(alias, "report"), "--fetch-settlements"], { request, report });
+  expect(result.exitCode, result.stderr).not.toBe(0);
+  expect(result.stderr).toContain(target === "archive" ? "TAIL_BACKTEST_OUTPUT_IN_ARCHIVE" : "TAIL_BACKTEST_OUTPUT_CHANGED");
+  expect(result.stdout).toBe("");
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(report).not.toHaveBeenCalled();
+  expect((await readdir(f.directory)).sort()).toEqual(names);
+  expect(await readdir(safe)).toEqual([]);
+  expect(await readdir(other)).toEqual([]);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test("writes to the checked canonical destination even if the original alias changes at the writer boundary", async () => {
+  const run = await cli(), f = await archive(), names = (await readdir(f.directory)).sort();
+  const safe = join(f.root, "safe"); await mkdir(safe);
+  const alias = join(f.root, "output-alias"); await symlink(safe, alias, "dir");
+  const canonicalOutput = join(await realpath(safe), "report");
+  const report = vi.fn(async (...args: Parameters<typeof writeTailBacktestReport>) => {
+    await unlink(alias); await symlink(f.directory, alias, "dir");
+    return writeTailBacktestReport(...args);
+  });
+  const result = await run(["--archive-dir", f.directory, "--output-dir", join(alias, "report")], { report });
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(report.mock.calls[0]![1].outputDirectory).toBe(canonicalOutput);
+  const files = JSON.parse(result.stdout);
+  expect(files.outputDirectory).toBe(canonicalOutput);
+  expect(files.manifestPath).toBe(join(canonicalOutput, "manifest.json"));
+  expect(JSON.parse(await readFile(files.manifestPath, "utf8"))).toMatchObject({ status: "complete" });
+  expect((await readdir(f.directory)).sort()).toEqual(names);
+  expect(await readdir(safe)).toEqual(["report"]);
   expect(fetch).not.toHaveBeenCalled();
 });
 

@@ -113,7 +113,7 @@ async function assertNewOutput(directory: string): Promise<void> {
   throw new Error("TAIL_BACKTEST_OUTPUT_EXISTS: " + directory);
 }
 
-async function assertOutputOutsideArchives(directory: string, archives: readonly LoadedTailArchive[]): Promise<void> {
+async function assertOutputOutsideArchives(directory: string, archives: readonly LoadedTailArchive[]): Promise<string> {
   // The destination may have several missing parents. Resolve the existing ancestor's
   // symlinks without creating directories, then append the still-missing path segments.
   let ancestor = dirname(directory);
@@ -132,6 +132,7 @@ async function assertOutputOutsideArchives(directory: string, archives: readonly
       throw new Error(`TAIL_BACKTEST_OUTPUT_IN_ARCHIVE: ${directory} is within ${provenance.directory}`);
     }
   }
+  return canonicalOutput;
 }
 
 function withSettlements(input: TailBacktestInput, evidence: SettlementCollection): TailBacktestInput {
@@ -148,15 +149,15 @@ export async function runTailBacktestCli(args: readonly string[], deps: TailBack
     const parsed = parseArgs(args);
     if (parsed.help) return { exitCode: 0, stdout: HELP, stderr: "" };
     deps.signal?.throwIfAborted();
-    const outputDirectory = resolve(parsed.outputDirectory);
-    await assertNewOutput(outputDirectory);
+    const requestedOutputDirectory = resolve(parsed.outputDirectory);
+    await assertNewOutput(requestedOutputDirectory);
     const loaded: LoadedTailArchive[] = [];
     for (const directory of parsed.archiveDirectories) {
       deps.signal?.throwIfAborted();
       try { loaded.push(await loadTailArchive(directory, { sport: parsed.sport })); }
       catch (error) { throw new Error(`TAIL_BACKTEST_ARCHIVE_FAILED: ${directory}: ${String(error)}`, { cause: error }); }
     }
-    await assertOutputOutsideArchives(outputDirectory, loaded);
+    const outputDirectory = await assertOutputOutsideArchives(requestedOutputDirectory, loaded);
     const inputs = loaded.map(archive => archive.input);
     // Full engine preflight detects duplicate identities and malformed data before any public request.
     let result = backtestTailArchives(inputs, parsed.options);
@@ -171,6 +172,13 @@ export async function runTailBacktestCli(args: readonly string[], deps: TailBack
     }
     deps.signal?.throwIfAborted();
     const provenance = loaded.map(({ input, provenance }) => ({ ...provenance, sourceId: input.sourceId, sourceRunId: input.summary.runId, sport: input.sport }));
+    await assertNewOutput(outputDirectory);
+    // Fetching can change ancestor links. Recheck the requested path, but write only
+    // to the canonical destination checked before fetching, never through its alias.
+    if (await assertOutputOutsideArchives(requestedOutputDirectory, loaded) !== outputDirectory) {
+      throw new Error("TAIL_BACKTEST_OUTPUT_CHANGED: " + requestedOutputDirectory);
+    }
+    deps.signal?.throwIfAborted();
     const files = await (deps.report ?? writeTailBacktestReport)(result, { outputDirectory, provenance, ...(evidence ? { evidence } : {}) });
     const eligibleTrials = result.trials.filter(trial => trial.eligible).length;
     const notices: string[] = [];
