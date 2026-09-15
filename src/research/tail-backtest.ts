@@ -416,7 +416,9 @@ function rowFacts(row: TailSecond, token: IndexedToken, indexed: IndexedWindow, 
     Math.abs(tradeShares - row.tradeShares) <= 1e-10 * Math.max(1, tradeShares, row.tradeShares);
   const lastBook = books.at(-1), previous = token.rows.get(row.secondIndex - 1);
   const active = row.status === "observed" || row.status === "carried";
-  let bookCoherent = true;
+  // Closed rows may retain historical timestamps/counters, but cannot also expose a valid active book.
+  let bookCoherent = row.status !== "closed" || (!row.wholeSecondValid && row.bestBid === null && row.bestAsk === null &&
+    (row.bids?.length ?? 0) === 0 && (row.asks?.length ?? 0) === 0);
   if (active && row.wholeSecondValid) {
     bookCoherent = (row.status === "observed") === (row.bookUpdates > 0);
     if (row.bookUpdates === 0) bookCoherent &&= row.bookObservedAtMs !== null && row.bookObservedAtMs < row.startAtMs;

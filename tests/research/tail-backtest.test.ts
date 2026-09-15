@@ -249,15 +249,42 @@ describe("coverage, exclusions and outcome accounting", () => {
     expect(trial.exclusions).toContain("holding-data-incomplete"); expect(trial.modeledCost).toBeNull();
   });
 
-  test("observed closed rows retain their own coverage category and cannot create fills", () => {
-    const data = archive();
+  test.each(["null", "empty"] as const)("legitimate closed rows with %s depth retain coverage and ignore late SELL prints", depth => {
+    const data = withChanges(archive(), [trade(1, entry + 1_100)]);
     for (const row of data.seconds.filter(row => row.tokenId === "A" && row.secondIndex >= 2)) {
-      row.status = "closed"; row.wholeSecondValid = false; row.bestBid = row.bestAsk = null; row.bids = row.asks = null;
+      row.status = "closed"; row.wholeSecondValid = false; row.bestBid = row.bestAsk = null;
+      row.bids = depth === "null" ? null : []; row.asks = depth === "null" ? null : [];
+      row.minBestBid = row.maxBestBid = row.minBestAsk = row.maxBestAsk = null;
     }
     Object.assign(data.summary.tokens[0]!, { validSeconds: 2, closedSeconds: 2 });
     const trial = backtestTailArchives([data], options).trials[0]!;
-    expect(trial).toMatchObject({ eligible: true, modeledFilledShares: 0, modeledPnl: 0,
+    expect(trial).toMatchObject({ eligible: true, touched: false, modeledFilledShares: 0, modeledPnl: 0,
       priceCoverage: { validSeconds: 1, closedSeconds: 2, missingSeconds: 0, absentSeconds: 0, complete: true } });
+  });
+
+  test.each(["quote-touch-assumed", "sell-through-volume"] as const)("contradictory closed rows cannot hide SELL prints as eligible zero-fills in %s", fillModel => {
+    const data = withChanges(archive(), [trade(1, entry + 1_100)]);
+    data.seconds.find(row => row.tokenId === "A" && row.secondIndex === 2)!.status = "closed";
+    Object.assign(data.summary.tokens[0]!, { validSeconds: 3, closedSeconds: 1 });
+    const result = backtestTailArchives([data], { ...options, fillModel });
+    expect(result.trials[0]).toMatchObject({ eligible: false, pnlEligible: false, modeledFilledShares: null, modeledCost: null,
+      modeledFee: null, modeledPnl: null, priceCoverage: { complete: false, bookEvidenceCoherent: false } });
+    expect(result.trials[0]?.exclusions).toContain("inconsistent-book-evidence");
+    expect(result.summaries[0]).toMatchObject({ eligibleTrials: 0, excludedTrials: 1, zeroFillTrials: 0, pnlEligibleTrials: 0,
+      modeledPnl: null, pnlTrialDenominator: 0, filledCapitalDenominator: 0 });
+  });
+
+  test.each([
+    { label: "wholeSecondValid with empty books", wholeSecondValid: true, bid: null, ask: null },
+    { label: "retained bid", wholeSecondValid: false, bid: "0.95", ask: null },
+    { label: "retained ask", wholeSecondValid: false, bid: null, ask: "0.97" }
+  ])("closed rows with $label are inconsistent even when aggregate counts agree", ({ wholeSecondValid, bid, ask }) => {
+    const data = archive(), row = data.seconds.find(row => row.tokenId === "A" && row.secondIndex === 2)!;
+    setBook(row, bid, ask); row.status = "closed"; row.wholeSecondValid = wholeSecondValid;
+    Object.assign(data.summary.tokens[0]!, { validSeconds: 3, closedSeconds: 1 });
+    const trial = backtestTailArchives([data], options).trials[0]!;
+    expect(trial).toMatchObject({ eligible: false, modeledFilledShares: null, modeledCost: null, modeledPnl: null });
+    expect(trial.exclusions).toContain("inconsistent-book-evidence");
   });
 
   test("missing context is displayed separately and gates only when requested", () => {
