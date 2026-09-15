@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, open, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, open, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { Agent, request, Server, type IncomingHttpHeaders, type OutgoingHttpHeaders } from "node:http";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -6,9 +6,18 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { runInNewContext } from "node:vm";
+import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CapturedGame, ContinuousStatus } from "../../src/collector/continuous-state.js";
 import { renderTailViewer } from "../../src/collector/tail-view.js";
+import { exportTail } from "../../src/collector/tail-export.js";
+import { fixtureRecords } from "./tail-fixture.js";
+import * as archiveFs from "node:fs/promises";
+
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, opendir: vi.fn(actual.opendir) };
+});
 
 type StatusServer = { port: number; close(): Promise<void> };
 type HttpResult = { status: number; headers: IncomingHttpHeaders; body: Buffer };
@@ -76,6 +85,8 @@ class Element {
   children: Element[] = [];
   attributes: Record<string, string> = {};
   private ownText = "";
+  disabled = false;
+  private listeners: Array<() => unknown> = [];
   constructor(readonly tagName: string) {}
   get textContent(): string { return this.ownText + this.children.map(child => child.textContent).join(""); }
   set textContent(value: string) { this.ownText = String(value ?? ""); this.children = []; }
@@ -84,6 +95,8 @@ class Element {
   getAttribute(name: string): string | null { return this.attributes[name] ?? null; }
   append(...nodes: Element[]): void { this.children.push(...nodes); }
   replaceChildren(...nodes: Element[]): void { this.ownText = ""; this.children = nodes; }
+  addEventListener(event: string, listener: () => unknown): void { if (event === "click") this.listeners.push(listener); }
+  click(): void { if (!this.disabled) for (const listener of this.listeners) listener(); }
   find(predicate: (element: Element) => boolean): Element[] {
     return this.children.flatMap(child => [...(predicate(child) ? [child] : []), ...child.find(predicate)]);
   }
@@ -106,7 +119,7 @@ async function openDashboard(server: StatusServer) {
     AbortSignal,
     setTimeout: (callback: () => unknown, delay: number) => { timers.push(callback); delays.push(delay); return timers.length; },
     fetch: async (path: string, init: RequestInit) => {
-      expect(path).toBe("/api/status");
+      expect(path === "/api/status" || path.startsWith("/api/archives?")).toBe(true);
       requests.push({ path, init });
       const response = await http(server.port, path);
       return { ok: response.status === 200, json: async () => JSON.parse(response.body.toString()) };
@@ -114,6 +127,7 @@ async function openDashboard(server: StatusServer) {
   };
   runInNewContext(scripts[0]![1]!, context, { timeout: 1000 });
   await vi.waitFor(() => expect(timers.length).toBe(1));
+  if (nodes.has("archives-health")) await vi.waitFor(() => expect(nodes.get("archives-health")!.textContent).not.toContain("正在读取"));
   return {
     html, headers: result.headers, context, requests, delays,
     get(id: string): Element { expect(nodes.has(id), id).toBe(true); return nodes.get(id)!; },
@@ -134,6 +148,14 @@ async function archiveFixture() {
   const server = await start();
   const url = (filename = "seconds.ndjson") => `/exports/${encodeURIComponent(captured.key)}/${filename}`;
   return { server, captured, outputDirectory, url };
+}
+
+async function storedArchive(id = "stored-archive") {
+  const runDirectory = join(dataRoot, "source-run");
+  await mkdir(runDirectory, { recursive: true });
+  await writeFile(join(runDirectory, "1970-01-01-000000.ndjson"), fixtureRecords().map(row => JSON.stringify(row)).join("\n") + "\n");
+  return exportTail({ runDirectory, outputDirectory: join(dataRoot, "exports", id),
+    maxFeedSilenceMs: 600_000, sportsStaleAfterMs: 30_000 });
 }
 
 describe("continuous loopback status server", () => {
@@ -184,7 +206,7 @@ describe("continuous loopback status server", () => {
 
   test.each(["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"])("rejects %s with 405 on every route", async method => {
     const server = await start();
-    for (const path of ["/", "/api/status", "/exports/game%3A1/viewer.html", "/unknown"]) {
+    for (const path of ["/", "/api/status", "/api/archives", "/archives/id/viewer.html", "/exports/game%3A1/viewer.html", "/unknown"]) {
       const result = await http(server.port, path, { method });
       expect(result.status, path).toBe(405);
       expect(result.headers.allow).toBe("GET, HEAD");
@@ -283,7 +305,7 @@ describe("Chinese read-only dashboard", () => {
       expect(content, tag).toBeDefined();
       expect(csp).toContain(`${tag}-src 'sha256-${createHash("sha256").update(content!).digest("base64")}'`);
     }
-    expect(html).not.toMatch(/<(?:form|button|input)\b|\bon\w+=|<script[^>]+src=/i);
+    expect(html).not.toMatch(/<(?:form|input)\b|\bon\w+=|<script[^>]+src=/i);
     const head = await http(server.port, "/", { method: "HEAD" });
     expect(head.status).toBe(200);
     expect(head.body.length).toBe(0);
@@ -357,7 +379,7 @@ describe("Chinese read-only dashboard", () => {
     expect(view.get("free-gb").textContent).toBe("未知");
     expect(view.get("last-record-age").textContent).toBe("尚未收到");
     expect(view.get("received-records").textContent).toBe("58");
-    expect(view.requests).toHaveLength(2);
+    expect(view.requests.filter(request => request.path === "/api/status")).toHaveLength(2);
     for (const request of view.requests) expect(request.init).toMatchObject({ cache: "no-store", mode: "same-origin", redirect: "error" });
     expect(view.delays.every(delay => delay >= 1000 && delay <= 10_000)).toBe(true);
   });
@@ -374,6 +396,207 @@ describe("Chinese read-only dashboard", () => {
     unavailable = false;
     await view.refresh();
     expect(view.get("health").textContent).toContain("已刷新");
+  });
+});
+
+describe("historical archives after hot-state eviction", () => {
+  test("keeps a real complete archive readable with an empty hot game list", async () => {
+    await storedArchive();
+    const server = await start();
+    expect(status.games).toEqual([]);
+    const result = await http(server.port, "/exports/game%3A123/viewer.html");
+    expect(result.status).toBe(200);
+    expect(result.body.toString()).toContain("seconds.ndjson");
+  });
+
+  test("lists a real complete archive independently of the hot game list", async () => {
+    await storedArchive();
+    const server = await start();
+    const result = await http(server.port, "/api/archives");
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body.toString())).toMatchObject({ total: 1, entries: [
+      { id: "stored-archive", games: [{ key: "game:123", current: null }] }
+    ] });
+  });
+
+  test("renders historical links, stored readiness, absent live state and diagnostic counts honestly", async () => {
+    const result = await storedArchive();
+    await mkdir(join(dataRoot, "exports", "partial"));
+    const view = await openDashboard(await start());
+    expect(view.get("archives").children).toHaveLength(1);
+    expect(view.get("archives").textContent).toContain("A vs B");
+    expect(view.get("archives").textContent).toContain("当前热状态未保留");
+    expect(view.get("archives").textContent).toContain("存盘完成");
+    expect(view.get("archives-diagnostics").textContent).toContain("未完成 1");
+    expect(view.html).toContain("缺失数据不代表零成交");
+    expect(view.html).toContain("存盘质量不代表当前采集通过");
+    const links = view.get("archives").find(node => node.tagName === "a");
+    expect(links).toHaveLength(9);
+    for (const link of links) expect(link.getAttribute("href")).toBe(`/archives/stored-archive/${link.textContent}`);
+    const row = view.get("archives").children[0]!;
+    expect(row.children[4]!.textContent).toBe(String(result.summary.tokens.filter(q => q.observedWindowComplete && q.snapshotAuditPassed && q.validSeconds > 0).length));
+    expect(row.children[5]!.textContent).toBe(String(result.summary.tokens.filter(q => q.readyForReplay).length));
+  });
+
+  test.each(["failed", "running", "conflicted"])("never upgrades a present %s game from stale complete history", async kind => {
+    await storedArchive();
+    status.games = [game({ phase: kind === "running" ? "archiving" : "archive_failed", finishConflict: kind === "conflicted",
+      archive: { status: kind === "running" ? "running" : "failed", runId: "current-run", attempt: 2 } })];
+    const server = await start();
+    expect((await http(server.port, "/exports/game%3A123/viewer.html")).status).toBe(404);
+    const page = JSON.parse((await http(server.port, "/api/archives")).body.toString());
+    expect(page.entries[0].games[0].current).toEqual({ phase: status.games[0]!.phase,
+      archiveStatus: status.games[0]!.archive!.status, finishConflict: kind === "conflicted" });
+    expect(page.entries[0].games[0]).not.toHaveProperty("latest");
+    expect((await http(server.port, "/archives/stored-archive/viewer.html")).status).toBe(200);
+    const view = await openDashboard(server);
+    expect(view.get("games").find(node => node.tagName === "a")).toHaveLength(0);
+    expect(view.get("archives").textContent).toContain(kind === "running" ? "归档中" : "归档失败");
+    if (kind === "conflicted") expect(view.get("archives").textContent).toContain("终场时间存在冲突");
+    expect(view.get("archives").textContent).not.toMatch(/最新通过|当前通过/);
+  });
+
+  test("bounds HTTP pages and lets dashboard users navigate stored directory revisions", async () => {
+    const { outputDirectory } = await storedArchive("revision-00");
+    for (let i = 1; i <= 20; i++) await cp(outputDirectory, join(dataRoot, "exports", `revision-${String(i).padStart(2, "0")}`), { recursive: true });
+    const server = await start();
+    const first = JSON.parse((await http(server.port, "/api/archives?offset=0&limit=1")).body.toString());
+    const second = JSON.parse((await http(server.port, "/api/archives?offset=1&limit=1")).body.toString());
+    expect(first).toMatchObject({ total: 21, limit: 1, nextOffset: 1 });
+    expect(first.entries).toHaveLength(1);
+    expect(second.entries[0].id).not.toBe(first.entries[0].id);
+    for (const query of ["limit=0", "limit=101", "limit=1.1", "limit=NaN", "offset=-1", "offset=9007199254740992", "limit=1&limit=2", "offset=1&offset=2"]) {
+      expect((await http(server.port, "/api/archives?" + query)).status, query).toBe(400);
+    }
+    const view = await openDashboard(server);
+    expect(view.get("archives").children).toHaveLength(20);
+    expect(view.get("archives-prev").disabled).toBe(true);
+    view.get("archives-next").click();
+    await vi.waitFor(() => expect(view.get("archives").children).toHaveLength(1));
+    expect(view.get("archives-next").disabled).toBe(true);
+    view.get("archives-prev").click();
+    await vi.waitFor(() => expect(view.get("archives").children).toHaveLength(20));
+  });
+
+  test("keeps directory URLs durable across restart and current status failures", async () => {
+    await storedArchive();
+    const first = await start();
+    expect((await http(first.port, "/archives/stored-archive/viewer.html")).status).toBe(200);
+    await first.close();
+    const second = await start(() => { throw new Error("private status error"); });
+    expect((await http(second.port, "/archives/stored-archive/viewer.html")).status).toBe(200);
+    const page = await http(second.port, "/api/archives");
+    expect(page.status).toBe(200);
+    expect(JSON.parse(page.body.toString())).toMatchObject({ total: 1, liveStatusAvailable: false });
+    expect(page.body.toString()).not.toContain("private status error");
+  });
+
+  test("serves historical downloads with the existing fixed MIME, CSP, HEAD and range behavior", async () => {
+    const { outputDirectory } = await storedArchive();
+    const server = await start();
+    const bytes = await readFile(join(outputDirectory, "seconds.ndjson"));
+    for (const base of ["/archives/stored-archive/", "/exports/game%3A123/"]) {
+      for (const filename of filenames) {
+        const head = await http(server.port, base + filename, { method: "HEAD" });
+        expect(head.status, filename).toBe(200);
+        expect(head.body.length).toBe(0);
+        expect(head.headers["content-disposition"]).toBe(`${filename === "viewer.html" ? "inline" : "attachment"}; filename="${filename}"`);
+        if (filename === "viewer.html") expect(head.headers["content-security-policy"]).toContain("connect-src 'self'");
+      }
+      const range = await http(server.port, base + "seconds.ndjson", { headers: { range: "bytes=2-12" } });
+      expect(range.status).toBe(206);
+      expect(range.body).toEqual(bytes.subarray(2, 13));
+      expect(range.headers["content-range"]).toBe(`bytes 2-12/${bytes.length}`);
+      expect((await http(server.port, base + "seconds.ndjson", { headers: { range: "bytes=0-1,3-4" } })).status).toBe(416);
+    }
+  });
+
+  test("rejects traversal, non-allowlisted names and symlink replacements on historical URLs", async () => {
+    const { outputDirectory } = await storedArchive();
+    const server = await start();
+    expect((await http(server.port, "/archives/stored-archive/viewer.html")).status).toBe(200);
+    for (const path of ["../stored-archive/viewer.html", "%2e%2e/viewer.html", "%252e%252e/viewer.html", "stored-archive/%2e%2e/viewer.html",
+      "stored-archive%2fother/viewer.html", "stored-archive/%2576iewer.html", "stored-archive/%5cviewer.html", "stored-archive/viewer.html%00",
+      "%FF/viewer.html", "stored-archive/.env", "stored-archive/failure.json", "stored-archive/constructor", "stored-archive/%"]) {
+      expect((await http(server.port, "/archives/" + path)).status, path).toBe(404);
+    }
+    for (const path of ["/api/archives", "/archives/stored-archive/viewer.html"]) {
+      for (const headers of [{ host: "outside.invalid" }, { origin: "https://outside.invalid" }]) expect((await http(server.port, path, { headers })).status).toBe(403);
+    }
+    await rename(join(outputDirectory, "viewer.html"), join(dataRoot, "private-viewer"));
+    await symlink(join(dataRoot, "private-viewer"), join(outputDirectory, "viewer.html"));
+    expect((await http(server.port, "/archives/stored-archive/viewer.html")).status).toBe(404);
+    await rename(outputDirectory, join(dataRoot, "moved-archive"));
+    await symlink(join(dataRoot, "moved-archive"), outputDirectory);
+    expect((await http(server.port, "/archives/stored-archive/seconds.ndjson")).status).toBe(404);
+  });
+
+  test("links and downloads declared gzip raw exports without changing depth ranges", async () => {
+    const { outputDirectory } = await storedArchive();
+    const raw = await readFile(join(outputDirectory, "raw-events.ndjson"));
+    const compressed = gzipSync(raw);
+    await rename(join(outputDirectory, "raw-events.ndjson"), join(outputDirectory, "kept-raw"));
+    await writeFile(join(outputDirectory, "raw-events.ndjson.gz"), compressed);
+    const manifest = JSON.parse(await readFile(join(outputDirectory, "manifest.json"), "utf8"));
+    await writeFile(join(outputDirectory, "manifest.json"), JSON.stringify({ ...manifest, rawEventsFile: "raw-events.ndjson.gz" }));
+    const server = await start();
+    const result = await http(server.port, "/archives/stored-archive/raw-events.ndjson.gz");
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(compressed);
+    expect(result.headers["content-type"]).toBe("application/gzip");
+    expect(result.headers["content-encoding"]).toBeUndefined();
+    expect(result.headers["content-disposition"]).toBe('attachment; filename="raw-events.ndjson.gz"');
+    expect((await http(server.port, "/exports/game%3A123/raw-events.ndjson.gz")).status).toBe(200);
+    const view = await openDashboard(server);
+    const links = view.get("archives").find(node => node.tagName === "a");
+    expect(links.map(link => link.textContent)).toContain("raw-events.ndjson.gz");
+    expect(links.map(link => link.textContent)).not.toContain("raw-events.ndjson");
+    status.games = [game({ phase: "archived", archive: { status: "complete", runId: "tail-test", attempt: 1, outputDirectory } })];
+    await view.refresh();
+    const currentLinks = view.get("games").find(node => node.tagName === "a");
+    expect(currentLinks.map(link => link.textContent)).toContain("raw-events.ndjson.gz");
+    expect(currentLinks.map(link => link.textContent)).not.toContain("raw-events.ndjson");
+    expect(status.games[0]!.archive).not.toHaveProperty("rawEventsFile");
+  });
+
+  test("status polls stay responsive during a coalesced scan and newly failed games block fallback", async () => {
+    await storedArchive();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered = false;
+    const scans = vi.mocked(archiveFs.opendir).mockClear().mockImplementationOnce(async (...args) => {
+      entered = true;
+      await gate;
+      return actual.opendir(...args);
+    });
+    const server = await start();
+    const fallback = http(server.port, "/exports/game%3A123/viewer.html");
+    const history = http(server.port, "/api/archives");
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      for (let i = 0; i < 3; i++) expect((await http(server.port, "/api/status")).status).toBe(200);
+      expect(scans).toHaveBeenCalledTimes(1);
+      status.games = [game({ phase: "archive_failed", archive: { status: "failed", runId: "new-run", attempt: 2 } })];
+    } finally { release(); }
+    const [file, page] = await Promise.all([fallback, history]);
+    expect(file.status).toBe(404);
+    expect(JSON.parse(page.body.toString()).entries[0].games[0].current.archiveStatus).toBe("failed");
+  });
+
+  test("pins older directory revisions while the legacy absent-game route chooses the latest complete export", async () => {
+    const { outputDirectory } = await storedArchive("older");
+    const next = join(dataRoot, "exports", "newer");
+    await cp(outputDirectory, next, { recursive: true });
+    const original = await readFile(join(outputDirectory, "viewer.html"), "utf8");
+    await writeFile(join(next, "viewer.html"), original + "<!-- newer revision -->");
+    const manifest = JSON.parse(await readFile(join(outputDirectory, "manifest.json"), "utf8"));
+    await writeFile(join(outputDirectory, "manifest.json"), JSON.stringify({ ...manifest, createdAt: "2026-01-01T00:00:00Z" }));
+    await writeFile(join(next, "manifest.json"), JSON.stringify({ ...manifest, createdAt: "2026-01-02T00:00:00Z" }));
+    const server = await start();
+    expect((await http(server.port, "/exports/game%3A123/viewer.html")).body.toString()).toBe(original + "<!-- newer revision -->");
+    expect((await http(server.port, "/archives/older/viewer.html")).body.toString()).toBe(original);
+    expect((await http(server.port, "/archives/newer/viewer.html")).body.toString()).toBe(original + "<!-- newer revision -->");
   });
 });
 
