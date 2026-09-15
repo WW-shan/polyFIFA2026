@@ -1,10 +1,11 @@
-import { mkdir, open, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { replayTail } from "./tail-replay.js";
 import { tailOptions } from "./tail-catalog.js";
 import { renderTailViewer } from "./tail-view.js";
 import { csvDocument } from "../research/report.js";
+import { compressJournalAliases } from "./journal-compression-file.js";
 import type { TailOptions, TailPreviewRow, TailStateChange, TailSummary } from "./tail-types.js";
 export interface TailExportResult {outputDirectory:string;viewerPath:string;summary:TailSummary}
 
@@ -56,6 +57,17 @@ export async function exportTail(input:TailOptions):Promise<TailExportResult>{
     });
     const closed=await Promise.allSettled([...writers.values()].map(writer=>writer.close()));
     const failure=closed.find((r):r is PromiseRejectedResult=>r.status==="rejected");if(failure)throw failure.reason;
+    let rawEventsFile="raw-events.ndjson";
+    const rawEventsUncompressedBytes=writers.get(rawEventsFile)!.bytes;
+    let rawEventsBytes=rawEventsUncompressedBytes,rawEventsSha256:string|null=null;
+    if(options.compressRawEvents){
+      // This newly created file has a closed/synced writer. The shared codec
+      // additionally refuses unknown hardlinks and verifies the full round trip
+      // before replacing this generated copy; source journals are untouched.
+      const path=join(outputDirectory,rawEventsFile);
+      const compressed=await compressJournalAliases([{path,root:outputDirectory,rootStamp:await lstat(outputDirectory),stamp:await lstat(path)}],{roots:[outputDirectory]});
+      if(compressed){rawEventsFile+=".gz";rawEventsBytes=compressed.compressedBytes;rawEventsSha256=compressed.sha256;}
+    }
     const depthFileBytes=writers.get("seconds.ndjson")!.bytes;
     const viewerPath=join(outputDirectory,"viewer.html");
     await writeFile(viewerPath,renderTailViewer({summary,rows,stateChanges,depthFile:"seconds.ndjson",depthFileBytes}),{flag:"wx"});
@@ -63,6 +75,7 @@ export async function exportTail(input:TailOptions):Promise<TailExportResult>{
     await writeFile(join(outputDirectory,"manifest.json"),JSON.stringify({status:"complete",sourceRunId:summary.runId,sourceRunDirectory:resolve(options.runDirectory),
       finishLabelsFile:options.finishLabelsFile?resolve(options.finishLabelsFile):null,createdAt:new Date().toISOString(),depthFile:"seconds.ndjson",depthFileBytes,
       finishFactsFile:options.finishFactsFile?resolve(options.finishFactsFile):null,
+      rawEventsFile,rawEventsBytes,rawEventsUncompressedBytes,rawEventsSha256,
       seconds:summary.seconds,changes:summary.changes,stateChanges:summary.stateChanges,audits:summary.audits,rawRecords:summary.rawRecords,
       readyTokens:summary.tokens.filter(t=>t.readyForReplay).length,tokenCount:summary.tokens.length})+"\n",{flag:"wx"});
     return {outputDirectory,viewerPath,summary};

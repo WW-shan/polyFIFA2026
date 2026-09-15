@@ -22,6 +22,7 @@ export function parseTailCliArgs(args:readonly string[]):TailCliArgs{
       case "--window-seconds":options.windowSeconds=positive(value(args,index++));break;
       case "--finish-labels":options.finishLabelsFile=value(args,index++);break;
       case "--finish-facts":options.finishFactsFile=value(args,index++);break;
+      case "--compress-raw-events":options.compressRawEvents=true;break;
       case "--event-slugs":options.eventSlugs=value(args,index++).split(",").map(s=>s.trim());break;
       case "--max-feed-silence-ms":options.maxFeedSilenceMs=positive(value(args,index++));break;
       case "--sports-stale-after-ms":options.sportsStaleAfterMs=positive(value(args,index++));break;
@@ -53,6 +54,7 @@ const HELP=`Public orderbook evidence, no orders. Use completed collector runs.
 export --run-dir PATH [--output-dir NEW_PATH] [--window-seconds 300]
   [--event-slugs CSV] [--finish-labels FILE] [--max-feed-silence-ms 30000]
   [--finish-facts FILE]
+  [--compress-raw-events]
   [--sports-stale-after-ms 60000] [--shock-threshold 0.1]
   [--clock-policy strict|flag-backsteps] [--max-clock-drift-ms 5000]
 Clock policy defaults to strict. flag-backsteps marks bounded receipt-clock uncertainty in quality.

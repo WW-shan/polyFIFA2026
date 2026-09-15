@@ -1,31 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import type { AddressInfo, Socket } from "node:net";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { ContinuousStatus } from "./continuous-state.js";
-
-const artifactTypes = {
-  "viewer.html": "text/html; charset=utf-8",
-  "seconds.ndjson": "application/x-ndjson",
-  "seconds.csv": "text/csv; charset=utf-8",
-  "quality.json": "application/json",
-  "manifest.json": "application/json",
-  "changes.ndjson": "application/x-ndjson",
-  "state-changes.ndjson": "application/x-ndjson",
-  "audit.ndjson": "application/x-ndjson",
-  "raw-events.ndjson": "application/x-ndjson"
-} as const;
-type ArtifactName = keyof typeof artifactTypes;
+import { artifactTypes, ContinuousArchiveCatalog, openArtifact, type ArtifactName, type HistoricalArchive } from "./continuous-archive-catalog.js";
 
 // Only these constant filenames enter the script. All runtime metadata arrives as JSON
 // through a same-origin fetch and is rendered with textContent, never HTML interpolation.
 const browserScript = String.raw`
 (() => {
   "use strict";
-  const files = ` + JSON.stringify(Object.keys(artifactTypes)) + String.raw`;
+  const files = ` + JSON.stringify(Object.keys(artifactTypes).filter(filename => filename !== "raw-events.ndjson.gz")) + String.raw`;
   const byId = id => document.getElementById(id);
   const text = value => value == null ? "—" : String(value);
   const node = (tag, value) => {
@@ -69,7 +55,8 @@ const browserScript = String.raw`
         node("td", age(game.lastBookAtMs)), node("td", complete ? game.archive.priceReadyTokens : null),
         node("td", complete ? game.archive.strictReadyTokens : null));
       const links = node("td");
-      if (complete && safeKey(game.key)) for (const filename of files) {
+      if (complete && safeKey(game.key)) for (const base of files) {
+        const filename = base === "raw-events.ndjson" && game.archive.rawEventsFile === "raw-events.ndjson.gz" ? "raw-events.ndjson.gz" : base;
         const link = node("a", filename);
         link.setAttribute("href", "/exports/" + encodeURIComponent(game.key) + "/" + filename);
         link.setAttribute("rel", "noreferrer");
@@ -79,15 +66,67 @@ const browserScript = String.raw`
       return row;
     }));
     byId("errors").replaceChildren(...status.errors.map(error => node("li", text(error.scope) + "：" + text(error.message))));
+    if (archivePage) renderArchives(archivePage);
   }
-  let latest;
+  let latest, archivePage, archiveNext = null, archiveBusy = false, archiveAttemptAt = -Infinity;
+  function archiveButtons() {
+    byId("archives-prev").disabled = archiveBusy || !archivePage || archivePage.offset === 0;
+    byId("archives-next").disabled = archiveBusy || archiveNext === null;
+  }
+  function renderArchives(page) {
+    byId("archives").replaceChildren(...page.entries.flatMap(entry => entry.games.map(game => {
+      const row = node("tr"), title = node("td", game.title);
+      title.append(node("p", game.key), node("p", "目录 " + entry.id), node("p", "来源 " + entry.sourceRunId));
+      const stored = node("td", "存盘完成");
+      stored.append(node("p", entry.createdAt));
+      if (game.finishConflict) stored.append(node("p", "存盘终场时间存在冲突"));
+      const current = latest ? latest.games.find(value => value.key === game.key) : game.current;
+      const live = node("td", current ? label(phases, current.phase) : latest || page.liveStatusAvailable ? "当前热状态未保留" : "当前状态不可用");
+      if (current && current.finishConflict) live.append(node("p", "终场时间存在冲突"));
+      row.append(title, stored, live, node("td", game.tokenCount), node("td", game.priceReadyTokens), node("td", game.strictReadyTokens));
+      const links = node("td");
+      if (safeKey(entry.id)) for (const base of files) {
+        const filename = base === "raw-events.ndjson" ? entry.rawEventsFile : base;
+        if (base === "raw-events.ndjson" && filename !== "raw-events.ndjson" && filename !== "raw-events.ndjson.gz") continue;
+        const link = node("a", filename);
+        link.setAttribute("href", "/archives/" + encodeURIComponent(entry.id) + "/" + filename);
+        link.setAttribute("rel", "noreferrer");
+        links.append(link);
+      }
+      row.append(links);
+      return row;
+    })));
+    const diagnostics = page.diagnostics;
+    byId("archives-diagnostics").textContent = "未完成 " + diagnostics.incomplete + " · 元数据异常 " + diagnostics.invalid
+      + " · 不安全路径 " + diagnostics.unsafe + " · 元数据过大 " + diagnostics.oversized + " · 读取失败 " + diagnostics.unreadable;
+    byId("archives-page").textContent = "共 " + page.total + " 份 · 本页 " + page.entries.length + " 份 · 起始位置 " + page.offset;
+  }
+  async function refreshArchives(offset = archivePage ? archivePage.offset : 0) {
+    if (archiveBusy) return;
+    archiveBusy = true;
+    archiveAttemptAt = Date.now();
+    archiveButtons();
+    try {
+      const response = await fetch("/api/archives?offset=" + offset + "&limit=20", { cache: "no-store", mode: "same-origin", credentials: "same-origin", redirect: "error", signal: AbortSignal.timeout(30000) });
+      if (!response.ok) throw new Error("Archives unavailable");
+      archivePage = await response.json();
+      archiveNext = archivePage.nextOffset;
+      renderArchives(archivePage);
+      byId("archives-health").textContent = "历史目录已刷新 · 扫描距今 " + age(archivePage.scannedAtMs);
+    } catch {
+      byId("archives-health").textContent = archivePage ? "历史目录刷新失败；保留上次结果。" : "历史目录刷新失败；尚无结果。";
+    } finally { archiveBusy = false; archiveButtons(); }
+  }
+  byId("archives-prev").addEventListener("click", () => { if (archivePage) void refreshArchives(Math.max(0, archivePage.offset - 20)); });
+  byId("archives-next").addEventListener("click", () => { if (archiveNext !== null) void refreshArchives(archiveNext); });
   async function refresh() {
+    if (Date.now() - archiveAttemptAt >= 30000) void refreshArchives();
     try {
       const response = await fetch("/api/status", { cache: "no-store", mode: "same-origin", credentials: "same-origin", redirect: "error", signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error("Status unavailable");
       const status = await response.json();
-      render(status);
       latest = status;
+      render(status);
       byId("health").textContent = "状态已刷新 · 快照距今 " + age(status.updatedAtMs);
     } catch {
       if (latest) render(latest);
@@ -125,6 +164,10 @@ const dashboard = `<!doctype html>
 <section><h2>比赛与归档</h2><p id="game-counts"></p><div class="scroll"><table>
 <thead><tr><th>比赛</th><th>阶段</th><th>tokens</th><th>观测计数</th><th>距最后盘口</th><th>价格就绪<br>priceReadyTokens</th><th>严格就绪<br>strictReadyTokens</th><th>已完成归档文件</th></tr></thead>
 <tbody id="games"></tbody></table></div><p class="muted">本机回放页面可自动按字节范围读取所选秒的完整深度；离线打开时仍可选择 seconds.ndjson 文件。</p></section>
+<section><h2>历史归档</h2><p class="muted">历史目录约每 30 秒刷新，按独立导出目录保留各次版本。存盘质量不代表当前采集通过；当前热状态未保留不代表没有归档。价格就绪与严格回放就绪分别列出；缺失数据不代表零成交。</p>
+<p id="archives-health" role="status" aria-live="polite">正在读取历史目录…</p><p id="archives-diagnostics"></p>
+<div class="scroll"><table><thead><tr><th>比赛与归档版本</th><th>存盘状态与生成时间</th><th>当前采集状态</th><th>tokens</th><th>存盘价格就绪<br>priceReadyTokens</th><th>存盘严格就绪<br>strictReadyTokens</th><th>该版本文件</th></tr></thead><tbody id="archives"></tbody></table></div>
+<p id="archives-page"></p><button id="archives-prev" type="button" disabled>上一页</button> <button id="archives-next" type="button" disabled>下一页</button></section>
 <section><h2>诊断</h2><ul id="errors"></ul></section><noscript>请启用 JavaScript 以自动刷新本机状态。</noscript>
 <script>${browserScript}</script></main></body></html>`;
 
@@ -132,60 +175,19 @@ const dashboard = `<!doctype html>
 // loopback hostname. Offline pages keep the explicit local-file path.
 const viewerCsp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-function artifactRoute(path: string): { key: string; filename: ArtifactName } | null {
+function artifactRoute(path: string): { kind: string; key: string; filename: ArtifactName } | null {
   // Do not use URL.pathname: URL parsing normalizes dot segments before validation.
-  const match = /^\/exports\/([^/]+)\/([^/]+)$/.exec(path);
+  const match = /^\/(exports|archives)\/([^/]+)\/([^/]+)$/.exec(path);
   if (!match) return null;
   try {
-    const key = decodeURIComponent(match[1]!);
-    const filename = decodeURIComponent(match[2]!);
+    const key = decodeURIComponent(match[2]!);
+    const filename = decodeURIComponent(match[3]!);
     // A remaining percent sign includes double encoding. Neither component can
     // contain separators, dot traversal or control characters after one decode.
     if ([key, filename].some(value => value === "." || value === ".." || /[\\/%\u0000-\u001f\u007f]/.test(value))) return null;
     if (!Object.hasOwn(artifactTypes, filename)) return null;
-    return { key, filename: filename as ArtifactName };
+    return { kind: match[1]!, key, filename: filename as ArtifactName };
   } catch { return null; }
-}
-
-function strictlyInside(root: string, path: string): boolean {
-  const child = relative(root, path);
-  return child !== "" && child !== ".." && !child.startsWith(".." + sep) && !isAbsolute(child);
-}
-
-async function openArtifact(exportsRoot: string, outputDirectory: string, filename: ArtifactName): Promise<{ handle: FileHandle; size: number } | null> {
-  const directory = resolve(outputDirectory);
-  if (!strictlyInside(exportsRoot, directory)) return null;
-  let handle: FileHandle | undefined;
-  try {
-    // Reject symlinks at every level, including the exports root itself. The
-    // caller-supplied data root can have canonical parent aliases (e.g. /tmp).
-    if (!(await lstat(exportsRoot)).isDirectory()) return null;
-    let current = exportsRoot;
-    const child = relative(exportsRoot, directory);
-    for (const part of child.split(sep)) {
-      current = join(current, part);
-      if (!(await lstat(current)).isDirectory()) return null;
-    }
-    const realRoot = await realpath(exportsRoot);
-    const realDirectory = await realpath(directory);
-    if (!strictlyInside(realRoot, realDirectory) || realDirectory !== join(realRoot, child)) return null;
-    const path = join(realDirectory, filename);
-    const checked = await lstat(path);
-    if (!checked.isFile()) return null;
-    // NOFOLLOW guards a replaced final symlink; NONBLOCK prevents a substituted
-    // FIFO from hanging the listener. Stream only the checked, opened inode.
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const actual = await handle.stat();
-    if (!actual.isFile() || actual.dev !== checked.dev || actual.ino !== checked.ino || !Number.isSafeInteger(actual.size)
-      || await realpath(path) !== path || !(await lstat(exportsRoot)).isDirectory()) {
-      await handle.close();
-      return null;
-    }
-    return { handle, size: actual.size };
-  } catch {
-    await handle?.close().catch(() => {});
-    return null;
-  }
 }
 
 function byteRange(value: string, size: number): { start: number; end: number } | null {
@@ -251,6 +253,7 @@ export async function startContinuousServer(options: {
 }): Promise<{ port: number; close(): Promise<void> }> {
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) throw new RangeError("Invalid status port");
   const exportsRoot = resolve(options.dataRoot, "exports");
+  const archives = new ContinuousArchiveCatalog(exportsRoot);
   let port = options.port;
   const sockets = new Set<Socket>();
   const server = createServer((request, response) => {
@@ -279,22 +282,73 @@ export async function startContinuousServer(options: {
     }
     if (path === "/api/status") {
       try {
-        respond(request, response, 200, JSON.stringify(options.getStatus()), "application/json; charset=utf-8");
+        const status = options.getStatus();
+        const games = status.games.map(game => {
+          const rawEventsFile = game.archive?.outputDirectory && archives.cachedRawEventsFile(game.archive.outputDirectory);
+          return rawEventsFile ? { ...game, archive: { ...game.archive, rawEventsFile } } : game;
+        });
+        respond(request, response, 200, JSON.stringify({ ...status, games }), "application/json; charset=utf-8");
       } catch {
         respond(request, response, 503, "Status unavailable\n");
       }
       return;
     }
+    if (path === "/api/archives") {
+      const query = new URLSearchParams((request.url ?? "").split("?")[1]);
+      const offset = query.get("offset") ?? "0", limit = query.get("limit") ?? "20";
+      if (!/^\d+$/.test(offset) || !/^\d+$/.test(limit) || query.getAll("offset").length > 1 || query.getAll("limit").length > 1) {
+        respond(request, response, 400, "Invalid archive page\n"); return;
+      }
+      void archives.page(Number(offset), Number(limit)).then(page => {
+        let current: ContinuousStatus | undefined;
+        try { current = options.getStatus(); } catch { /* Disk history remains available. */ }
+        const games = new Map(current?.games.map(game => [game.key, game]));
+        respond(request, response, 200, JSON.stringify({ ...page, liveStatusAvailable: current !== undefined,
+          entries: page.entries.map(entry => ({ ...entry, games: entry.games.map(game => {
+            const hot = games.get(game.key);
+            return { ...game, current: hot ? { phase: hot.phase, archiveStatus: hot.archive?.status ?? null, finishConflict: hot.finishConflict } : null };
+          }) })) }), "application/json; charset=utf-8");
+      }).catch(error => respond(request, response, error instanceof RangeError ? 400 : 503,
+        error instanceof RangeError ? "Invalid archive page\n" : "Archives unavailable\n"));
+      return;
+    }
     const route = artifactRoute(path ?? "");
     if (route) {
+      const serve = (directory: string) => serveArtifact(request, response, exportsRoot, directory, route.filename);
+      const failed = () => {
+        if (response.headersSent) response.destroy();
+        else respond(request, response, 404, "Not found\n");
+      };
+      const serveStored = (entry: HistoricalArchive | undefined) => {
+        if (!entry || ((route.filename === "raw-events.ndjson" || route.filename === "raw-events.ndjson.gz") && route.filename !== entry.rawEventsFile)) {
+          failed(); return;
+        }
+        return serve(join(exportsRoot, entry.id));
+      };
+      if (route.kind === "archives") {
+        void archives.find(route.key).then(serveStored).catch(failed);
+        return;
+      }
       let game;
       try { game = options.getStatus().games.find(game => game.key === route.key); }
       catch { respond(request, response, 503, "Status unavailable\n"); return; }
       if (game?.archive?.status === "complete" && typeof game.archive.outputDirectory === "string") {
-        void serveArtifact(request, response, exportsRoot, game.archive.outputDirectory, route.filename).catch(() => {
-          if (response.headersSent) response.destroy();
-          else respond(request, response, 404, "Not found\n");
-        });
+        void serve(game.archive.outputDirectory).catch(failed);
+        return;
+      }
+      // Only eviction/absence may fall back. A current failed, conflicted or
+      // unfinished game must retain its current status and output selection.
+      if (!game) {
+        void archives.latest(route.key).then(entry => {
+          // A scan can outlast a discovery/status update. Recheck before using
+          // historical fallback so a newly failed current game still wins.
+          let current;
+          try { current = options.getStatus().games.find(game => game.key === route.key); }
+          catch { respond(request, response, 503, "Status unavailable\n"); return; }
+          if (!current) return serveStored(entry);
+          if (current.archive?.status === "complete" && typeof current.archive.outputDirectory === "string") return serve(current.archive.outputDirectory);
+          failed();
+        }).catch(failed);
         return;
       }
     }
