@@ -575,7 +575,7 @@ function trialFor(source: IndexedSource, indexed: IndexedWindow, outcomes: Index
   if (references.some(reference => reference.clockAffected)) addExclusion(trial, "clock-affected-data");
   if (allReferencesValid && !reference) addExclusion(trial, "missing-entry-bid");
   if (reference && comparePrice(reference.bestBid!, options.entryMinBid) < 0) addExclusion(trial, "entry-below-threshold");
-  if (reference && reference.bestAsk === null) addExclusion(trial, "missing-entry-ask");
+  // A price-valid reference has complete depth; null bestAsk means an observed empty ask side, which cannot be crossed.
   if (reference?.bestAsk != null && comparePrice(bidPrice, reference.bestAsk) >= 0) addExclusion(trial, "limit-not-below-entry-ask");
   if (source.countMismatch) addExclusion(trial, "archive-count-mismatch");
   if (source.journalIncomplete) addExclusion(trial, "journal-data-incomplete");

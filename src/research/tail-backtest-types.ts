@@ -143,6 +143,7 @@ export interface TailBacktestTrial {
   referenceAtMs: number | null;
   referenceBookObservedAtMs: number | null;
   referenceBid: string | null;
+  /** Null with a valid entry reference denotes observed empty ask depth. */
   referenceAsk: string | null;
   entryReferences: TailEntryReference[];
   tokenQuality: TailTokenQuality | null;

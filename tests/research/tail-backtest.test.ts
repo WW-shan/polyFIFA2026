@@ -170,9 +170,65 @@ describe("collected orderbook ex-ante entry", () => {
     expect(backtestTailArchives([archive()], { ...options, entryMinBid: "0.950000000000000000001" }).trials[0]?.exclusions).toContain("entry-below-threshold");
     expect(backtestTailArchives([archive()], { ...options, prices: ["0.96"] }).trials[0]?.exclusions).toEqual([]);
     for (const price of ["0.970", "0.98"]) expect(backtestTailArchives([archive()], { ...options, prices: [price] }).trials[0]?.exclusions).toContain("limit-not-below-entry-ask");
-    const emptyAsk = archive();
-    for (const row of emptyAsk.seconds.filter(row => row.tokenId === "A")) setBook(row, "0.95", null);
-    expect(backtestTailArchives([emptyAsk], options).trials[0]?.exclusions).toContain("missing-entry-ask");
+  });
+});
+
+describe("known empty entry ask depth", () => {
+  test.each([
+    { fillModel: "quote-touch-assumed" as const, filled: 5, pnl: -3.5 },
+    { fillModel: "sell-through-volume" as const, filled: 3, pnl: -2.1 }
+  ])("allows a resting entry and later SELL fill under $fillModel", ({ fillModel, filled, pnl }) => {
+    const data = withChanges(archive(), [trade(1, entry + 100)]);
+    for (const row of data.seconds.filter(row => row.tokenId === "A")) setBook(row, "0.95", null);
+    const result = backtestTailArchives([data], { ...options, fillModel });
+    expect(result.trials[0]).toMatchObject({ eligible: true, exclusions: [], tokenId: "A", referenceBid: "0.95", referenceAsk: null,
+      modeledFilledShares: filled, modeledPnl: pnl, payoutPerShare: 0, firstTouchAtMs: entry + 100,
+      priceCoverage: { complete: true } });
+    expect(result.trials[0]?.entryReferences.find(reference => reference.tokenId === "A")).toMatchObject({ priceValid: true, bestAsk: null });
+    expect(result.summaries[0]).toMatchObject({ eligibleTrials: 1, excludedTrials: 0, touchedTrials: 1, modeledFilledTrials: 1 });
+  });
+
+  test.each(["quote-touch-assumed", "sell-through-volume"] as const)("a complete no-touch interval is an observed zero fill under %s", fillModel => {
+    const data = archive(); delete data.settlements;
+    for (const row of data.seconds.filter(row => row.tokenId === "A")) setBook(row, "0.95", null);
+    const result = backtestTailArchives([data], { ...options, fillModel });
+    expect(result.trials[0]).toMatchObject({ eligible: true, exclusions: [], tokenId: "A", referenceBid: "0.95", referenceAsk: null,
+      touched: false, modeledFilledShares: 0, modeledCost: 0, modeledPnl: 0, settlement: null, pnlEligible: true });
+    expect(result.summaries[0]).toMatchObject({ eligibleTrials: 1, excludedTrials: 0, zeroFillTrials: 1, pnlTrialDenominator: 1 });
+  });
+
+  test("null ask depth cannot masquerade as a complete empty array", () => {
+    const data = archive(); const row = data.seconds.find(row => row.tokenId === "A" && row.secondIndex === 0)!;
+    row.asks = null; row.bestAsk = null;
+    expect(() => backtestTailArchives([data], options)).toThrow("TAIL_BACKTEST_INPUT_INVALID");
+  });
+
+  test.each<TailBookStatus>(["partial", "missing", "invalid", "closed", "feed_stale"])("a %s entry reference remains excluded", status => {
+    const data = archive();
+    for (const row of data.seconds.filter(row => row.tokenId === "A")) setBook(row, "0.95", null);
+    const row = data.seconds.find(row => row.tokenId === "A" && row.secondIndex === 0)!;
+    row.status = status; row.wholeSecondValid = false; row.bestBid = row.bestAsk = null; row.bids = row.asks = null;
+    const result = backtestTailArchives([data], options);
+    expect(result.trials[0]).toMatchObject({ eligible: false, modeledFilledShares: null, modeledCost: null, modeledPnl: null });
+    expect(result.trials[0]?.exclusions).toContain("missing-entry-reference");
+    expect(result.summaries[0]).toMatchObject({ eligibleTrials: 0, excludedTrials: 1, zeroFillTrials: 0, pnlTrialDenominator: 0 });
+  });
+
+  test("an absent entry row remains excluded even if subsequent ask depth is known empty", () => {
+    const data = archive();
+    for (const row of data.seconds.filter(row => row.tokenId === "A")) setBook(row, "0.95", null);
+    data.seconds = data.seconds.filter(row => !(row.tokenId === "A" && row.secondIndex === 0));
+    const trial = backtestTailArchives([data], options).trials[0]!;
+    expect(trial.exclusions).toContain("missing-entry-reference");
+    expect(trial).toMatchObject({ eligible: false, modeledFilledShares: null, modeledPnl: null });
+  });
+
+  test("empty bid sides cannot invent a zero-price entry signal", () => {
+    const data = archive();
+    for (const row of data.seconds) setBook(row, null, null);
+    const trial = backtestTailArchives([data], { ...options, entryMinBid: "0" }).trials[0]!;
+    expect(trial.exclusions).toContain("missing-entry-bid");
+    expect(trial).toMatchObject({ eligible: false, tokenId: null, referenceBid: null, modeledFilledShares: null, modeledPnl: null });
   });
 });
 
