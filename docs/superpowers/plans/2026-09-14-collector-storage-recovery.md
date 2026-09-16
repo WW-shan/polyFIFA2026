@@ -98,6 +98,8 @@ Files: `continuous.ts`, `continuous-config.ts`, `continuous-state.ts`, `continuo
 - [x] Continuous exports include 1 second of pre-roll. Initial 29-game report includes all quality exclusions, not just qualifying markets.
 - [x] Diagnose the real Setka `gameId` drift at event 1021055 / sequences 9440520→9461275. Quarantine every historically connected identity only for explicit disjoint selections; unfiltered/affected exports, slug changes, condition/outcome conflicts and cross-game remaps still fail. Preserve same-game companion sharing from the original behavior.
 - [x] Replay Boyer–Winter from the unchanged source with quarantine diagnostics: 10,234 rows / 301 seconds. Retain the source failure warning rather than fabricate backtest eligibility.
+- [x] Complete independent identity/integration reviews and actual final replay; partial raw identities, raw slug aliases, native scores and imported finish facts share the same binding checks. Final source/price/state/audit bytes match the earlier verified Boyer export.
+- [x] Recover additional legacy-export capacity without changing logical filenames or input manifests: 81 APFS-transparent compressed raw copies, all fully rehashed, 17.128 GiB less allocation. Retain unsupported large originals and record the real 33-minute disk-pause gap. Native capture automatically resumed.
 
 ## Still unfulfilled data coverage (not hidden by completed engineering tasks)
 
