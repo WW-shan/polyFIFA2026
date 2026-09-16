@@ -135,6 +135,16 @@ async function openDashboard(server: StatusServer) {
   };
 }
 
+test("historical books have a top-level jump link and are not buried under an unbounded live table", async () => {
+  const server = await start(), result = await http(server.port, "/"), html = result.body.toString();
+  expect(result.status).toBe(200);
+  expect(html).toContain('href="#historical-archives"');
+  expect(html).toContain('<section id="historical-archives">');
+  expect(html.indexOf('href="#historical-archives"')).toBeLessThan(html.indexOf('<tbody id="games">'));
+  expect(html).toContain('class="scroll live-games"');
+  expect(html).toContain('.live-games{max-height:28rem}');
+});
+
 const filenames = ["viewer.html", "seconds.ndjson", "seconds.csv", "quality.json", "manifest.json", "changes.ndjson", "state-changes.ndjson", "audit.ndjson", "raw-events.ndjson"];
 
 async function archiveFixture() {

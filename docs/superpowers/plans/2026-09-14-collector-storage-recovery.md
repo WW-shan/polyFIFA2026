@@ -96,6 +96,8 @@ Files: `continuous.ts`, `continuous-config.ts`, `continuous-state.ts`, `continuo
 - [x] Recover completed archive visibility independently of the evictable live-game cache. Read-only catalog, bounded paging, guarded legacy fallback, and gzip download paths passed spec and quality review.
 - [x] Add optional verified compression of the sealed generated raw-evidence copy; source journals and depth byte indexes remain unchanged. The real 301-second sample kept identical seconds/changes/quality and reduced raw evidence 226,887,270 → 24,948,335 bytes.
 - [x] Continuous exports include 1 second of pre-roll. Initial 29-game report includes all quality exclusions, not just qualifying markets.
+- [x] Diagnose the real Setka `gameId` drift at event 1021055 / sequences 9440520→9461275. Quarantine every historically connected identity only for explicit disjoint selections; unfiltered/affected exports, slug changes, condition/outcome conflicts and cross-game remaps still fail. Preserve same-game companion sharing from the original behavior.
+- [x] Replay Boyer–Winter from the unchanged source with quarantine diagnostics: 10,234 rows / 301 seconds. Retain the source failure warning rather than fabricate backtest eligibility.
 
 ## Still unfulfilled data coverage (not hidden by completed engineering tasks)
 

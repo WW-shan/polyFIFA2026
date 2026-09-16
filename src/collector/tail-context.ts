@@ -2,10 +2,10 @@ import { isDeepStrictEqual } from "node:util";
 import { timeValue } from "../research/history.js";
 import { normalizeCollectorEvent } from "./catalog.js";
 import { arrayValue, frameType, heartbeat, identifier, objectValue, parsedJson, textValue, timestamp } from "./replay-values.js";
-import type { TailMetadata, TailObservation, TailStateChange, TailWindow } from "./tail-types.js";
+import type { TailEventIdentity, TailMetadata, TailObservation, TailStateChange, TailWindowIdentity } from "./tail-types.js";
 import type { JournalRecord } from "./types.js";
 
-function gammaEvent(record: JournalRecord): Record<string, unknown> | undefined {
+export function gammaEventFromRecord(record: JournalRecord): Record<string, unknown> | undefined {
   if (record.source !== "gamma" || record.kind !== "event_metadata") return undefined;
   const data = objectValue(record.data);
   return objectValue(data?.event) ?? objectValue(objectValue(data?.normalized)?.raw);
@@ -60,13 +60,13 @@ function identityFromRaw(raw: Record<string, unknown>): Pick<TailObservation, "e
 /** Resolve against all known windows, before selection filters. Contradictions and ambiguous matches throw. */
 export function windowKeyForIdentity(
   identity: Pick<TailObservation, "eventSlug" | "gameId">,
-  windows: readonly Pick<TailWindow, "key" | "gameId" | "eventSlugs">[]
+  windows: readonly TailWindowIdentity[]
 ): string | undefined {
   let key: string | undefined;
   for (const window of windows) {
     const sameSlug = identity.eventSlug !== null && window.eventSlugs.includes(identity.eventSlug);
-    const sameGame = identity.gameId !== null && window.gameId === identity.gameId;
-    if (sameSlug && identity.gameId !== null && window.gameId !== null && !sameGame) {
+    const sameGame = identity.gameId !== null && (window.gameId === identity.gameId || window.gameIdAliases?.includes(identity.gameId) === true);
+    if (sameSlug && identity.gameId !== null && (window.gameId !== null || window.gameIdAliases?.length) && !sameGame) {
       throw new Error(`TAIL_IDENTITY_CONFLICT: ${identity.eventSlug} belongs to ${window.key}, not game:${identity.gameId}`);
     }
     if (!sameSlug && !sameGame) continue;
@@ -76,8 +76,33 @@ export function windowKeyForIdentity(
   return key;
 }
 
+/** Gamma's known event ID must agree too, even when a partial update has no slug. */
+export function windowKeyForBoundIdentity(
+  identity: Pick<TailObservation, "eventSlug" | "gameId"> & { eventId?: string | null },
+  windows: readonly TailWindowIdentity[],
+  events: ReadonlyMap<string, TailEventIdentity>
+): string | undefined {
+  const key = windowKeyForIdentity(identity, windows);
+  const event = identity.eventId == null ? undefined : events.get(identity.eventId);
+  if (event) {
+    if (event.ambiguousGameIds) throw new Error("TAIL_IDENTITY_CONFLICT: ambiguous raw event binding");
+    if (identity.eventSlug !== null && event.eventSlugs.length && !event.eventSlugs.includes(identity.eventSlug)) throw new Error("TAIL_IDENTITY_CONFLICT: known event slug binding");
+    if (identity.gameId !== null && event.gameIds.length && !event.gameIds.includes(identity.gameId)) throw new Error("TAIL_IDENTITY_CONFLICT: known event game binding");
+    if (event.quarantineKey && key !== undefined && key !== event.quarantineKey) throw new Error("TAIL_IDENTITY_CONFLICT: quarantined event binding");
+    for (const eventSlug of event.eventSlugs) {
+      const bound = windowKeyForIdentity({ eventSlug, gameId: identity.gameId }, windows);
+      if (key !== undefined && bound !== undefined && key !== bound) throw new Error("TAIL_IDENTITY_CONFLICT: known event game binding");
+    }
+    for (const gameId of event.gameIds) {
+      const bound = windowKeyForIdentity({ eventSlug: identity.eventSlug, gameId }, windows);
+      if (key !== undefined && bound !== undefined && key !== bound) throw new Error("TAIL_IDENTITY_CONFLICT: known event slug binding");
+    }
+  }
+  return key;
+}
+
 export function metadataFromRecord(record: JournalRecord): TailMetadata | null {
-  const event = normalizeCollectorEvent(gammaEvent(record));
+  const event = normalizeCollectorEvent(gammaEventFromRecord(record));
   if (!event) return null;
   const { gameId } = identityFromRaw(event.raw);
   const finishAtMs = explicitTime(event.raw.finishedTimestamp);
@@ -138,7 +163,7 @@ function observation(raw: Record<string, unknown>, record: JournalRecord, source
 }
 
 export function observationsFromRecord(record: JournalRecord): TailObservation[] {
-  const gamma = gammaEvent(record);
+  const gamma = gammaEventFromRecord(record);
   if (gamma) {
     const value = observation(gamma, record, "gamma", 0);
     return value ? [value] : [];

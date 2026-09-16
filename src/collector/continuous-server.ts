@@ -142,7 +142,7 @@ const style = `
 body{margin:0}main{max-width:1300px;margin:auto;padding:18px}h1{font-size:22px}h2{font-size:16px}
 section{background:#fff;border:1px solid #dbe1e7;border-radius:8px;padding:14px;margin:12px 0}
 p,li{line-height:1.6;overflow-wrap:anywhere}.muted{color:#536476}dl{display:flex;gap:18px;flex-wrap:wrap}
-dt{color:#536476}dd{margin:4px 0;font-variant-numeric:tabular-nums}.scroll{overflow:auto}
+dt{color:#536476}dd{margin:4px 0;font-variant-numeric:tabular-nums}.scroll{overflow:auto}.live-games{max-height:28rem}
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;text-align:left;border-bottom:1px solid #e5eaf0;vertical-align:top}
 th{white-space:nowrap}td{max-width:300px;overflow-wrap:anywhere}td p{margin:4px 0}a{display:block;color:#173d61}
 `;
@@ -152,6 +152,7 @@ const dashboard = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>连续采集状态</title><style>${style}</style></head><body><main>
 <h1>连续采集状态</h1><p class="muted">只读页面，每 2 秒自动刷新。运行中不代表采集完整；归档完成不代表质量通过。请分别查看盘口价格与严格回放就绪数量。</p>
+<p><a href="#historical-archives">查看历史归档与逐秒盘口</a></p>
 <p id="health" role="status" aria-live="polite">正在读取状态…</p>
 <section><h2>运行与接收</h2><dl>
 <div><dt>运行模式</dt><dd id="mode">—</dd></div><div><dt>剩余磁盘</dt><dd id="free-gb">—</dd></div>
@@ -161,10 +162,10 @@ const dashboard = `<!doctype html>
 <div><dt>后台压缩</dt><dd id="compression-mode">—</dd></div><div><dt>本进程已压缩分段</dt><dd id="compression-segments">—</dd></div>
 <div><dt>本进程压缩减少的逻辑字节</dt><dd id="compression-saved">—</dd></div>
 </dl><div class="scroll"><table><thead><tr><th>来源</th><th>连接</th><th>状态</th><th>距最后消息</th></tr></thead><tbody id="connections"></tbody></table></div></section>
-<section><h2>比赛与归档</h2><p id="game-counts"></p><div class="scroll"><table>
+<section><h2>比赛与归档</h2><p id="game-counts"></p><div class="scroll live-games" tabindex="0" aria-label="实时比赛列表"><table>
 <thead><tr><th>比赛</th><th>阶段</th><th>tokens</th><th>观测计数</th><th>距最后盘口</th><th>价格就绪<br>priceReadyTokens</th><th>严格就绪<br>strictReadyTokens</th><th>已完成归档文件</th></tr></thead>
 <tbody id="games"></tbody></table></div><p class="muted">本机回放页面可自动按字节范围读取所选秒的完整深度；离线打开时仍可选择 seconds.ndjson 文件。</p></section>
-<section><h2>历史归档</h2><p class="muted">历史目录约每 30 秒刷新，按独立导出目录保留各次版本。存盘质量不代表当前采集通过；当前热状态未保留不代表没有归档。价格就绪与严格回放就绪分别列出；缺失数据不代表零成交。</p>
+<section id="historical-archives"><h2>历史归档</h2><p class="muted">历史目录约每 30 秒刷新，按独立导出目录保留各次版本。存盘质量不代表当前采集通过；当前热状态未保留不代表没有归档。价格就绪与严格回放就绪分别列出；缺失数据不代表零成交。</p>
 <p id="archives-health" role="status" aria-live="polite">正在读取历史目录…</p><p id="archives-diagnostics"></p>
 <div class="scroll"><table><thead><tr><th>比赛与归档版本</th><th>存盘状态与生成时间</th><th>当前采集状态</th><th>tokens</th><th>存盘价格就绪<br>priceReadyTokens</th><th>存盘严格就绪<br>strictReadyTokens</th><th>该版本文件</th></tr></thead><tbody id="archives"></tbody></table></div>
 <p id="archives-page"></p><button id="archives-prev" type="button" disabled>上一页</button> <button id="archives-next" type="button" disabled>下一页</button></section>

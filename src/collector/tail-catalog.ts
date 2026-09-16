@@ -6,15 +6,17 @@ import { listJournalSegments } from "./journal.js";
 import { resolveJournalSegment } from "./journal-segments.js";
 import { scanJournal } from "./journal-reader.js";
 import { emptyReplayQuality } from "./replay-types.js";
-import { objectValue } from "./replay-values.js";
-import { metadataFromRecord, observationsFromRecord, windowKeyForIdentity } from "./tail-context.js";
+import { identifier, objectValue } from "./replay-values.js";
+import { gammaEventFromRecord, metadataFromRecord, observationsFromRecord, windowKeyForIdentity, windowKeyForBoundIdentity } from "./tail-context.js";
+import { TailIdentityScope } from "./tail-identity-scope.js";
 import type { JournalRecord } from "./types.js";
-import type { TailClockIssue, TailClockPolicy, TailClockReceipt, TailFinishFact, TailMetadata, TailObservation, TailOptions, TailWindow } from "./tail-types.js";
+import type { TailClockIssue, TailClockPolicy, TailClockReceipt, TailEventIdentity, TailFinishFact, TailMetadata, TailObservation, TailOptions, TailWindow, TailWindowIdentity } from "./tail-types.js";
 
 export type EffectiveTailOptions = TailOptions & Required<Pick<TailOptions,"windowSeconds"|"maxFeedSilenceMs"|"sportsStaleAfterMs"|"maxClockDriftMs"|"shockThreshold"|"clockPolicy">>;
 export interface TailCatalog {
   windows: TailWindow[];
-  windowIdentities: Array<Pick<TailWindow,"key"|"gameId"|"eventSlugs">>;
+  windowIdentities: TailWindowIdentity[];
+  eventIdentities: ReadonlyMap<string,TailEventIdentity>;
   clockPolicy: TailClockPolicy; clockIssues: TailClockIssue[];
   factsStamp: string | null;
   runId: string; firstMs: number; lastMs: number; records: number; stamp: string; labelText: string | null; warnings: string[];
@@ -105,17 +107,19 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
   const stamp=await journalStamp(options.runDirectory);
   const metadata=new Map<string,TailMetadata>();
   const markets=new Map<string,TailMetadata["markets"][number]>();
+  const identityScope=new TailIdentityScope();
   const finishes=new Map<string,CatalogFinish[]>();
   let finishOrder=0;
   const rememberFinish=(observation:TailObservation,sourceFile?:string):void=>{
     if(observation.finishAtMs===null||observation.finishSource===null)return;
-    const key=JSON.stringify([observation.eventSlug,observation.gameId,observation.finishSource,sourceFile]);
+    const eventId=observation.source==="gamma"?identifier(observation.raw.id)??null:null;
+    const key=JSON.stringify([eventId,observation.eventSlug,observation.gameId,observation.finishSource,sourceFile]);
     const evidence=finishes.get(key)??[];
     // One first boundary and one first differing witness per identity/provenance suffice
     // to prove conflict. Raw metadata and scores remain in the journal or sidecar.
     if(evidence.length===2||evidence.some(value=>value.atMs===observation.finishAtMs))return;
     evidence.push({atMs:observation.finishAtMs,observedAtMs:observation.observedAtMs,
-      source:observation.finishSource,eventSlug:observation.eventSlug,gameId:observation.gameId,
+      source:observation.finishSource,eventId,eventSlug:observation.eventSlug,gameId:observation.gameId,
       order:finishOrder++,...(sourceFile?{sourceFile}:{})});
     finishes.set(key,evidence);
   };
@@ -139,16 +143,19 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
         previous:clockReceipt(last!),current:clockReceipt(record)});
     }
     last=record;count++;damageAfterLastRecord=false;
+    const rawEvent=gammaEventFromRecord(record);if(rawEvent)identityScope.observeRaw(rawEvent,record);
     const meta=metadataFromRecord(record);
     if(meta){
       const prior=metadata.get(meta.eventId);
-      if(prior&&(prior.eventSlug!==meta.eventSlug||prior.gameId!==meta.gameId))throw new Error("TAIL_METADATA_IDENTITY_CONFLICT");
+      if(prior&&prior.eventSlug!==meta.eventSlug)throw new Error("TAIL_METADATA_IDENTITY_CONFLICT: event slug changed for "+meta.eventId);
+      identityScope.observe(meta,prior,record.runId);
       metadata.set(meta.eventId,meta);
       const rawMarkets=Array.isArray(meta.raw.markets)?meta.raw.markets:[];
       if(new Set(meta.markets.map(m=>m.marketId)).size<rawMarkets.length)warnings.add(`unmapped-market-metadata:${meta.eventSlug}`);
       for(const market of meta.markets){
         const before=markets.get(market.tokenId);
-        if(before&&(before.conditionId!==market.conditionId||before.outcome!==market.outcome||before.gameId!==market.gameId))throw new Error("TAIL_TOKEN_MAPPING_CONFLICT");
+        if(before&&(before.conditionId!==market.conditionId||before.outcome!==market.outcome||
+          (before.gameId!==market.gameId&&before.eventId!==market.eventId)))throw new Error("TAIL_TOKEN_MAPPING_CONFLICT");
         markets.set(market.tokenId,market);
       }
     }
@@ -158,6 +165,8 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
   if(!first||!last||last.source!=="collector"||(last.kind!=="session_end"&&!sealedCheckpoint))throw new Error("TAIL_RUN_NOT_CLOSED: use a completed journal or sealed checkpoint");
   if(sealedCheckpoint)warnings.add("sealed-checkpoint: immutable cutoff; collection continued in the source run");
   if(last.kind==="session_end"&&(last.data as {status?:unknown})?.status==="failed")warnings.add("collector-session-failed");
+  const quarantine=identityScope.resolve(options.eventSlugs);
+  for(const warning of quarantine.warnings)warnings.add(warning);
   let labelText:string|null=null;
   if(options.finishLabelsFile){
     labelText=await readFile(options.finishLabelsFile,"utf8");
@@ -177,21 +186,24 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
   }
   const groups=new Map<string,TailWindow>();
   for(const meta of metadata.values()){
+    if(quarantine.eventIds.has(meta.eventId))continue;
     const key=meta.gameId!==null?`game:${meta.gameId}`:`event:${meta.eventId}`;
     let window=groups.get(key);
     if(!window){window={key,eventIds:[],eventSlugs:[],title:meta.title,gameId:meta.gameId,startAtMs:null,endAtMs:null,finishSources:[],finishConflict:false,markets:[]};groups.set(key,window);}
     window.eventIds.push(meta.eventId);window.eventSlugs.push(meta.eventSlug);
   }
   for(const market of markets.values()){
+    if(quarantine.eventIds.has(market.eventId))continue;
     const key=market.gameId!==null?`game:${market.gameId}`:`event:${market.eventId}`;
     groups.get(key)?.markets.push(market);
   }
   const allWindows=[...groups.values()];
-  const windowIdentities=allWindows.map(({key,gameId,eventSlugs})=>({key,gameId,eventSlugs:[...eventSlugs]}));
+  const windowIdentities:TailWindowIdentity[]=[...allWindows.map(({key,gameId,eventSlugs})=>({key,gameId,eventSlugs:[...eventSlugs]})),...quarantine.identities];
+  const eventIdentities=quarantine.eventIdentities;
   for(const finish of [...finishes.values()].flat().sort((a,b)=>a.order-b.order)){
-    const key=windowKeyForIdentity(finish,windowIdentities);
+    const key=windowKeyForBoundIdentity(finish,windowIdentities,eventIdentities);
     if(key===undefined)continue;
-    const window=groups.get(key)!;
+    const window=groups.get(key);if(!window)continue; // Reserved, non-exportable quarantine identity.
     if(window.endAtMs===null){
       window.endAtMs=finish.atMs;window.startAtMs=finish.atMs-options.windowSeconds*1000;
     }else if(window.endAtMs!==finish.atMs)window.finishConflict=true;
@@ -217,10 +229,21 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
     for(const fact of facts){
       // Resolve before selection so a filtered-out known slug cannot hide a
       // contradiction. Unknown companions require a captured shared game.
-      const key=windowKeyForIdentity(fact,windowIdentities);
+      let key:string|undefined;
+      try{key=windowKeyForBoundIdentity(fact,windowIdentities,eventIdentities);}
+      catch(error){throw new Error("TAIL_FACTS_IDENTITY_MISMATCH: raw event binding",{cause:error});}
       if(key===undefined)throw new Error("TAIL_FACTS_IDENTITY_MISMATCH: no captured window");
-      const window=groups.get(key)!;
       const known=fact.eventId===null?undefined:metadata.get(fact.eventId);
+      const knownSlug=fact.eventSlug===null?undefined:slugEventIds.get(fact.eventSlug);
+      if(fact.eventId!==null&&knownSlug&&(knownSlug.size!==1||!knownSlug.has(fact.eventId)))throw new Error("TAIL_FACTS_IDENTITY_MISMATCH: known slug");
+      const window=groups.get(key);
+      if(!window){
+        // Quarantine is not permission to hide a fact which also names a
+        // different/healthy event. Validate that binding before omitting it.
+        if(known&&(windowKeyForIdentity({eventSlug:known.eventSlug,gameId:known.gameId},windowIdentities)!==key||
+          (fact.eventSlug!==null&&fact.eventSlug!==known.eventSlug)))throw new Error("TAIL_FACTS_IDENTITY_MISMATCH: quarantined event binding");
+        continue;
+      }
       if(known){
         const expectedKey=known.gameId!==null?`game:${known.gameId}`:`event:${known.eventId}`;
         if(key!==expectedKey||(fact.eventSlug!==null&&fact.eventSlug!==known.eventSlug)||
@@ -228,8 +251,6 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
       }else if(fact.eventId!==null&&(fact.gameId===null||window.gameId!==fact.gameId)){
         throw new Error("TAIL_FACTS_IDENTITY_MISMATCH: unknown companion requires a shared game");
       }
-      const knownSlug=fact.eventSlug===null?undefined:slugEventIds.get(fact.eventSlug);
-      if(fact.eventId!==null&&knownSlug&&(knownSlug.size!==1||!knownSlug.has(fact.eventId)))throw new Error("TAIL_FACTS_IDENTITY_MISMATCH: known slug");
       // Native/HTTP evidence retains the first boundary. Later-run facts can
       // prove conflict without replacing the old run's books or live metadata.
       if(window.endAtMs===null){window.endAtMs=fact.atMs;window.startAtMs=fact.atMs-options.windowSeconds*1000;}
@@ -253,5 +274,5 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
   }
   if(clockIssues.length)warnings.add("receipt-wall-clock-backstep: chronology follows captured sequence; clock-affected bins are not precise");
   if(await journalStamp(options.runDirectory)!==stamp)throw new Error("TAIL_INPUT_CHANGED");
-  return {windows,windowIdentities,clockPolicy:options.clockPolicy,clockIssues,runId:first.runId,firstMs:first.receivedAtMs,lastMs:last.receivedAtMs,records:count,stamp,labelText,factsStamp,warnings:[...warnings]};
+  return {windows,windowIdentities,eventIdentities,clockPolicy:options.clockPolicy,clockIssues,runId:first.runId,firstMs:first.receivedAtMs,lastMs:last.receivedAtMs,records:count,stamp,labelText,factsStamp,warnings:[...warnings]};
 }

@@ -57,6 +57,15 @@ export interface TailWindow {
   finishEvidence?: Array<{atMs:number;observedAtMs:number;source:string;eventSlug:string|null;sourceFile?:string;
     eventId?:string|null;gameId?:string|null;sourceRunId?:string;sourceRunDirectory?:string|null;sequence?:number;frameIndex?:number}>;
 }
+/** A reserved identity may represent a quarantined component, never an exportable window. */
+export interface TailWindowIdentity {
+  key: string; eventSlugs: string[]; gameId: string | null;
+  gameIdAliases?: string[];
+}
+export interface TailEventIdentity {
+  eventSlugs: string[]; gameIds: string[];
+  quarantineKey?: string; ambiguousGameIds?: boolean;
+}
 export type TailBookStatus = "observed" | "carried" | "partial" | "missing" | "invalid" | "feed_stale" | "outside_run" | "not_yet_known" | "closed";
 export interface TailSecond {
   windowKey: string; eventSlug: string; gameId: string | null; marketId: string; conditionId: string;
