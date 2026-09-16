@@ -1,7 +1,7 @@
 import { JournalReplay } from "./replay.js";
-import { objectValue, parsedJson } from "./replay-values.js";
+import { identifier, objectValue, parsedJson } from "./replay-values.js";
 import { scanJournal } from "./journal-reader.js";
-import { metadataFromRecord, observationsFromRecord, changesBetween, windowKeyForIdentity } from "./tail-context.js";
+import { metadataFromRecord, observationsFromRecord, changesBetween, windowKeyForBoundIdentity } from "./tail-context.js";
 import { finishFactsStamp, journalStamp, scanTailCatalog, tailOptions } from "./tail-catalog.js";
 import { TailBuckets, type TailLiveState } from "./tail-buckets.js";
 import { auditBook, auditSnapshot, sourceMilliseconds } from "./tail-audit.js";
@@ -153,7 +153,9 @@ export async function replayTail(input: TailOptions, sink: TailSink): Promise<Ta
     if(metadata)for(const market of metadata.markets)if(tokenWindows.has(market.tokenId))live.markets.set(market.tokenId,
       resolvedTokens.has(market.tokenId)||metadata.raw.closed===true||metadata.raw.archived===true?{...market,closed:true}:market);
     for(const observation of observationsFromRecord(record)){
-      const key=windowKeyForIdentity(observation,catalog.windowIdentities);if(!key||!selectedWindowKeys.has(key))continue;
+      const key=windowKeyForBoundIdentity({eventSlug:observation.eventSlug,gameId:observation.gameId,
+        eventId:observation.source==="gamma"?identifier(observation.raw.id)??null:null},catalog.windowIdentities,catalog.eventIdentities);
+      if(!key||!selectedWindowKeys.has(key))continue;
       const sourceKey=key+":"+observation.source;
       const previous=previousObservations.get(sourceKey);
       const watermark=sourceWatermarks.get(sourceKey);
