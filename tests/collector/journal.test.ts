@@ -80,6 +80,35 @@ describe("segmented collector journal", () => {
     expect(await journalLines(root, "run")).toHaveLength(2);
   });
 
+  test("can admit records for processing without persisting them", async () => {
+    const root = await temporaryRoot();
+    const journal = await createJournal({
+      rootDir: root,
+      runId: "filtered",
+      persistRecord: record => record.kind !== "raw_frame"
+    });
+    const skipped = journal.record({ source: "sports", kind: "raw_frame", data: { duplicate: true } });
+    const persisted = journal.record({ source: "collector", kind: "session_end", data: { ok: true } });
+    await journal.close();
+
+    expect(skipped.sequence).toBe(1);
+    expect(persisted.sequence).toBe(2);
+    expect(await journalLines(root, "filtered")).toEqual([expect.objectContaining({ sequence: 2, kind: "session_end" })]);
+  });
+
+  test("filtered records do not consume the queue byte limit", async () => {
+    const root = await temporaryRoot();
+    const journal = await createJournal({
+      rootDir: root,
+      maxBufferBytes: 1_000,
+      persistRecord: record => record.kind !== "raw_frame"
+    });
+    expect(() => journal.record({ source: "sports", kind: "raw_frame", data: "x".repeat(10_000) })).not.toThrow();
+    expect(() => journal.record({ source: "collector", kind: "session_end", data: {} })).not.toThrow();
+    await journal.close();
+    expect(await journalLines(root, journal.runId)).toHaveLength(1);
+  });
+
   test("rotates on UTC date and segment byte limits without reordering records", async () => {
     const root = await temporaryRoot();
     const times = [

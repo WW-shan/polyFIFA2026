@@ -18,6 +18,8 @@ export interface JournalOptions {
   now?: () => Date | number;
   monotonicNs?: () => bigint | number;
   onError?: (error: unknown) => void;
+  /** Return false to process a receipt without writing it to the raw journal. */
+  persistRecord?: (record: JournalRecord) => boolean;
 }
 
 export interface JournalCheckpoint {
@@ -73,6 +75,7 @@ export class CollectorJournal implements RecordSink {
   private readonly now: () => Date | number;
   private readonly monotonicNs: () => bigint | number;
   private readonly onError: ((error: unknown) => void) | undefined;
+  private readonly persistRecord: ((record: JournalRecord) => boolean) | undefined;
   private readonly queue: PendingRecord[] = [];
   private readonly checkpointWaiters = new Set<CheckpointWaiter>();
   private readonly ready: Promise<void>;
@@ -99,6 +102,7 @@ export class CollectorJournal implements RecordSink {
     this.now = options.now;
     this.monotonicNs = options.monotonicNs;
     this.onError = options.onError;
+    this.persistRecord = options.persistRecord;
     this.ready = this.initialize();
   }
 
@@ -110,7 +114,8 @@ export class CollectorJournal implements RecordSink {
       maxBufferBytes: positiveInteger(options.maxBufferBytes, DEFAULT_MAX_BUFFER_BYTES, "maxBufferBytes"),
       now: options.now ?? (() => new Date()),
       monotonicNs: options.monotonicNs ?? (() => process.hrtime.bigint()),
-      onError: options.onError
+      onError: options.onError,
+      persistRecord: options.persistRecord
     });
     try {
       await journal.ready;
@@ -171,12 +176,16 @@ export class CollectorJournal implements RecordSink {
     if (input.connectionId !== undefined) record.connectionId = input.connectionId;
 
     const line = `${JSON.stringify(record)}\n`;
+    this.sequence = sequence;
+    let persist = true;
+    try { persist = waiter !== undefined || this.persistRecord?.(record) !== false; }
+    catch (error) { this.fail(error); throw error; }
+    if (!persist) return record;
     const bytes = Buffer.byteLength(line);
     if (bytes > this.maxBufferBytes || this.queuedBytes + bytes > this.maxBufferBytes) {
       throw new Error("JOURNAL_BUFFER_OVERFLOW");
     }
 
-    this.sequence = sequence;
     const pending: PendingRecord = { line, bytes, date: utcDate(received) };
     if (waiter) {
       pending.checkpoint = { ...waiter, sequence, receivedAtMs: record.receivedAtMs };
