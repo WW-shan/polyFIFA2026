@@ -47,71 +47,17 @@
 
 数据库路径：`data/collector/continuous/tail.sqlite`。
 
-数据库启动时设置：
+当前实现使用 Node 26 的 `node:sqlite`，不增加 native npm 依赖。启动时设置 `journal_mode=DELETE`、`synchronous=NORMAL`、外键约束和增量 vacuum。
 
-- `journal_mode=DELETE`，避免 WAL 文件长期膨胀；
-- `synchronous=NORMAL`；
-- `foreign_keys=ON`；
-- `auto_vacuum=INCREMENTAL`；
-- 使用事务批量写入单场比赛。
+实际表为：
 
-核心表：
+- `compact_meta`：schema 版本；
+- `payloads(hash, payload)`：按稳定 payload hash 去重的 deflate 压缩正文；
+- `matches(game_key, title, sport, game_id, event_ids_json, event_slugs_json, token_ids_json, market_ids_json, finished_at_ms, updated_at_ms)`：已完成比赛索引；
+- `staging_records(game_key, run_id, sequence, received_at_ms, source, kind, payload_hash)`：最近滚动窗口；
+- `tail_records(game_key, run_id, sequence, received_at_ms, source, kind, payload_hash)`：已完成比赛最后 180 秒的去重帧引用。
 
-```sql
-CREATE TABLE matches (
-  game_id TEXT PRIMARY KEY,
-  sport TEXT NOT NULL,
-  title TEXT NOT NULL,
-  event_ids_json TEXT NOT NULL,
-  started_at_ms INTEGER,
-  finished_at_ms INTEGER,
-  observed_finished_at_ms INTEGER,
-  status TEXT NOT NULL,
-  coverage_seconds INTEGER NOT NULL DEFAULT 0,
-  expected_seconds INTEGER NOT NULL DEFAULT 180,
-  source_run_id TEXT,
-  created_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL
-) WITHOUT ROWID;
-
-CREATE TABLE markets (
-  market_id TEXT PRIMARY KEY,
-  game_id TEXT NOT NULL REFERENCES matches(game_id) ON DELETE CASCADE,
-  market_slug TEXT NOT NULL,
-  question TEXT NOT NULL,
-  outcomes_json TEXT NOT NULL,
-  token_ids_json TEXT NOT NULL,
-  first_seen_at_ms INTEGER NOT NULL,
-  last_seen_at_ms INTEGER NOT NULL
-) WITHOUT ROWID;
-
-CREATE TABLE tail_samples (
-  game_id TEXT NOT NULL REFERENCES matches(game_id) ON DELETE CASCADE,
-  market_id TEXT NOT NULL REFERENCES markets(market_id) ON DELETE CASCADE,
-  sample_second INTEGER NOT NULL,
-  received_at_ms INTEGER NOT NULL,
-  score_json TEXT,
-  book_blob BLOB,
-  trades_blob BLOB,
-  source_flags INTEGER NOT NULL DEFAULT 0,
-  state_hash TEXT NOT NULL,
-  PRIMARY KEY (game_id, market_id, sample_second)
-) WITHOUT ROWID;
-
-CREATE TABLE raw_audit_chunks (
-  chunk_id TEXT PRIMARY KEY,
-  game_id TEXT,
-  created_at_ms INTEGER NOT NULL,
-  expires_at_ms INTEGER NOT NULL,
-  compressed_bytes INTEGER NOT NULL,
-  payload BLOB NOT NULL
-) WITHOUT ROWID;
-
-CREATE INDEX tail_samples_time_idx ON tail_samples(received_at_ms);
-CREATE INDEX raw_audit_expiry_idx ON raw_audit_chunks(expires_at_ms);
-```
-
-`book_blob` 和 `trades_blob` 使用确定性 JSON 后再压缩；同一个市场同一秒的相同状态只保留一行。数据库只保存最终 180 秒窗口，不保存整场订单簿历史。
+`staging_records` 和 `tail_records` 使用复合主键，`payloads` 由多个比赛/记录共享。删除 staging 或最终比赛后会清理无引用 payload。最终库保存去重后的原始业务帧及完整接收时间、来源、序号；逐秒深度/变化的现有回放格式仍由旧导出链处理，不在 SQLite 写入路径中复制一套第二种逐秒结构。
 
 ## 5. 采集与去重规则
 
@@ -130,17 +76,17 @@ CREATE INDEX raw_audit_expiry_idx ON raw_audit_chunks(expires_at_ms);
 
 ### 5.3 滚动层
 
-- CLOB 的 `book`、`price_change` 和成交消息先按 game/market/token 映射到内存状态。
-- 只保留最近 210 秒；窗口外的逐帧消息立即丢弃。
-- 对订单簿做状态 hash 去重；没有 bid/ask/trade/score 变化的更新不生成新样本。
-- 每秒最多生成一个市场样本；一秒内的多次变更合并为该秒最后状态，并在样本中保留该秒的成交计数和极值。
-- 进程异常退出时，未完成比赛的内存滚动层可以丢失；不会因此把无限时长 raw 流写到磁盘。
+- CLOB 的 `book`、`price_change` 和成交消息按 game/token 映射到 staging；Sports 状态帧按 game identity 映射。
+- 只保留最近 210 秒；窗口外的逐帧消息由维护任务删除。
+- 对稳定 payload 做 hash 去重；同一比赛连续重复帧不再写入 staging。
+- 终场时把 `[finish - 180s, finish]` 的 staging 行复制到最终表，保留原始来源、序号、接收时间和压缩正文。
+- 进程异常退出时，未完成比赛的 staging 只保留有限窗口；不会因此把无限时长 raw 流写到磁盘。
 
 ### 5.4 结束与发布
 
 - 以 Sports `ended`/终场状态或现有生命周期确认作为结束信号。
 - 结束后从滚动层截取 `[finish - 180s, finish)`；如果只知道观察到结束的时间，则写入 `finish_confidence=observed` 和覆盖状态，不伪造精确时间。
-- SQLite 单事务写入 match、markets、tail_samples 和覆盖统计；提交成功后清理该比赛缓存。
+- SQLite 单事务写入 matches、tail_records 和 payload 引用；提交成功后清理该比赛的 staging 缓存。
 - 没有可靠结束信号的比赛在内存 TTL 到期后只保存精简 metadata，不生成完整 tail 数据。
 
 ## 6. 磁盘上限与自动清理
@@ -149,29 +95,27 @@ CREATE INDEX raw_audit_expiry_idx ON raw_audit_chunks(expires_at_ms);
 
 - `tailWindowSeconds=180`；
 - `tailBufferSeconds=30`；
-- `rawAuditRetentionHours=24`；
-- `maxRawAuditBytes=1 GiB`；
-- `maxDatabaseBytes=8 GiB`；
-- `maxCollectorBytes=10 GiB`；
-- `databaseRetentionDays=30`；
-- `maintenanceIntervalMs=60_000`。
+- `maxTailStoreBytes=8 GiB`；
+- `tailRetentionDays=30`；
+- `maintenanceIntervalMs=60_000`；
+- 继续使用已有 `minFreeBytes=20 GiB` 作为系统空间保护线。
 
 维护顺序：
 
-1. 删除过期 `raw_audit_chunks`；
-2. 删除已经成功进入 SQLite 的旧 raw run/checkpoint/导出临时副本；
-3. 删除超过 `databaseRetentionDays` 的最旧完整比赛结果；
-4. 执行增量 vacuum，并在空闲时执行一次受限 `VACUUM`；
-5. 若仍超过 `maxCollectorBytes` 或系统可用空间低于 `minFreeBytes`，暂停 CLOB 采集，只保留最小控制状态；
+1. 删除 staging 中超过 210 秒窗口的数据；
+2. 删除已经超过 `tailRetentionDays` 且不是当前 run 的旧 raw run；
+3. 删除超过 `tailRetentionDays` 的最旧完整比赛结果及无引用 payload；
+4. 执行增量 vacuum；
+5. 若 SQLite 仍超过 `maxTailStoreBytes`，从最旧完整比赛开始释放，清不出空间时记录错误并暂停采集；
 6. 维护操作必须是幂等的，清理失败只能记录错误，不能误删当前比赛或未提交事务。
 
 达到阈值后不再单纯“暂停但保留全部数据”；系统必须先尝试释放最旧、已确认可重建/已入库的数据。
 
 ## 7. 兼容与导出
 
-- 现有 `collect:tail` 增加从 `tail.sqlite` 导出 180 秒逐秒数据的路径，输出格式继续兼容现有 tail backtest。
-- 旧 NDJSON run 仍可只读回放，但不再作为连续采集器的新默认存储。
-- `status` 增加：数据库大小、raw 审计大小、缓存比赛数、已完成比赛数、最近维护时间和最近一次清理结果。
+- 旧 `collect:tail` 和 NDJSON 回放路径保持兼容；compact 结果通过 `tail.sqlite` 的紧凑读取接口保存，后续导出可在不重新收集 raw 的情况下生成。
+- 旧 NDJSON run 仍可只读回放，但不再作为连续采集器的新默认市场存储。
+- `status` 增加：SQLite 路径/大小、staging 行数、已完成比赛数/行数、最近维护时间和最近一次清理删除计数。
 - 不删除 `data/research`、策略回测结果或用户明确保留的历史数据。
 
 ## 8. 验收标准
