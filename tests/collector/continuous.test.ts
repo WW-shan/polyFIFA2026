@@ -236,6 +236,7 @@ test("compact mode keeps raw market frames out of NDJSON and finalizes them in S
     const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
     expect(store.readFinalized("game:A")).toHaveLength(2);
+    expect(manager.state.snapshot().compactStorage).toMatchObject({ finalizedMatches: 1, finalizedRecords: 2 });
     store.close();
   } finally { await manager.stop(); }
   const { records } = await readJournalRecords(join(config.dataRoot, "runs", manager.state.snapshot().runId!));

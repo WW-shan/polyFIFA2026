@@ -3,6 +3,7 @@ import { metadataFromRecord, observationsFromRecord, windowKeyForIdentity } from
 import { objectValue } from "./replay-values.js";
 import type { JournalRecord } from "./types.js";
 import type { TailFinishFact } from "./tail-types.js";
+import type { CompactTailStoreStatus } from "./continuous-tail-store.js";
 
 export interface ArchiveState {
   status: "running" | "complete" | "failed"; runId: string; attempt: number;
@@ -38,6 +39,7 @@ export interface ContinuousStatus {
   freeBytes: number | null; rawBytes: number; queuedBytes: number; desiredTokens: number;
   games: CapturedGame[]; connections: CaptureConnection[];
   errors: Array<{ atMs: number; scope: string; message: string }>;
+  compactStorage?: CompactTailStoreStatus;
   compression?: CompressionState;
 }
 
@@ -61,6 +63,7 @@ export class ContinuousState {
   desiredTokens = 0;
   compression: CompressionState = { enabled: false, running: false, lastCompletedAtMs: null,
     compressedSegments: 0, logicalBytesSaved: 0, lastError: null };
+  compactStorage: CompactTailStoreStatus | undefined;
 
   constructor(readonly dataRoot: string, readonly port: number) {}
   setRun(runId: string, runDirectory: string): void {
@@ -70,6 +73,7 @@ export class ContinuousState {
     this.errors.push({ scope, atMs, message: (error instanceof Error ? error.message : String(error)).slice(0, 2000) });
     if (this.errors.length > 50) this.errors.shift();
   }
+  setCompactStorage(status: CompactTailStoreStatus): void { this.compactStorage = structuredClone(status); }
   private source(game: CapturedGame, record: JournalRecord): void {
     if (this.runDirectory && this.runId === record.runId && !game.sources.some(source => source.runId === record.runId)) game.sources.push({ runId: record.runId, runDirectory: this.runDirectory });
     game.sourceFirstSequences ??= {};
@@ -267,7 +271,7 @@ export class ContinuousState {
       updatedAtMs: Date.now(), dataRoot: this.dataRoot, port: this.port, mode: this.mode, runId: this.runId, runDirectory: this.runDirectory,
       receivedRecords: this.receivedRecords, lastRecordAtMs: this.lastRecordAtMs, freeBytes: this.freeBytes, rawBytes: this.rawBytes,
       queuedBytes: this.queuedBytes, desiredTokens: this.desiredTokens, games: [...this.games.values()], connections: [...this.connections.values()], errors: this.errors,
-      compression: this.compression })) as ContinuousStatus & { compression: CompressionState };
+      ...(this.compactStorage ? { compactStorage: this.compactStorage } : {}), compression: this.compression })) as ContinuousStatus & { compression: CompressionState };
   }
   restore(saved: ContinuousStatus): void {
     if (saved.schemaVersion !== 1 || !Array.isArray(saved.games)) throw new Error("CAPTURE_STATE_INVALID");

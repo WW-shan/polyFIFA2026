@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
-  lstat, mkdir, mkdtemp, open, readdir, readFile, rename, rm, statfs, symlink, unlink, writeFile,
+  lstat, mkdir, mkdtemp, open, readdir, readFile, rename, rm, statfs, symlink, unlink, utimes, writeFile,
   type FileHandle
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ContinuousStatus } from "../../src/collector/continuous-state.js";
 import {
-  acquireCaptureLock, availableDiskBytes, rawRunBytes, readCaptureState, writeCaptureState
+  acquireCaptureLock, availableDiskBytes, pruneRawRunDirectories, rawRunBytes, readCaptureState, writeCaptureState
 } from "../../src/collector/continuous-storage.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -476,6 +476,24 @@ describe("continuous capture byte accounting", () => {
     await symlink(join(root, "2026-09-13-000000.ndjson"), join(root, "2026-09-13-000006.ndjson"));
     await symlink(join(root, "rawdata"), join(root, "2026-09-13-000007.ndjson"));
     expect(await rawRunBytes(root)).toBe(Buffer.byteLength("abc") + Buffer.byteLength("déf"));
+  });
+
+  test("prunes only old non-active raw run directories inside the owned runs root", async () => {
+    const root = await temporaryRoot(), runs = join(root, "runs");
+    await mkdir(join(runs, "old"), { recursive: true });
+    await mkdir(join(runs, "active"), { recursive: true });
+    await mkdir(join(runs, "new"), { recursive: true });
+    await writeFile(join(runs, "old", "2026-01-01-000000.ndjson"), "old");
+    await writeFile(join(runs, "active", "2026-01-01-000000.ndjson"), "active");
+    await writeFile(join(runs, "new", "2026-01-01-000000.ndjson"), "new");
+    await utimes(join(runs, "old"), 0, 0);
+    await utimes(join(runs, "active"), 0, 0);
+    await utimes(join(runs, "new"), 9_500, 9_500);
+
+    expect(await pruneRawRunDirectories(root, "active", 1_000, 10_000)).toBe(1);
+    await expect(lstat(join(runs, "old"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(join(runs, "active"))).isDirectory()).toBe(true);
+    expect((await lstat(join(runs, "new"))).isDirectory()).toBe(true);
   });
 
   test("returns zero for a run directory that has not been created", async () => {

@@ -11,7 +11,7 @@ import { runTailExport } from "./continuous-export.js";
 import { runJournalCompression } from "./continuous-compression.js";
 import { sealJournalSnapshot } from "./sealed-journal.js";
 import { startContinuousServer } from "./continuous-server.js";
-import { acquireCaptureLock, availableDiskBytes, rawRunBytes, readCaptureState, writeCaptureState } from "./continuous-storage.js";
+import { acquireCaptureLock, availableDiskBytes, pruneRawRunDirectories, rawRunBytes, readCaptureState, writeCaptureState } from "./continuous-storage.js";
 import type { JsonRequester, JournalRecord, RecordInput } from "./types.js";
 import { metadataFromRecord } from "./tail-context.js";
 import { CompactTailStore, openCompactTailStore } from "./continuous-tail-store.js";
@@ -88,6 +88,7 @@ export class ContinuousCollector {
       this.compactStore = await openCompactTailStore({ dataRoot: this.config.dataRoot,
         tailWindowMs: this.config.tailWindowSeconds * 1000, bufferMs: this.config.tailBufferSeconds * 1000,
         retentionMs: this.config.tailRetentionDays * 24 * 3600_000 || 1, maxBytes: this.config.maxTailStoreBytes, now: this.now });
+      this.state.setCompactStorage(this.compactStore.snapshot());
     }
     this.lock = await acquireCaptureLock(this.config.dataRoot);
     this.cancellation.signal.throwIfAborted();
@@ -205,8 +206,11 @@ export class ContinuousCollector {
         this.compactStore.flush();
         if (this.now() >= this.nextMaintenanceAtMs) {
           this.compactStore.maintain(this.now());
+          await pruneRawRunDirectories(this.config.dataRoot, this.journal?.runId ?? null,
+            this.config.tailRetentionDays * 24 * 3600_000, this.now());
           this.nextMaintenanceAtMs = this.now() + this.config.maintenanceIntervalMs;
         }
+        this.state.setCompactStorage(this.compactStore.snapshot());
       } catch (error) {
         this.state.issue("compact_storage", error, this.now());
         this.pausedForDisk = true; this.state.mode = "paused_disk";
@@ -287,6 +291,7 @@ export class ContinuousCollector {
       await this.persist(); signal.throwIfAborted();
       await journal.flush(); signal.throwIfAborted();
       this.compactStore!.finalize(game, finishAtMs);
+      this.state.setCompactStorage(this.compactStore!.snapshot());
       signal.throwIfAborted();
       this.state.markArchive(game.key, { status: "complete", runId: sourceRunId, attempt,
         outputDirectory: this.compactStore!.databasePath, finishRevision: revision, priceReadyTokens: 0, strictReadyTokens: 0 });
@@ -439,7 +444,13 @@ export class ContinuousCollector {
     await this.captureTask;
     await this.archiveTask;
     await this.compressionTask;
-    try { this.compactStore?.close(); } catch (error) { this.state.issue("compact_storage", error, this.now()); }
+    try {
+      if (this.compactStore) {
+        this.compactStore.flush();
+        this.state.setCompactStorage(this.compactStore.snapshot());
+        this.compactStore.close();
+      }
+    } catch (error) { this.state.issue("compact_storage", error, this.now()); }
     this.state.mode = "stopped";
     try { await this.persist(); }
     finally {

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { link, lstat, mkdir, open, opendir, rename, statfs, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, opendir, readdir, rename, rm, statfs, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { ContinuousStatus } from "./continuous-state.js";
 
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -241,4 +241,29 @@ export async function rawRunBytes(runDirectory: string): Promise<number> {
     }
   }
   return safeByteCount(bytes);
+}
+
+
+export async function pruneRawRunDirectories(dataRoot: string, activeRunId: string | null, retentionMs: number, nowMs = Date.now()): Promise<number> {
+  if (!Number.isSafeInteger(retentionMs) || retentionMs < 0) throw new RangeError("retentionMs must be a nonnegative safe integer");
+  const runsRoot = resolve(dataRoot, "runs");
+  let rootStamp: Stats;
+  try { rootStamp = await lstat(runsRoot); }
+  catch (error) { if (hasCode(error, "ENOENT")) return 0; throw error; }
+  if (!rootStamp.isDirectory() || rootStamp.isSymbolicLink()) throw new Error("CAPTURE_RUNS_INVALID: symlinked directory");
+  const cutoff = nowMs - retentionMs;
+  let removed = 0;
+  for (const entry of await readdir(runsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name === activeRunId) continue;
+    const target = resolve(runsRoot, entry.name);
+    const suffix = relative(runsRoot, target);
+    if (!suffix || suffix.startsWith("..") || resolve(runsRoot, suffix) !== target) throw new Error("CAPTURE_RUN_INVALID: path escaped runs root");
+    let stamp: Stats;
+    try { stamp = await lstat(target); }
+    catch (error) { if (hasCode(error, "ENOENT")) continue; throw error; }
+    if (!stamp.isDirectory() || stamp.isSymbolicLink() || stamp.mtimeMs >= cutoff) continue;
+    await rm(target, { recursive: true, force: false });
+    removed++;
+  }
+  return removed;
 }
