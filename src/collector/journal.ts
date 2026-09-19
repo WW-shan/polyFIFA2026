@@ -94,7 +94,7 @@ export class CollectorJournal implements RecordSink {
   private _runId: string | undefined;
   private _runDirectory: string | undefined;
 
-  private constructor(options: Required<Pick<JournalOptions, "rootDir" | "runId" | "maxSegmentBytes" | "maxBufferBytes" | "now" | "monotonicNs">> & { onError: JournalOptions["onError"] }) {
+  private constructor(options: Required<Pick<JournalOptions, "rootDir" | "runId" | "maxSegmentBytes" | "maxBufferBytes" | "now" | "monotonicNs">> & { onError: JournalOptions["onError"]; persistRecord: JournalOptions["persistRecord"] }) {
     this.rootDir = options.rootDir;
     this.requestedRunId = safeRunId(options.runId);
     this.maxSegmentBytes = options.maxSegmentBytes;
@@ -176,16 +176,16 @@ export class CollectorJournal implements RecordSink {
     if (input.connectionId !== undefined) record.connectionId = input.connectionId;
 
     const line = `${JSON.stringify(record)}\n`;
-    this.sequence = sequence;
     let persist = true;
     try { persist = waiter !== undefined || this.persistRecord?.(record) !== false; }
     catch (error) { this.fail(error); throw error; }
-    if (!persist) return record;
+    if (!persist) { this.sequence = sequence; return record; }
     const bytes = Buffer.byteLength(line);
     if (bytes > this.maxBufferBytes || this.queuedBytes + bytes > this.maxBufferBytes) {
       throw new Error("JOURNAL_BUFFER_OVERFLOW");
     }
 
+    this.sequence = sequence;
     const pending: PendingRecord = { line, bytes, date: utcDate(received) };
     if (waiter) {
       pending.checkpoint = { ...waiter, sequence, receivedAtMs: record.receivedAtMs };
