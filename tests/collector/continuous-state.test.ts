@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { ContinuousState } from "../../src/collector/continuous-state.js";
-import { eventMetadata, fixtureRecords, journalRecord } from "./tail-fixture.js";
+import { book, eventMetadata, fixtureRecords, journalRecord } from "./tail-fixture.js";
 
 describe("persistent continuous capture observations", () => {
   test("tracks actual books, connections and games without claiming completed coverage", () => {
@@ -75,6 +75,26 @@ describe("persistent continuous capture observations", () => {
     expect(state.snapshot().games[0]?.archive?.snapshotDirectory).toBeUndefined();
     state.markArchive("game:123", { status: "complete", runId: "tail-test", attempt: 2, outputDirectory: "/capture/exports/new", priceReadyTokens: 2, strictReadyTokens: 2 });
     expect(state.snapshot().games[0]?.archive).toMatchObject({ priceReadyTokens: 0, strictReadyTokens: 0 });
+  });
+
+  test("resolves market, sports, and retired records to their game identity", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    state.observe(journalRecord(1, 100, "gamma", "event_metadata", eventMetadata(0)));
+    expect(state.gameKeysForRecord(journalRecord(2, 200, "clob", "ws_message", book("A"), "clob"))).toEqual(["game:123"]);
+    expect(state.gameKeysForRecord(journalRecord(3, 300, "sports", "ws_message",
+      JSON.stringify({ gameId: 123, slug: "game", sport: "soccer", score: "0-0" }), "sports"))).toEqual(["game:123"]);
+    expect(state.gameKeysForRecord(journalRecord(4, 400, "collector", "event_retired", { eventId: "event" }))).toEqual(["game:123"]);
+  });
+
+  test("returns newly finished games once for compact finalization", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    state.observe(journalRecord(1, 100, "gamma", "event_metadata", eventMetadata(0)));
+    expect(state.consumeNewlyFinishedGames()).toEqual([]);
+    state.observe(journalRecord(2, 200, "sports", "ws_message", JSON.stringify({
+      gameId: 123, slug: "game", sport: "soccer", ended: true, finishedAt: new Date(180).toISOString()
+    }), "sports"));
+    expect(state.consumeNewlyFinishedGames().map(game => [game.key, game.finishedAtMs])).toEqual([["game:123", 180]]);
+    expect(state.consumeNewlyFinishedGames()).toEqual([]);
   });
 
   test("unknown and malformed frames are recorded as diagnostics, not invented match observations", () => {

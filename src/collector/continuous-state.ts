@@ -47,6 +47,7 @@ export class ContinuousState {
   private readonly events = new Map<string, string>();
   private readonly connections = new Map<string, CaptureConnection>();
   private readonly errors: ContinuousStatus["errors"] = [];
+  private readonly newlyFinished = new Set<string>();
   private readonly instanceId = randomUUID();
   private readonly startedAtMs = Date.now();
   private receivedRecords = 0;
@@ -77,6 +78,7 @@ export class ContinuousState {
   private finish(game: CapturedGame, value: number | null, record: JournalRecord,
     origin?: Pick<TailFinishFact, "source" | "eventId" | "eventSlug" | "gameId" | "frameIndex">): void {
     if (value === null) return;
+    const previousFinishedAtMs = game.finishedAtMs;
     let newFact = false;
     if (origin) {
       const facts = game.finishFacts ??= [];
@@ -103,11 +105,67 @@ export class ContinuousState {
     }
     if (game.finishedAtMs === null) { game.finishRunId = record.runId; game.finishRevision = 1; }
     game.finishedAtMs ??= value;
+    if (game.finishedAtMs !== previousFinishedAtMs) this.newlyFinished.add(game.key);
   }
   observe(record: JournalRecord): void {
     this.receivedRecords++; this.lastRecordAtMs = record.receivedAtMs;
     try { this.observeUnsafe(record); } catch (error) { this.issue("observation", error, record.receivedAtMs); }
   }
+  gameKeysForRecord(record: JournalRecord): string[] {
+    const keys = new Set<string>();
+    try {
+      const metadata = metadataFromRecord(record);
+      if (metadata) keys.add(metadata.gameId === null ? `event:${metadata.eventId}` : `game:${metadata.gameId}`);
+      if (record.source === "sports" && record.kind === "ws_message") {
+        for (const observation of observationsFromRecord(record)) {
+          const key = windowKeyForIdentity(observation, [...this.games.values()]);
+          if (key) keys.add(key);
+        }
+      }
+      if (record.kind === "event_retired") {
+        const eventId = objectValue(record.data)?.eventId;
+        if (typeof eventId === "string") {
+          const key = this.events.get(eventId);
+          if (key) keys.add(key);
+        }
+      }
+      if (record.source === "clob") {
+        const tokens = new Set<string>();
+        if (record.kind === "ws_message" && typeof record.data === "string") {
+          const parsed: unknown = JSON.parse(record.data);
+          for (const value of Array.isArray(parsed) ? parsed : [parsed]) {
+            const frame = objectValue(value); if (!frame) continue;
+            if (typeof frame.asset_id === "string") tokens.add(frame.asset_id);
+            if (Array.isArray(frame.price_changes)) for (const change of frame.price_changes) {
+              const token = objectValue(change)?.asset_id;
+              if (typeof token === "string") tokens.add(token);
+            }
+          }
+        } else if (record.kind === "book_snapshot") {
+          const token = objectValue(record.data)?.tokenId;
+          if (typeof token === "string") tokens.add(token);
+        } else if (record.kind === "book_snapshot_batch") {
+          const tokenIds = objectValue(record.data)?.tokenIds;
+          if (Array.isArray(tokenIds)) for (const token of tokenIds) if (typeof token === "string") tokens.add(token);
+        }
+        for (const token of tokens) {
+          const key = this.tokens.get(token);
+          if (key) keys.add(key);
+        }
+      }
+    } catch {
+      // State observation already records malformed frames; identity lookup must not crash capture.
+    }
+    return [...keys];
+  }
+
+  consumeNewlyFinishedGames(): CapturedGame[] {
+    const finished = [...this.newlyFinished].map(key => this.games.get(key)).filter((game): game is CapturedGame => game !== undefined)
+      .map(game => structuredClone(game));
+    this.newlyFinished.clear();
+    return finished;
+  }
+
   private observeUnsafe(record: JournalRecord): void {
     if (record.connectionId) {
       const connection = this.connections.get(record.connectionId) ?? { id: record.connectionId, source: record.source, open: false, lastMessageAtMs: null };
