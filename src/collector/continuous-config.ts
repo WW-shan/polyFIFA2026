@@ -31,6 +31,12 @@ export interface ContinuousConfig {
   compressionMaxSegments: number;
   compressionTimeoutMs: number;
   singleMatchOnly: boolean;
+  compactStorageEnabled: boolean;
+  tailWindowSeconds: number;
+  tailBufferSeconds: number;
+  tailRetentionDays: number;
+  maxTailStoreBytes: number;
+  maintenanceIntervalMs: number;
 }
 
 function invalid(message: string): never {
@@ -95,7 +101,13 @@ export function continuousConfig(
     compressionIntervalMs: 60_000,
     compressionMaxSegments: 4,
     compressionTimeoutMs: 120_000,
-    singleMatchOnly: true
+    singleMatchOnly: true,
+    compactStorageEnabled: false,
+    tailWindowSeconds: 180,
+    tailBufferSeconds: 30,
+    tailRetentionDays: 30,
+    maxTailStoreBytes: 8 * 1024 ** 3,
+    maintenanceIntervalMs: 60_000
   };
   const overrides = Object.fromEntries(Object.entries(input).filter(([key, value]) =>
     value !== undefined && (Object.hasOwn(defaults, key) || key === "proxyUrl")
@@ -105,15 +117,18 @@ export function continuousConfig(
   for (const field of [
     "discoveryIntervalMs", "snapshotIntervalMs", "httpTimeoutMs", "pulseIntervalMs",
     "retryDelayMs", "exportTimeoutMs", "minFreeBytes", "port",
-    "compressionIntervalMs", "compressionMaxSegments", "compressionTimeoutMs"
+    "compressionIntervalMs", "compressionMaxSegments", "compressionTimeoutMs",
+    "tailWindowSeconds", "tailBufferSeconds", "maxTailStoreBytes", "maintenanceIntervalMs"
   ] as const) {
     if (!Number.isSafeInteger(config[field]) || config[field] < 1) invalid(`${field} must be a positive safe integer`);
   }
   if (config.port > 65_535) invalid("port must be between 1 and 65535");
   if (typeof config.compressionEnabled !== "boolean") invalid("compressionEnabled must be boolean");
   if (typeof config.singleMatchOnly !== "boolean") invalid("singleMatchOnly must be boolean");
+  if (typeof config.compactStorageEnabled !== "boolean") invalid("compactStorageEnabled must be boolean");
   if (config.compressionMaxSegments > 1024) invalid("compressionMaxSegments must be at most 1024");
   if (config.compressionTimeoutMs > 2_147_483_647) invalid("compressionTimeoutMs exceeds Node's timer limit");
+  if (!Number.isSafeInteger(config.tailRetentionDays) || config.tailRetentionDays < 0) invalid("tailRetentionDays must be a nonnegative safe integer");
   if (!Number.isSafeInteger(config.postFinishRetentionMs) || config.postFinishRetentionMs < 0) {
     invalid("postFinishRetentionMs must be a nonnegative safe integer");
   }

@@ -102,6 +102,28 @@ describe("controlled journal admission", () => {
     expect(run.starts).toEqual([["A-yes", "A-no"]]);
   });
 
+  test("compact mode stores a catalog digest instead of a full HTTP response", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "poly-compact-page-")); temporaryDirectories.push(rootDir);
+    const response = [game("A").raw];
+    const run = fixture({ rootDir, durationSeconds: 0, compactStorageEnabled: true }, {
+      createJournal, discover: discoverSportsEvents, request: async url => new URL(url).pathname === "/events" ? response : {}
+    });
+    const result = await run.runtime.run();
+    const { records } = await readJournalRecords(result.runDirectory);
+    const http = records.find(row => row.source === "gamma" && row.kind === "http_request")!;
+    expect(http.data).toMatchObject({ responseSummary: { bytes: expect.any(Number), sha256: expect.any(String) } });
+    expect((http.data as Record<string, unknown>).response).toBeUndefined();
+    expect(records.some(row => row.kind === "discovery_page")).toBe(false);
+    expect(records.some(row => row.kind === "discovery_page_ref")).toBe(true);
+  });
+
+  test("compact mode skips the redundant initial and periodic HTTP book snapshots", async () => {
+    const run = fixture({ durationSeconds: 0, compactStorageEnabled: true, snapshotIntervalMs: 1 }, { discover: async () => [game("A")] });
+    const result = await run.runtime.run();
+    expect(result.status).toBe("stopped");
+    expect(run.records.filter(row => row.kind === "book_snapshot" || row.kind === "book_snapshot_batch")).toHaveLength(0);
+  });
+
   test("concurrent reconciliation responses and snapshots share admission without serializing HTTP workers", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "poly-concurrent-admission-")); temporaryDirectories.push(rootDir);
     const events = [game("A"), game("B"), game("C")];

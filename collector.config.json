@@ -1,19 +1,31 @@
 {
   "dataRoot": "data/collector/continuous",
   "profiles": [
-    { "name": "tennis", "tagId": "864" },
-    { "name": "table-tennis", "tagId": "103767" }
+    {
+      "name": "tennis",
+      "tagId": "864"
+    },
+    {
+      "name": "table-tennis",
+      "tagId": "103767"
+    }
   ],
   "proxyUrl": "http://127.0.0.1:10808",
   "lookbackHours": 6,
   "aheadHours": 2,
   "discoveryIntervalMs": 30000,
   "snapshotIntervalMs": 60000,
-  "postFinishRetentionMs": 600000,
+  "postFinishRetentionMs": 30000,
   "minFreeBytes": 21474836480,
   "compressionEnabled": true,
   "compressionIntervalMs": 60000,
   "compressionMaxSegments": 64,
   "singleMatchOnly": true,
-  "port": 8765
+  "port": 8765,
+  "compactStorageEnabled": true,
+  "tailWindowSeconds": 180,
+  "tailBufferSeconds": 30,
+  "tailRetentionDays": 30,
+  "maxTailStoreBytes": 8589934592,
+  "maintenanceIntervalMs": 60000
 }

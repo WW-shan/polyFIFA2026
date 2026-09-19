@@ -58,6 +58,8 @@ export interface CollectorOptions {
   snapshotBatchSize?: number;
   /** Start discovery timers without waiting for the first HTTP snapshot pass. */
   backgroundInitialSnapshots?: boolean;
+  /** Keep raw market frames out of the NDJSON journal; the continuous wrapper owns compact storage. */
+  compactStorageEnabled?: boolean;
   httpTimeoutMs?: number;
   durationSeconds?: number;
   maxTokensPerSocket?: number;
@@ -144,7 +146,7 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     eventSlugs: [...(options.eventSlugs ?? [])],
     dateWindow: options.dateWindow ?? "metadata-end",
     includeRelatedEvents: options.includeRelatedEvents ?? false,
-    compactDiscoveryPages: options.compactDiscoveryPages ?? false,
+    compactDiscoveryPages: options.compactDiscoveryPages ?? options.compactStorageEnabled ?? false,
     lookbackHours: options.lookbackHours ?? 48,
     aheadHours: options.aheadHours ?? 24,
     allOpen: options.allOpen ?? false,
@@ -155,6 +157,7 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     snapshotConcurrency: positiveInterval(options.snapshotConcurrency, 8, "snapshotConcurrency"),
     snapshotBatchSize: positiveInterval(options.snapshotBatchSize, 1, "snapshotBatchSize"),
     backgroundInitialSnapshots: options.backgroundInitialSnapshots ?? false,
+    compactStorageEnabled: options.compactStorageEnabled ?? false,
     httpTimeoutMs: positiveInterval(options.httpTimeoutMs, 10_000, "httpTimeoutMs"),
     maxTokensPerSocket: positiveInterval(options.maxTokensPerSocket, 200, "maxTokensPerSocket"),
     maxSegmentBytes: positiveInterval(options.maxSegmentBytes, 64 * 1024 * 1024, "maxSegmentBytes"),
@@ -359,9 +362,9 @@ export class CollectorRuntime {
       this.lifecycleTimer = this.timers.setInterval(() => { void this.refreshLifecycle(); },
         Math.min(1000, Math.max(1, this.options.postFinishRetentionMs!)));
     }
-    const initialSnapshots = this.snapshotOnce();
-    // Finite duration=0 retains its legacy single, complete initial pass.
-    if (!this.options.backgroundInitialSnapshots || this.options.durationSeconds === 0) await initialSnapshots;
+    const initialSnapshots = this.options.compactStorageEnabled ? Promise.resolve() : this.snapshotOnce();
+    // Compact mode receives the market stream and stores only the bounded tail; repeated HTTP books are redundant.
+    if (!this.options.compactStorageEnabled && (!this.options.backgroundInitialSnapshots || this.options.durationSeconds === 0)) await initialSnapshots;
     if (!this.collecting) return;
 
     this.state = "running";
@@ -369,9 +372,11 @@ export class CollectorRuntime {
       void this.discoverOnce();
     }, this.options.discoveryIntervalMs);
     if (!this.collecting) return;
-    this.snapshotTimer = this.timers.setInterval(() => {
-      void this.snapshotOnce();
-    }, this.options.snapshotIntervalMs);
+    if (!this.options.compactStorageEnabled) {
+      this.snapshotTimer = this.timers.setInterval(() => {
+        void this.snapshotOnce();
+      }, this.options.snapshotIntervalMs);
+    }
   }
 
   run(): Promise<CollectorRunResult> {
@@ -568,7 +573,13 @@ export class CollectorRuntime {
           throw error;
         }
       }
-      const input: RecordInput = { source: "gamma", kind: "http_request", data: { url, requestStartedAt, requestEndedAt, response } };
+      const responseSummary = this.options.compactStorageEnabled && serialized !== undefined
+        ? { sha256: createHash("sha256").update(serialized).digest("hex"), bytes: Buffer.byteLength(serialized) }
+        : undefined;
+      const input: RecordInput = { source: "gamma", kind: "http_request", data: {
+        url, requestStartedAt, requestEndedAt,
+        ...(responseSummary === undefined ? { response } : { responseSummary })
+      } };
       await this.recordControlled(input, true, receipt => {
         if (!responses || serialized === undefined || typeof response !== "object" || response === null
           || !receipt || receipt.runId !== this.journal?.runId || receipt.source !== "gamma" || receipt.kind !== "http_request"

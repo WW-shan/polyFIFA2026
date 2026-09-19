@@ -39,7 +39,13 @@ describe("continuous configuration", () => {
       compressionIntervalMs: 60_000,
       compressionMaxSegments: 4,
       compressionTimeoutMs: 120_000,
-      singleMatchOnly: true
+      singleMatchOnly: true,
+      compactStorageEnabled: false,
+      tailWindowSeconds: 180,
+      tailBufferSeconds: 30,
+      tailRetentionDays: 30,
+      maxTailStoreBytes: 8 * 1024 ** 3,
+      maintenanceIntervalMs: 60_000
     } satisfies ContinuousConfig);
     expect(readFile).not.toHaveBeenCalled();
   });
@@ -67,6 +73,8 @@ describe("continuous configuration", () => {
       lookbackHours: 0.25, aheadHours: 0, retryDelayMs: 5, exportTimeoutMs: 6,
       compressionEnabled: true, compressionIntervalMs: 7, compressionMaxSegments: 3, compressionTimeoutMs: 8,
       singleMatchOnly: false,
+      compactStorageEnabled: true, tailWindowSeconds: 181, tailBufferSeconds: 31, tailRetentionDays: 7,
+      maxTailStoreBytes: 123456, maintenanceIntervalMs: 8,
       proxyUrl: "http://proxy-user:proxy-secret@127.0.0.1:8080",
       gammaBaseUrl: "http://gamma.fixture.test/api/",
       clobBaseUrl: "https://clob.fixture.test/api",
@@ -100,6 +108,22 @@ describe("continuous configuration", () => {
       expect(() => continuousConfig({ [field]: value } as Partial<ContinuousConfig>, project)).toThrow(field);
     }
     expect(continuousConfig({ [field]: 1 }, project)[field]).toBe(1);
+  });
+
+  test.each(["tailWindowSeconds", "tailBufferSeconds", "maxTailStoreBytes", "maintenanceIntervalMs"] as const)("requires a positive compact-storage value for %s", field => {
+    for (const value of [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "1", null, true]) {
+      expect(() => continuousConfig({ [field]: value } as Partial<ContinuousConfig>, project)).toThrow(field);
+    }
+  });
+
+  test("validates compact storage flags and retention days", () => {
+    expect(continuousConfig({ compactStorageEnabled: true, tailRetentionDays: 0 }, project)).toMatchObject({ compactStorageEnabled: true, tailRetentionDays: 0 });
+    for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, "0"]) {
+      expect(() => continuousConfig({ tailRetentionDays: value } as Partial<ContinuousConfig>, project)).toThrow("tailRetentionDays");
+    }
+    for (const value of [0, 1, "true", null]) {
+      expect(() => continuousConfig({ compactStorageEnabled: value } as unknown as Partial<ContinuousConfig>, project)).toThrow("compactStorageEnabled");
+    }
   });
 
   test("allows zero retention and rejects invalid retention durations", () => {
