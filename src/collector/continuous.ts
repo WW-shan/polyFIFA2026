@@ -14,6 +14,7 @@ import { startContinuousServer } from "./continuous-server.js";
 import { acquireCaptureLock, availableDiskBytes, rawRunBytes, readCaptureState, writeCaptureState } from "./continuous-storage.js";
 import type { JsonRequester, JournalRecord, RecordInput } from "./types.js";
 import { metadataFromRecord } from "./tail-context.js";
+import { CompactTailStore, openCompactTailStore } from "./continuous-tail-store.js";
 
 export interface ContinuousDependencies {
   createCollector?: typeof createCollector;
@@ -58,12 +59,16 @@ export class ContinuousCollector {
   private clock: { runId: string; firstWall: number; firstMono: bigint; lastWall: number; lastMono: bigint } | undefined;
   private clockFaultRunId: string | undefined;
   private clockRestartRequested = false;
+  private compactStore: CompactTailStore | undefined;
+  private nextMaintenanceAtMs: number;
+  private readonly compactMetadataHashes = new Map<string, string>();
 
   constructor(readonly config: ContinuousConfig, private readonly dependencies: ContinuousDependencies = {}) {
     this.now = dependencies.now ?? Date.now;
     this.state = new ContinuousState(config.dataRoot, config.port);
     this.state.compression.enabled = config.compressionEnabled;
     this.nextCompressionAtMs = this.now() + config.compressionIntervalMs;
+    this.nextMaintenanceAtMs = this.now() + config.maintenanceIntervalMs;
     this.done = new Promise<void>((resolve, reject) => { this.resolveDone = resolve; this.rejectDone = reject; });
     void this.done.catch(() => {});
   }
@@ -79,6 +84,11 @@ export class ContinuousCollector {
   private async initialize(): Promise<void> {
     await mkdir(this.config.dataRoot, { recursive: true, mode: 0o700 });
     for (const name of ["runs", "checkpoints", "exports", "finish-facts", "logs"]) await this.ownedDirectory(name);
+    if (this.config.compactStorageEnabled) {
+      this.compactStore = await openCompactTailStore({ dataRoot: this.config.dataRoot,
+        tailWindowMs: this.config.tailWindowSeconds * 1000, bufferMs: this.config.tailBufferSeconds * 1000,
+        retentionMs: this.config.tailRetentionDays * 24 * 3600_000 || 1, maxBytes: this.config.maxTailStoreBytes, now: this.now });
+    }
     this.lock = await acquireCaptureLock(this.config.dataRoot);
     this.cancellation.signal.throwIfAborted();
     const previous = await readCaptureState(this.config.dataRoot);
@@ -98,6 +108,10 @@ export class ContinuousCollector {
   private record(journal: CollectorJournal, input: RecordInput): JournalRecord {
     const record = journal.record(input);
     this.state.observe(record);
+    if (this.compactStore) {
+      this.compactStore.ingest(record, this.state.gameKeysForRecord(record));
+      this.state.consumeNewlyFinishedGames();
+    }
     const mono = BigInt(record.monotonicNs);
     if (this.clock?.runId !== record.runId) {
       this.clock = { runId: record.runId, firstWall: record.receivedAtMs, firstMono: mono, lastWall: record.receivedAtMs, lastMono: mono };
@@ -124,7 +138,10 @@ export class ContinuousCollector {
         if (this.journal) this.record(this.journal, { source: "collector", kind: "discovery_scope_error", data: issue });
       }),
       createJournal: async options => {
-        const journal = await (this.dependencies.createJournal ?? createJournal)(options);
+        const journal = await (this.dependencies.createJournal ?? createJournal)({
+          ...options,
+          ...(config.compactStorageEnabled ? { persistRecord: (record: JournalRecord) => this.shouldPersistCompactRecord(record) } : {})
+        });
         this.journal = journal;
         this.state.setRun(journal.runId, journal.runDirectory);
         return { runId: journal.runId, runDirectory: journal.runDirectory,
@@ -137,7 +154,8 @@ export class ContinuousCollector {
       dateWindow: "game-start", lookbackHours: config.lookbackHours, aheadHours: config.aheadHours,
       discoveryIntervalMs: config.discoveryIntervalMs, snapshotIntervalMs: config.snapshotIntervalMs,
       httpTimeoutMs: config.httpTimeoutMs, postFinishRetentionMs: config.postFinishRetentionMs, reconciliationConcurrency: 4,
-      backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true
+      backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true,
+      compactStorageEnabled: config.compactStorageEnabled
     }, dependencies);
     this.runtime = runtime;
     this.state.mode = "starting";
@@ -182,13 +200,30 @@ export class ContinuousCollector {
     this.state.desiredTokens = this.runtime?.tokenIds.length ?? 0;
     this.state.queuedBytes = this.journal?.pendingBytes ?? 0;
     if (this.journal) this.state.rawBytes = await rawRunBytes(this.journal.runDirectory);
+    if (this.compactStore) {
+      try {
+        this.compactStore.flush();
+        if (this.now() >= this.nextMaintenanceAtMs) {
+          this.compactStore.maintain(this.now());
+          this.nextMaintenanceAtMs = this.now() + this.config.maintenanceIntervalMs;
+        }
+      } catch (error) {
+        this.state.issue("compact_storage", error, this.now());
+        this.pausedForDisk = true; this.state.mode = "paused_disk";
+        await this.runtime?.stop().catch(stopError => this.state.issue("capture", stopError));
+        await this.captureTask;
+      }
+    }
     if (!this.pausedForDisk && this.journal && this.runtime?.status === "running") await this.refreshMissingFinish(this.journal);
     if (this.stopping) return;
     const game = !this.pausedForDisk && !this.archiveTask && !this.compressionTask && this.journal && this.runtime?.status === "running"
       ? this.state.readyToArchive(this.journal.runId, this.now())[0] : undefined;
     if (this.config.compressionEnabled && !this.compressionTask && !this.archiveTask && this.now() >= this.nextCompressionAtMs
       && (!this.runtime || this.runtime.status === "running") && (!game || !this.archiveTurnAfterCompression)) this.beginCompression();
-    if (game && !this.archiveTask && !this.compressionTask && this.journal) this.beginArchive(game, this.journal);
+    if (game && !this.archiveTask && !this.compressionTask && this.journal) {
+      if (this.compactStore) this.beginCompactArchive(game, this.journal);
+      else this.beginArchive(game, this.journal);
+    }
     await this.persist();
   }
   private beginCompression(): void {
@@ -221,6 +256,49 @@ export class ContinuousCollector {
       void this.persist().catch(error => this.state.issue("state", error));
     });
   }
+  private shouldPersistCompactRecord(record: JournalRecord): boolean {
+    if (!["ws_message", "book_snapshot", "book_snapshot_batch", "heartbeat", "discovery_page"].includes(record.kind)) {
+      if (record.kind === "event_metadata") {
+        const metadata = metadataFromRecord(record);
+        if (metadata) {
+          const hash = createHash("sha256").update(JSON.stringify(metadata.raw)).digest("hex");
+          const previous = this.compactMetadataHashes.get(metadata.eventId);
+          this.compactMetadataHashes.set(metadata.eventId, hash);
+          if (previous === hash) return false;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private beginCompactArchive(game: CapturedGame, journal: CollectorJournal): void {
+    if (!this.compactStore) throw new Error("COMPACT_TAIL_STORE_MISSING");
+    this.archiveTurnAfterCompression = false;
+    const controller = new AbortController();
+    this.archiveCancellation = controller;
+    const signal = AbortSignal.any([controller.signal, this.cancellation.signal]);
+    const attempt = (game.archive?.attempt ?? 0) + 1;
+    const sourceRunId = game.lastBookRunId ?? journal.runId;
+    const revision = game.finishRevision ?? 0;
+    const finishAtMs = game.finishedAtMs ?? this.now();
+    this.state.markArchive(game.key, { status: "running", runId: sourceRunId, attempt, finishRevision: revision });
+    this.archiveTask = (async () => {
+      await this.persist(); signal.throwIfAborted();
+      await journal.flush(); signal.throwIfAborted();
+      this.compactStore!.finalize(game, finishAtMs);
+      signal.throwIfAborted();
+      this.state.markArchive(game.key, { status: "complete", runId: sourceRunId, attempt,
+        outputDirectory: this.compactStore!.databasePath, finishRevision: revision, priceReadyTokens: 0, strictReadyTokens: 0 });
+    })().catch(error => {
+      this.state.markArchive(game.key, { status: "failed", runId: sourceRunId, attempt, error: String(error), retryAtMs: this.now() + 60_000 });
+      this.state.issue("compact_archive", error, this.now());
+    }).finally(async () => {
+      await this.persist().catch(error => this.state.issue("state", error));
+      this.archiveTask = undefined; this.archiveCancellation = undefined;
+    });
+  }
+
   private beginArchive(game: CapturedGame, journal: CollectorJournal): void {
     this.archiveTurnAfterCompression = false;
     const controller = new AbortController();
@@ -361,6 +439,7 @@ export class ContinuousCollector {
     await this.captureTask;
     await this.archiveTask;
     await this.compressionTask;
+    try { this.compactStore?.close(); } catch (error) { this.state.issue("compact_storage", error, this.now()); }
     this.state.mode = "stopped";
     try { await this.persist(); }
     finally {

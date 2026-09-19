@@ -9,6 +9,7 @@ import { ContinuousState } from "../../src/collector/continuous-state.js";
 import { writeCaptureState } from "../../src/collector/continuous-storage.js";
 import { normalizeCollectorEvent } from "../../src/collector/catalog.js";
 import { createJournal } from "../../src/collector/journal.js";
+import { readJournalRecords } from "../../src/collector/replay.js";
 import { book, eventMetadata, fixtureRecords, journalRecord } from "./tail-fixture.js";
 import type { RecordSink } from "../../src/collector/types.js";
 const roots: string[] = [];
@@ -204,3 +205,39 @@ test.each([{withFinish:true,changeDuringExport:false},{withFinish:false,changeDu
     }
   } finally { releaseExport?.(); await manager.stop(); }
 }, 10_000);
+
+test("compact mode keeps raw market frames out of NDJSON and finalizes them in SQLite", async () => {
+  const path = await root();
+  let now = 900, sink: RecordSink | undefined, runtime: CollectorRuntime | undefined;
+  const config = continuousConfig({ dataRoot: join(path, "capture"), compactStorageEnabled: true,
+    minFreeBytes: 100_000, pulseIntervalMs: 100_000, postFinishRetentionMs: 0 }, path);
+  const event = normalizeCollectorEvent({ id: "A", slug: "A", gameId: "A", live: true,
+    markets: [{ id: "A-m", conditionId: "A-c", slug: "A-m", outcomes: ["Yes", "No"], clobTokenIds: ["A-yes", "A-no"] }] })!;
+  const manager = new ContinuousCollector(config, {
+    now: () => now, diskBytes: async () => 1_000_000, startServer: noServer,
+    createJournal: options => createJournal({ ...options, monotonicNs: () => BigInt(now) * 1_000_000n }),
+    createCollector: (options, deps) => (runtime = createCollector(options, { ...deps, now: () => now,
+      discover: async () => [event], request: async () => ({}), createStreams: options => {
+        sink = options.journal;
+        return { start() {}, setTokens() {}, stop() {} };
+      } }))
+  });
+  try {
+    await manager.start(); await until(() => runtime?.status === "running");
+    sink!.record({ source: "clob", kind: "ws_message", connectionId: "c", data: book("A-yes", "0.50", "0.60", now, "first") });
+    now = 1_000;
+    sink!.record({ source: "sports", kind: "ws_message", connectionId: "sports", data: JSON.stringify({
+      gameId: "A", slug: "A", sport: "soccer", ended: true, finishedAt: new Date(now).toISOString()
+    }) });
+    sink!.record({ source: "collector", kind: "event_retired", data: { eventId: "A", finishedAtMs: now } });
+    await manager.pulse();
+    await until(() => manager.state.snapshot().games.some(game => game.key === "game:A" && game.archive?.status === "complete"));
+    const sqlite = await import("../../src/collector/continuous-tail-store.js");
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+      retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
+    expect(store.readFinalized("game:A")).toHaveLength(2);
+    store.close();
+  } finally { await manager.stop(); }
+  const { records } = await readJournalRecords(join(config.dataRoot, "runs", manager.state.snapshot().runId!));
+  expect(records.some(row => row.kind === "ws_message")).toBe(false);
+});
