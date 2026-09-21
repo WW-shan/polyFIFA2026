@@ -363,8 +363,11 @@ export class ContinuousCollector {
         anchorOnStoredTail ? { ...game, finishAnchor: "book-tail" } : game, effectiveFinishAtMs);
       this.state.setCompactStorage(this.compactStore!.snapshot());
       signal.throwIfAborted();
+      // Report the reason the window is unusable, not just the front. A hole in
+      // the middle leaves `missingFrontMs` at zero, and quoting only that made a
+      // broken tail look almost complete.
       const windowError = finalized.records === 0 ? "no compact records in final window"
-        : !finalized.windowComplete ? `incomplete final window: missing ${Math.round(finalized.missingFrontMs / 1000)}s from the front`
+        : !finalized.windowComplete ? `incomplete final window: missing ${Math.round(finalized.missingFrontMs / 1000)}s from the front, largest gap ${Math.round(finalized.largestGapMs / 1000)}s`
         : undefined;
       const anchorNote = anchorOnStoredTail
         ? `finish anchor moved to the last stored frame (published clock ${new Date(finishAtMs).toISOString()}, stored tail ${new Date(effectiveFinishAtMs).toISOString()})`

@@ -40,6 +40,7 @@ export interface CompactExportResult {
   anchorFrames: number;
   windowComplete: boolean;
   missingFrontMs: number;
+  largestGapMs: number;
   finishAnchor: string | null;
   archive: TailExportResult;
 }
@@ -210,7 +211,7 @@ export async function exportCompactMatch(store: CompactTailStore, gameKey: strin
       windowSeconds, maxFeedSilenceMs, clockPolicy: "flag-backsteps", compressRawEvents: true, finishFactsFile: factsFile });
     return { gameKey, journalDirectory, records: records.length, anchorFrames,
       windowComplete: coverage.windowComplete, missingFrontMs: coverage.missingFrontMs,
-      finishAnchor: coverage.finishAnchor, archive };
+      largestGapMs: coverage.largestGapMs, finishAnchor: coverage.finishAnchor, archive };
   } finally {
     if (options.workDirectory === undefined) await rm(workRoot, { recursive: true, force: true });
   }

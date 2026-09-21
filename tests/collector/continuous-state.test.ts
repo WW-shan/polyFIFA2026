@@ -297,6 +297,23 @@ describe("persistent continuous capture observations", () => {
     expect(state.snapshot().receivedRecords).toBe(1);
     expect(state.snapshot().errors).toHaveLength(1);
   });
+
+  test("parses a CLOB message once even though three readers inspect it", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    state.observe(journalRecord(1, 100, "gamma", "event_metadata", eventMetadata()));
+    const message = journalRecord(2, 200, "clob", "ws_message", book("A"), "clob-0-e1");
+    const spy = vi.spyOn(JSON, "parse");
+    try {
+      // Live book clocks, per-frame attribution and the connection index all
+      // look at the same raw text; the payload must be decoded once.
+      state.observe(message);
+      state.clobFramesForRecord(message);
+      state.gameKeysForRecord(message);
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally { spy.mockRestore(); }
+    expect(state.clobFramesForRecord(message)).toHaveLength(1);
+    expect(state.gameKeysForRecord(message)).toEqual(["game:123"]);
+  });
 });
 
 

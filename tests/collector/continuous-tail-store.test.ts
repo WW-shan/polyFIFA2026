@@ -153,14 +153,79 @@ describe("compact sqlite tail store", () => {
     const anchor: JournalRecord = { ...record(1, 0, { tokenId: "yes", response: { asset_id: "yes", bids: [], asks: [] } }),
       kind: "book_snapshot" };
     store.ingest(anchor, ["game:1"]);
+    for (const [sequence, atMs] of [[2, 60_000], [3, 120_000], [4, 180_000], [5, 210_000]] as const) {
+      store.ingest(record(sequence, atMs, { asset_id: "yes", value: atMs }), ["game:1"]);
+    }
+    store.flush();
+    const result = store.finalize(game("game:1", 210_000), 210_000);
+
+    // Floor is 30_000; the anchor at 0 proves the book there, and every delta
+    // between it and the finish was retained, so the whole ladder is known.
+    expect(result).toMatchObject({ windowComplete: true, missingFrontMs: 0, windowStartMs: 60_000, largestGapMs: 60_000 });
+    expect(store.readFinalized("game:1").map(row => row.receivedAtMs)).toEqual([0, 60_000, 120_000, 180_000, 210_000]);
+    store.close();
+  });
+
+  test("reports a window with an internal hole as incomplete even when a pre-floor anchor exists", async () => {
+    const path = await root();
+    const now = 0;
+    const store = await open(path, () => now, { tailWindowMs: 180_000, bufferMs: 30_000, maxFeedSilenceMs: 90_000 });
+    // A full-depth anchor sits before the floor, but the next 150 seconds are
+    // silent. The book at the floor is therefore unknown and the pre-floor
+    // anchor must not be allowed to excuse the hole.
+    const anchor: JournalRecord = { ...record(1, 0, { tokenId: "yes", response: { asset_id: "yes", bids: [], asks: [] } }),
+      kind: "book_snapshot" };
+    store.ingest(anchor, ["game:1"]);
     store.ingest(record(2, 60_000, { asset_id: "yes", value: 2 }), ["game:1"]);
     store.ingest(record(3, 210_000, { asset_id: "yes", value: 3 }), ["game:1"]);
     store.flush();
     const result = store.finalize(game("game:1", 210_000), 210_000);
 
-    // Floor is 30_000; the anchor at 0 proves the book there.
-    expect(result).toMatchObject({ windowComplete: true, missingFrontMs: 0, windowStartMs: 60_000 });
-    expect(store.readFinalized("game:1").map(row => row.receivedAtMs)).toEqual([0, 60_000, 210_000]);
+    expect(result.windowComplete).toBe(false);
+    // The hole also disqualifies the pre-floor anchor as proof of the front, so
+    // the front is honestly measured from the oldest in-window frame.
+    expect(result.missingFrontMs).toBe(30_000);
+    expect(result.largestGapMs).toBeGreaterThanOrEqual(150_000);
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ windowComplete: false, largestGapMs: 150_000 });
+    store.close();
+  });
+
+  test("repair re-measures continuity and demotes a window with an internal hole", async () => {
+    const path = await root();
+    const finish = 210_000;
+    const store = await open(path, () => finish, { tailWindowMs: 180_000, bufferMs: 30_000 });
+    const anchor: JournalRecord = { ...record(1, 0, { tokenId: "yes", response: { asset_id: "yes", bids: [], asks: [] } }),
+      kind: "book_snapshot" };
+    store.ingest(anchor, ["game:1"]);
+    for (const [sequence, atMs] of [[2, 60_000], [3, 120_000], [4, 180_000], [5, 210_000]] as const) {
+      store.ingest(record(sequence, atMs, { asset_id: "yes", value: atMs }), ["game:1"]);
+    }
+    store.flush();
+    expect(store.finalize(game("game:1", finish), finish)).toMatchObject({ windowComplete: true, largestGapMs: 60_000 });
+    // Punch a hole in the middle of the retained window, as an interrupted
+    // capture would, without touching the stored completeness flag.
+    const db = (store as unknown as { db: DatabaseSync }).db;
+    db.prepare("DELETE FROM tail_records WHERE game_key = ? AND received_at_ms = ?").run("game:1", 120_000);
+
+    const applied = store.repairAttribution({ apply: true });
+    expect(applied).toMatchObject({ windowComplete: 0, windowIncomplete: 1 });
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ windowComplete: false, largestGapMs: 120_000 });
+    store.close();
+  });
+
+  test("releases a stale finalize pin instead of protecting staging for the retention period", async () => {
+    const path = await root();
+    let now = 0;
+    const store = await open(path, () => now, { tailWindowMs: 180_000, bufferMs: 30_000,
+      retentionMs: 90 * 24 * 3600_000, pendingFinishMs: 900_000 });
+    store.ingest(record(1, 0, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.flush();
+    // The finish is known, but the archive turn never completes, so the pin
+    // would otherwise protect this row for the whole 90-day retention.
+    store.markPendingFinalize("game:1", 100_000);
+    now = 100_000 + 6 * 3600_000 + 1;
+    store.maintain(now);
+    expect(store.snapshot().stagingRecords).toBe(0);
     store.close();
   });
 
@@ -487,9 +552,11 @@ describe("compact sqlite tail store", () => {
       tokenId: "yes",
       response: { asset_id: "yes", bids: [{ price: "0.50", size: "5" }], asks: [] }
     }), kind: "book_snapshot" }, ["game:1"]);
-    store.ingest(record(2, 180_000, {
-      event_type: "book", asset_id: "yes", bids: [{ price: "0.90", size: "5" }], asks: []
-    }), ["game:1"]);
+    for (const [sequence, atMs, price] of [[20, 60_000, "0.60"], [21, 120_000, "0.75"], [22, 180_000, "0.90"]] as const) {
+      store.ingest(record(sequence, atMs, {
+        event_type: "book", asset_id: "yes", bids: [{ price, size: "5" }], asks: []
+      }), ["game:1"]);
+    }
     store.ingest(record(3, finish - 1_000, {
       event_type: "price_change",
       price_changes: [

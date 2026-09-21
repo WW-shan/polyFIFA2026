@@ -105,7 +105,8 @@ export async function runStorageCli(args: readonly string[], options: { signal?:
             });
             results.push({ gameKey, outputDirectory: result.archive.outputDirectory, records: result.records,
               anchorFrames: result.anchorFrames, windowComplete: result.windowComplete,
-              missingFrontMs: result.missingFrontMs, finishAnchor: result.finishAnchor,
+              missingFrontMs: result.missingFrontMs, largestGapMs: result.largestGapMs,
+              finishAnchor: result.finishAnchor,
               tokens: result.archive.summary.tokens.length, readyTokens: result.archive.summary.tokens.filter(token => token.readyForReplay).length });
           } catch (error) {
             results.push({ gameKey, error: error instanceof Error ? error.message : String(error) });

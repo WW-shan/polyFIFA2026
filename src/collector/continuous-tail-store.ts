@@ -11,7 +11,7 @@ import { recordMarksActiveBook } from "./book-evidence.js";
 import type { JournalRecord } from "./types.js";
 
 const DATABASE_NAME = "tail.sqlite";
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 /** Default lifetime of an unresolved game's protected tail. */
 const DEFAULT_PENDING_FINISH_MS = 900_000;
 /**
@@ -24,6 +24,19 @@ const DEFAULT_PENDING_FINISH_MS = 900_000;
  * final window anchored without restoring the redundancy.
  */
 const DEFAULT_REDUNDANT_KEEP_ALIVE_MS = 60_000;
+/**
+ * Widest silence between retained order-book frames that still counts as a
+ * continuous window.
+ *
+ * The store's only guaranteed periodic full-depth evidence is the HTTP anchor
+ * pass (one snapshot per minute) and an unchanged payload may be collapsed for
+ * up to `redundantKeepAliveMs`. A hole wider than this bound cannot be explained
+ * by either mechanism, so the ladder between the two frames is genuinely
+ * unknown and the window must not be published as complete. The default matches
+ * the exporter's `maxFeedSilenceMs` so the stored flag never claims a window the
+ * replay would mark `feed_stale`.
+ */
+export const DEFAULT_MAX_FEED_SILENCE_MS = 90_000;
 
 export interface CompactTailStoreOptions {
   dataRoot: string;
@@ -39,6 +52,11 @@ export interface CompactTailStoreOptions {
   pendingFinishMs?: number;
   /** Override for the unchanged-payload keep-alive; must stay below `tailWindowMs`. */
   redundantKeepAliveMs?: number;
+  /**
+   * Widest hole between retained order-book frames that still counts as a
+   * continuous window. Defaults to `DEFAULT_MAX_FEED_SILENCE_MS`.
+   */
+  maxFeedSilenceMs?: number;
   now?: () => number;
 }
 
@@ -51,6 +69,11 @@ export interface FinalizeResult {
   windowComplete: boolean;
   /** Milliseconds of the requested window that are missing from the front. */
   missingFrontMs: number;
+  /**
+   * Widest silence between consecutive retained order-book frames, counting the
+   * pre-floor seed anchor. Zero for a single-frame window.
+   */
+  largestGapMs: number;
 }
 
 export interface RepairReport {
@@ -63,7 +86,7 @@ export interface RepairReport {
   windowIncomplete: number;
   details: Array<{ gameKey: string; recordsRewritten: number; recordsDropped: number;
     foreignFramesDropped: number; anchorRepaired: boolean; previousFinishedAtMs: number;
-    finishedAtMs: number; windowComplete: boolean; missingFrontMs: number }>;
+    finishedAtMs: number; windowComplete: boolean; missingFrontMs: number; largestGapMs: number }>;
 }
 
 export interface CompactStoredRecord {
@@ -187,6 +210,7 @@ export class CompactTailStore {
   private readonly maxBytes: number;
   private readonly pendingFinishMs: number;
   private readonly redundantKeepAliveMs: number;
+  private readonly maxFeedSilenceMs: number;
   private readonly now: () => number;
   private readonly pending: PendingRecord[] = [];
   private readonly lastHashByGame = new Map<string, { hash: string; atMs: number }>();
@@ -228,6 +252,7 @@ export class CompactTailStore {
     this.maxBytes = positiveInteger(options.maxBytes, "maxBytes");
     this.pendingFinishMs = nonnegativeInteger(options.pendingFinishMs ?? DEFAULT_PENDING_FINISH_MS, "pendingFinishMs");
     this.redundantKeepAliveMs = positiveInteger(options.redundantKeepAliveMs ?? DEFAULT_REDUNDANT_KEEP_ALIVE_MS, "redundantKeepAliveMs");
+    this.maxFeedSilenceMs = positiveInteger(options.maxFeedSilenceMs ?? DEFAULT_MAX_FEED_SILENCE_MS, "maxFeedSilenceMs");
     this.now = options.now ?? Date.now;
     this.db = new DatabaseSync(this.databasePath, { timeout: 5_000, defensive: true });
     this.db.exec(`
@@ -260,6 +285,7 @@ export class CompactTailStore {
         window_start_ms INTEGER,
         window_complete INTEGER NOT NULL DEFAULT 0,
         missing_front_ms INTEGER NOT NULL DEFAULT 0,
+        largest_gap_ms INTEGER NOT NULL DEFAULT 0,
         finish_anchor TEXT,
         finish_conflict INTEGER NOT NULL DEFAULT 0,
         finish_facts_json TEXT,
@@ -376,6 +402,16 @@ export class CompactTailStore {
       }
       if (!columns.some(column => column.name === "finish_facts_json")) {
         this.db.exec("ALTER TABLE matches ADD COLUMN finish_facts_json TEXT");
+      }
+    }
+    if (version < 7) {
+      // Coverage used to be judged only by the front of the window, so a tail
+      // with an internal hole could still read as complete. Track the widest
+      // silence between retained frames as well; legacy rows keep 0 because the
+      // hole they may have had can no longer be reconstructed.
+      const columns = this.db.prepare("PRAGMA table_info(matches)").all() as Array<{ name?: string }>;
+      if (!columns.some(column => column.name === "largest_gap_ms")) {
+        this.db.exec("ALTER TABLE matches ADD COLUMN largest_gap_ms INTEGER NOT NULL DEFAULT 0");
       }
     }
     this.db.prepare("INSERT INTO compact_meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
@@ -548,7 +584,7 @@ export class CompactTailStore {
     // Report how much of the target window actually survived. Coverage is about
     // the order book, not unrelated sports/lifecycle records, so a sports score
     // at the floor cannot make an empty CLOB window look complete.
-    const coverage = this.windowCoverage(game.key, start, finishAtMs, depthCount, seed.anchorAtMs);
+    const coverage = this.windowCoverage(game.key, start, finishAtMs, depthCount, seed.anchorAtMs, seed.copyStart);
     if (depthCount === 0) {
       // A retry can arrive after the rolling rows were pruned. If the match
       // already exists, still refresh its finish provenance; otherwise the
@@ -563,14 +599,14 @@ export class CompactTailStore {
     }
     const upsertMatch = this.db.prepare(`INSERT INTO matches
       (game_key, title, sport, game_id, event_ids_json, event_slugs_json, token_ids_json, market_ids_json,
-       finished_at_ms, updated_at_ms, window_start_ms, window_complete, missing_front_ms, finish_anchor,
-       finish_conflict, finish_facts_json, metadata_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       finished_at_ms, updated_at_ms, window_start_ms, window_complete, missing_front_ms, largest_gap_ms,
+       finish_anchor, finish_conflict, finish_facts_json, metadata_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(game_key) DO UPDATE SET title=excluded.title, sport=excluded.sport, game_id=excluded.game_id,
         event_ids_json=excluded.event_ids_json, event_slugs_json=excluded.event_slugs_json, token_ids_json=excluded.token_ids_json,
         market_ids_json=excluded.market_ids_json, finished_at_ms=excluded.finished_at_ms, updated_at_ms=excluded.updated_at_ms,
         window_start_ms=excluded.window_start_ms, window_complete=excluded.window_complete, missing_front_ms=excluded.missing_front_ms,
-        finish_anchor=excluded.finish_anchor, finish_conflict=excluded.finish_conflict,
+        largest_gap_ms=excluded.largest_gap_ms, finish_anchor=excluded.finish_anchor, finish_conflict=excluded.finish_conflict,
         finish_facts_json=COALESCE(excluded.finish_facts_json, matches.finish_facts_json),
         metadata_json=COALESCE(excluded.metadata_json, matches.metadata_json)`);
     const copy = this.db.prepare(`INSERT OR IGNORE INTO tail_records
@@ -583,7 +619,7 @@ export class CompactTailStore {
     try {
       upsertMatch.run(game.key, game.title, game.sport, game.gameId, JSON.stringify(game.eventIds), JSON.stringify(game.eventSlugs),
         JSON.stringify(game.tokenIds), JSON.stringify(game.marketIds), finishAtMs, this.now(),
-        coverage.windowStartMs, coverage.windowComplete ? 1 : 0, coverage.missingFrontMs, game.finishAnchor ?? null,
+        coverage.windowStartMs, coverage.windowComplete ? 1 : 0, coverage.missingFrontMs, coverage.largestGapMs, game.finishAnchor ?? null,
         game.finishConflict ? 1 : 0, game.finishFacts?.length ? JSON.stringify(game.finishFacts) : null,
         game.eventMetadata === undefined ? null : JSON.stringify(game.eventMetadata));
       copy.run(game.key, seed.copyStart, finishAtMs);
@@ -631,8 +667,9 @@ export class CompactTailStore {
    * inside the window, the identical stored frame before it proves the book did
    * not move across the gap, so that front is covered even without a row.
    */
-  private windowCoverage(gameKey: string, start: number, finishAtMs: number, count: number, anchorAtMs: number | null): Omit<FinalizeResult, "records"> {
-    if (count === 0) return { windowStartMs: null, windowComplete: false, missingFrontMs: this.tailWindowMs };
+  private windowCoverage(gameKey: string, start: number, finishAtMs: number, count: number,
+    anchorAtMs: number | null, copyStart: number): Omit<FinalizeResult, "records"> {
+    if (count === 0) return { windowStartMs: null, windowComplete: false, missingFrontMs: this.tailWindowMs, largestGapMs: this.tailWindowMs };
     const oldest = this.db.prepare(`SELECT MIN(received_at_ms) AS at FROM staging_records
       WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
         AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')`).get(gameKey, start, finishAtMs) as { at?: number | null } | undefined;
@@ -644,18 +681,47 @@ export class CompactTailStore {
     const dedupThrough = this.dedupCoveredThroughMs.get(gameKey);
     const provenByDedup = dedupFrom !== undefined && dedupThrough !== undefined
       && dedupFrom <= start && dedupThrough >= start;
-    // A full-depth anchor at or before the floor proves the book there just as
-    // well: every later delta is retained, so the ladder is known from the
-    // floor onward even though the anchor's own receipt predates it.
-    const provenByAnchor = anchorAtMs !== null && anchorAtMs <= start;
+    // A full-depth anchor at or before the floor is only useful when the deltas
+    // that moved the ladder between the anchor and the floor were retained too.
+    // `largestGapMs` below proves that: an anchor with a hole after it cannot
+    // seed a window, so it must not excuse the missing front either.
+    const largestGapMs = this.largestRetainedGap(gameKey, copyStart, finishAtMs);
+    const continuityMs = Math.max(this.maxFeedSilenceMs, this.redundantKeepAliveMs);
+    const continuous = largestGapMs <= continuityMs;
+    const provenByAnchor = anchorAtMs !== null && anchorAtMs <= start && continuous;
     const coveredFromMs = provenByAnchor ? anchorAtMs : windowStartMs;
     const missingFrontMs = coveredFromMs === null ? (provenByDedup ? 0 : this.tailWindowMs)
       : provenByDedup ? 0 : Math.max(0, coveredFromMs - start);
     // Frames are not guaranteed to land exactly on the floor, so a window is
     // complete when nothing material is missing: tolerate at most the shorter
-    // of one second and 1% of the window.
+    // of one second and 1% of the window. An internal hole wider than the
+    // silence bound is never tolerated, however short the front is.
     const toleranceMs = Math.min(1_000, Math.floor(this.tailWindowMs / 100));
-    return { windowStartMs, windowComplete: missingFrontMs <= toleranceMs, missingFrontMs };
+    const windowComplete = missingFrontMs <= toleranceMs && continuous;
+    return { windowStartMs, windowComplete, missingFrontMs, largestGapMs };
+  }
+
+  /**
+   * Widest silence between consecutive retained order-book frames in
+   * `[copyStart, finishAtMs]`.
+   *
+   * Only frames that can move the ladder count, and the sequence starts at the
+   * seed anchor so a gap between that anchor and the first in-window delta is
+   * measured. Consecutive identical payloads may be collapsed for up to
+   * `redundantKeepAliveMs`, so a caller must allow at least that much silence
+   * before calling a hole real; `windowCoverage` does.
+   */
+  private largestRetainedGap(gameKey: string, copyStart: number, finishAtMs: number): number {
+    const rows = this.db.prepare(`SELECT received_at_ms AS at FROM staging_records
+      WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
+        AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')
+      ORDER BY received_at_ms ASC`).all(gameKey, copyStart, finishAtMs) as Array<{ at: number }>;
+    let largest = 0;
+    for (let index = 1; index < rows.length; index++) {
+      const gap = rows[index]!.at - rows[index - 1]!.at;
+      if (gap > largest) largest = gap;
+    }
+    return largest;
   }
 
   /**
@@ -683,7 +749,11 @@ export class CompactTailStore {
     // A pin normally lives only until `finalize` clears it. If a finished game
     // never becomes archivable, drop the stale pin so its staging can be
     // reclaimed instead of being protected forever.
-    const pinMaxAgeMs = Math.max(this.retentionMs, 6 * 3600_000);
+    // A pin only helps while the archive turn can still run. `retentionMs` is
+    // the lifetime of *finalized* data (90 days), not a bound on a stuck
+    // export, so using it here kept a single stale game's staging alive for
+    // months and leaked rows past every wall-clock cutoff.
+    const pinMaxAgeMs = Math.max(this.pendingFinishMs, 6 * 3600_000);
     for (const [gameKey, pin] of this.pendingFinalize) {
       if (pin.finishAtMs < nowMs - pinMaxAgeMs) this.pendingFinalize.delete(gameKey);
       // One extra window back: the finalized tail has to start at the last
@@ -691,10 +761,18 @@ export class CompactTailStore {
       else protect(gameKey, pin.floor - this.tailWindowMs);
     }
     if (this.pendingFinishMs > 0) {
-      const unresolved = this.db.prepare(`SELECT game_key AS game_key, MAX(received_at_ms) AS last_at FROM staging_records
-        WHERE received_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM matches WHERE matches.game_key = staging_records.game_key)
-        GROUP BY game_key`).all(nowMs - this.pendingFinishMs) as Array<{ game_key: string; last_at: number }>;
-      for (const row of unresolved) protect(row.game_key, row.last_at - 2 * this.tailWindowMs);
+      // A correlated `NOT EXISTS (SELECT ... FROM matches ...)` per staging row
+      // made this a full rolling-window scan with one index probe per row; it
+      // blocked the capture loop for seconds on every maintenance pass. Read
+      // the small match index once and filter in memory instead.
+      const finalized = new Set((this.db.prepare("SELECT game_key FROM matches").all() as Array<{ game_key: string }>)
+        .map(row => row.game_key));
+      const recent = this.db.prepare(`SELECT game_key AS game_key, MAX(received_at_ms) AS last_at FROM staging_records
+        WHERE received_at_ms >= ? GROUP BY game_key`).all(nowMs - this.pendingFinishMs) as Array<{ game_key: string; last_at: number }>;
+      for (const row of recent) {
+        if (finalized.has(row.game_key)) continue;
+        protect(row.game_key, row.last_at - 2 * this.tailWindowMs);
+      }
     }
     return [...windows.entries()];
   }
@@ -724,17 +802,15 @@ export class CompactTailStore {
     // waiting for its finish label, in which case the eventual window is
     // anchored on a clock we do not have yet.
     const protection = "AND NOT EXISTS (SELECT 1 FROM protected_windows p WHERE p.game_key = staging_records.game_key AND staging_records.received_at_ms >= p.floor)";
-    const expiredPayloadHashes = this.db.prepare(
-      `SELECT DISTINCT payload_hash FROM staging_records WHERE received_at_ms < ? ${protection}`)
-      .all(stagingCutoff) as Array<{ payload_hash: string }>;
-    // Everything the delete keeps is a retention candidate: rows at or after
-    // the wall-clock cutoff, plus the protected rows the delete skipped.
-    const keptRows = this.db.prepare(`SELECT DISTINCT payload_hash FROM staging_records
-      WHERE received_at_ms >= ? OR EXISTS (SELECT 1 FROM protected_windows p WHERE p.game_key = staging_records.game_key AND staging_records.received_at_ms >= p.floor)`)
-      .all(stagingCutoff) as Array<{ payload_hash: string }>;
+    // Delete and capture the affected payload hashes in a single statement. A
+    // separate `SELECT DISTINCT payload_hash ...` had to walk every old row just
+    // to prove that nothing qualified, which cost most of the maintenance pass.
+    let deletedPayloadHashes: Array<{ payload_hash: string }> = [];
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare(`DELETE FROM staging_records WHERE received_at_ms < ? ${protection}`).run(stagingCutoff);
+      deletedPayloadHashes = this.db.prepare(
+        `DELETE FROM staging_records WHERE received_at_ms < ? ${protection} RETURNING payload_hash`)
+        .all(stagingCutoff) as Array<{ payload_hash: string }>;
       this.db.exec("DELETE FROM matches WHERE NOT EXISTS (SELECT 1 FROM tail_records WHERE tail_records.game_key = matches.game_key)");
       const old = this.db.prepare("SELECT game_key FROM matches WHERE finished_at_ms < ? ORDER BY finished_at_ms ASC").all(retentionCutoff) as Array<{ game_key: string }>;
       const deleteRecords = this.db.prepare("DELETE FROM tail_records WHERE game_key = ?");
@@ -754,9 +830,10 @@ export class CompactTailStore {
     if (this.databaseBytes() > this.maxBytes) {
       this.pruneToCap();
     }
-    const expired = expiredPayloadHashes.map(row => row.payload_hash);
-    const retained = new Set(keptRows.map(row => row.payload_hash));
-    this.cleanupOrphanPayloads(expired.filter(hash => !retained.has(hash)));
+    // `cleanupOrphanPayloads` refuses to drop a payload that any surviving
+    // staging or tail row still references, so the deleted rows' hashes are the
+    // only candidates the pass has to consider.
+    this.cleanupOrphanPayloads(deletedPayloadHashes.map(row => row.payload_hash));
     // Incremental vacuum can hold the synchronous SQLite handle for a long
     // time on a large database. Run it rarely and in small batches so the
     // collector heartbeat and websocket ingestion remain responsive.
@@ -895,8 +972,8 @@ export class CompactTailStore {
     const deleteRecord = this.db.prepare("DELETE FROM tail_records WHERE game_key = ? AND run_id = ? AND sequence = ? AND frame_index = ?");
     const upsertPayload = this.db.prepare("INSERT OR IGNORE INTO payloads(hash, payload) VALUES (?, ?)");
     const updateMatch = this.db.prepare(`UPDATE matches SET finished_at_ms = ?, window_start_ms = ?,
-      window_complete = ?, missing_front_ms = ?, finish_facts_json = COALESCE(?, finish_facts_json),
-      updated_at_ms = ? WHERE game_key = ?`);
+      window_complete = ?, missing_front_ms = ?, largest_gap_ms = ?,
+      finish_facts_json = COALESCE(?, finish_facts_json), updated_at_ms = ? WHERE game_key = ?`);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const match of matches) {
@@ -969,10 +1046,24 @@ export class CompactTailStore {
             AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')`)
           .get(match.game_key, floor, finishedAtMs) as { oldest?: number | null } | undefined;
         const windowStartMs = typeof inWindow?.oldest === "number" ? inWindow.oldest : null;
-        const coveredFromMs = anchorAtMs ?? windowStartMs;
+        // Same continuity rule as live finalization: an anchor before the floor
+        // only proves the window when the frames between it and the finish are
+        // themselves continuous, otherwise a hole is hidden behind the anchor.
+        const retained = this.db.prepare(`SELECT received_at_ms AS at FROM tail_records
+          WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
+            AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')
+          ORDER BY received_at_ms ASC`).all(match.game_key, anchorAtMs ?? floor, finishedAtMs) as Array<{ at: number }>;
+        let largestGapMs = 0;
+        for (let index = 1; index < retained.length; index++) {
+          const gap = retained[index]!.at - retained[index - 1]!.at;
+          if (gap > largestGapMs) largestGapMs = gap;
+        }
+        const continuous = largestGapMs <= Math.max(this.maxFeedSilenceMs, this.redundantKeepAliveMs);
+        const provenByAnchor = anchorAtMs !== null && anchorAtMs <= floor && continuous;
+        const coveredFromMs = provenByAnchor ? anchorAtMs : windowStartMs;
         const missingFrontMs = coveredFromMs === null ? this.tailWindowMs : Math.max(0, coveredFromMs - floor);
         const toleranceMs = Math.min(1_000, Math.floor(this.tailWindowMs / 100));
-        const complete = depthCount > 0 && missingFrontMs <= toleranceMs;
+        const complete = depthCount > 0 && missingFrontMs <= toleranceMs && continuous;
         let finishFactsJson: string | null = null;
         if (anchorRepaired && match.finish_facts_json) {
           const facts: unknown = JSON.parse(match.finish_facts_json);
@@ -985,14 +1076,14 @@ export class CompactTailStore {
             }));
           }
         }
-        if (options.apply) updateMatch.run(finishedAtMs, windowStartMs, complete ? 1 : 0, missingFrontMs,
+        if (options.apply) updateMatch.run(finishedAtMs, windowStartMs, complete ? 1 : 0, missingFrontMs, largestGapMs,
           finishFactsJson, this.now(), match.game_key);
         if (anchorRepaired) report.anchorsRepaired++;
         if (complete) report.windowComplete++; else report.windowIncomplete++;
         report.recordsRewritten += rewritten; report.recordsDropped += dropped; report.foreignFramesDropped += foreign;
         report.details.push({ gameKey: match.game_key, recordsRewritten: rewritten, recordsDropped: dropped,
           foreignFramesDropped: foreign, anchorRepaired, previousFinishedAtMs: match.finished_at_ms,
-          finishedAtMs, windowComplete: complete, missingFrontMs });
+          finishedAtMs, windowComplete: complete, missingFrontMs, largestGapMs });
       }
       if (options.apply) this.db.exec("COMMIT");
       else this.db.exec("ROLLBACK");
@@ -1009,12 +1100,14 @@ export class CompactTailStore {
 
   /** Persisted window coverage for a finalized match, or undefined if unknown. */
   readMatchCoverage(gameKey: string): { windowStartMs: number | null; windowComplete: boolean; missingFrontMs: number;
-    finishAnchor: string | null; finishedAtMs: number; title: string; finishConflict: boolean; finishFacts: TailFinishFact[] } | undefined {
+    largestGapMs: number; finishAnchor: string | null; finishedAtMs: number; title: string; finishConflict: boolean;
+    finishFacts: TailFinishFact[] } | undefined {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
-    const row = this.db.prepare(`SELECT window_start_ms, window_complete, missing_front_ms, finish_anchor,
+    const row = this.db.prepare(`SELECT window_start_ms, window_complete, missing_front_ms, largest_gap_ms, finish_anchor,
       finished_at_ms, title, finish_conflict, finish_facts_json FROM matches WHERE game_key = ?`)
       .get(gameKey) as { window_start_ms?: number | null; window_complete?: number; missing_front_ms?: number;
-        finish_anchor?: string | null; finished_at_ms?: number; title?: string; finish_conflict?: number; finish_facts_json?: string | null } | undefined;
+        largest_gap_ms?: number; finish_anchor?: string | null; finished_at_ms?: number; title?: string;
+        finish_conflict?: number; finish_facts_json?: string | null } | undefined;
     if (!row) return undefined;
     let finishFacts: TailFinishFact[] = [];
     if (row.finish_facts_json) {
@@ -1024,6 +1117,7 @@ export class CompactTailStore {
     }
     return { windowStartMs: typeof row.window_start_ms === "number" ? row.window_start_ms : null,
       windowComplete: row.window_complete === 1, missingFrontMs: row.missing_front_ms ?? 0,
+      largestGapMs: row.largest_gap_ms ?? 0,
       finishAnchor: row.finish_anchor ?? null, finishedAtMs: row.finished_at_ms ?? 0, title: row.title ?? "",
       finishConflict: row.finish_conflict === 1, finishFacts };
   }
@@ -1039,13 +1133,14 @@ export class CompactTailStore {
 
   /** Finalized matches newest-first, for export tooling. */
   listFinalizedMatches(): Array<{ gameKey: string; title: string; finishedAtMs: number; windowComplete: boolean;
-    missingFrontMs: number; finishAnchor: string | null }> {
+    missingFrontMs: number; largestGapMs: number; finishAnchor: string | null }> {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
-    const rows = this.db.prepare(`SELECT game_key, title, finished_at_ms, window_complete, missing_front_ms, finish_anchor
+    const rows = this.db.prepare(`SELECT game_key, title, finished_at_ms, window_complete, missing_front_ms, largest_gap_ms, finish_anchor
       FROM matches ORDER BY finished_at_ms DESC`).all() as Array<{ game_key: string; title: string; finished_at_ms: number;
-        window_complete?: number; missing_front_ms?: number; finish_anchor?: string | null }>;
+        window_complete?: number; missing_front_ms?: number; largest_gap_ms?: number; finish_anchor?: string | null }>;
     return rows.map(row => ({ gameKey: row.game_key, title: row.title, finishedAtMs: row.finished_at_ms,
-      windowComplete: row.window_complete === 1, missingFrontMs: row.missing_front_ms ?? 0, finishAnchor: row.finish_anchor ?? null }));
+      windowComplete: row.window_complete === 1, missingFrontMs: row.missing_front_ms ?? 0,
+      largestGapMs: row.largest_gap_ms ?? 0, finishAnchor: row.finish_anchor ?? null }));
   }
 
   readFinalized(gameKey: string): CompactStoredRecord[] {
@@ -1097,6 +1192,7 @@ export async function openCompactTailStore(options: CompactTailStoreOptions): Pr
     tailWindowMs: options.tailWindowMs, bufferMs: options.bufferMs, retentionMs: options.retentionMs,
     maxBytes: options.maxBytes, ...(options.pendingFinishMs === undefined ? {} : { pendingFinishMs: options.pendingFinishMs }),
     ...(options.redundantKeepAliveMs === undefined ? {} : { redundantKeepAliveMs: options.redundantKeepAliveMs }),
+    ...(options.maxFeedSilenceMs === undefined ? {} : { maxFeedSilenceMs: options.maxFeedSilenceMs }),
     ...(options.now === undefined ? {} : { now: options.now })
   });
 }

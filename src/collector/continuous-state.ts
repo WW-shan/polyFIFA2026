@@ -6,6 +6,27 @@ import type { JournalRecord } from "./types.js";
 import type { TailFinishFact, TailMetadata } from "./tail-types.js";
 import type { CompactTailStoreStatus } from "./continuous-tail-store.js";
 
+/**
+ * Parsed CLOB WebSocket payload, memoized per journal record.
+ *
+ * A single message is inspected three times on the collector's hottest path:
+ * the live book/first-book clocks, the per-frame attribution that decides which
+ * game owns each frame, and the connection-to-game index. Parsing the raw text
+ * once per inspection tripled the JSON work for every message the feed sends,
+ * so the result (or the parse failure) is cached for the record's lifetime. The
+ * map is weak, so it never outlives the record.
+ */
+const parsedClobPayloads = new WeakMap<JournalRecord, { value: unknown } | { error: unknown }>();
+function parsedClobPayload(record: JournalRecord): { value: unknown } | { error: unknown } {
+  let parsed = parsedClobPayloads.get(record);
+  if (parsed === undefined) {
+    try { parsed = { value: JSON.parse(record.data as string) }; }
+    catch (error) { parsed = { error }; }
+    parsedClobPayloads.set(record, parsed);
+  }
+  return parsed;
+}
+
 export interface ArchiveState {
   status: "running" | "complete" | "failed"; runId: string; attempt: number;
   snapshotDirectory?: string; outputDirectory?: string; error?: string; retryAtMs?: number;
@@ -289,8 +310,9 @@ export class ContinuousState {
       if (record.source === "clob") {
         const tokens = new Set<string>();
         if (record.kind === "ws_message" && typeof record.data === "string") {
-          const parsed: unknown = JSON.parse(record.data);
-          for (const value of Array.isArray(parsed) ? parsed : [parsed]) {
+          const parsed = parsedClobPayload(record);
+          const payload = "value" in parsed ? parsed.value : undefined;
+          for (const value of Array.isArray(payload) ? payload : [payload]) {
             const frame = objectValue(value); if (!frame) continue;
             if (typeof frame.asset_id === "string") tokens.add(frame.asset_id);
             if (Array.isArray(frame.price_changes)) for (const change of frame.price_changes) {
@@ -355,9 +377,9 @@ export class ContinuousState {
       return attributed;
     }
     if (record.kind !== "ws_message" || typeof record.data !== "string") return [];
-    let parsed: unknown;
-    try { parsed = JSON.parse(record.data); } catch { return []; }
-    const frames = Array.isArray(parsed) ? parsed : [parsed];
+    const parsed = parsedClobPayload(record);
+    if ("error" in parsed) return [];
+    const frames = Array.isArray(parsed.value) ? parsed.value : [parsed.value];
     const attributed: ClobAttributedFrame[] = [];
     for (const [frameIndex, value] of frames.entries()) {
       const frame = objectValue(value);
@@ -575,8 +597,9 @@ export class ContinuousState {
       return;
     }
     if (["ping", "pong"].includes(record.data.trim().toLowerCase())) return;
-    const parsed: unknown = JSON.parse(record.data);
-    for (const value of Array.isArray(parsed) ? parsed : [parsed]) {
+    const parsed = parsedClobPayload(record);
+    if ("error" in parsed) throw parsed.error;
+    for (const value of Array.isArray(parsed.value) ? parsed.value : [parsed.value]) {
       const frame = objectValue(value); if (!frame) continue;
       const tokenIds = new Set<string>();
       if (typeof frame.asset_id === "string") tokenIds.add(frame.asset_id);
