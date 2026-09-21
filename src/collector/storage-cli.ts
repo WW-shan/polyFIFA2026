@@ -19,7 +19,8 @@ Compact tail export
   export-tail --data-root PATH --output-dir NEW_PATH [--game-key KEY ...]
           [--window-seconds N] [--limit N] [--json]
 
-Turns finalized compact tails back into replayable archives (manifest.json,
+--window-seconds is the holding window; the archive also includes the preceding
+one-second entry reference. Turns finalized compact tails back into replayable archives (manifest.json,
 quality.json, seconds.ndjson, changes.ndjson) that 'npm run research:books'
 accepts as --archive-dir. Compact storage keeps order books in SQLite instead of
 the raw journal, so without this step a collected match cannot be backtested.
@@ -28,8 +29,9 @@ Compact tail repair
   repair-tail --data-root PATH [--apply] [--json]
 
 Rewrites tails written before per-frame attribution: keeps only the frames a
-match actually owns, drops records holding nothing of its own, and records the
-true window coverage. Without --apply it reports what would change and writes
+match actually owns, drops records holding nothing of its own, re-anchors old
+book-quiet boundaries on the last active book, and records the true window
+coverage. Without --apply it reports what would change and writes
 nothing. The collector must be stopped first; an exclusive lock is enforced by
 the collector, not by this command.
 `;
@@ -53,7 +55,7 @@ export async function runStorageCli(args: readonly string[], options: { signal?:
       }
       if (!dataRoot) throw new Error("STORAGE_CLI_INVALID: --data-root is required");
       options.signal?.throwIfAborted();
-      const store = await openCompactTailStore({ dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+      const store = await openCompactTailStore({ dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
         retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3 });
       try {
         const report = store.repairAttribution({ apply });
@@ -81,7 +83,7 @@ export async function runStorageCli(args: readonly string[], options: { signal?:
       const limit = limitText === undefined ? undefined : Number(limitText);
       if (limit !== undefined && (!/^[1-9]\d*$/.test(limitText!) || !Number.isSafeInteger(limit))) throw new Error("STORAGE_CLI_INVALID: --limit must be a positive integer");
       options.signal?.throwIfAborted();
-      const store = await openCompactTailStore({ dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+      const store = await openCompactTailStore({ dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
         retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3 });
       try {
         const requested = values.get("--game-key");

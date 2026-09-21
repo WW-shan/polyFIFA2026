@@ -30,7 +30,7 @@ function game(key: string, finishedAtMs: number): CapturedGame {
   return {
     key, title: key, sport: "tennis", gameId: key.replace("game:", ""), eventIds: [key], eventSlugs: [key],
     tokenIds: ["yes", "no"], marketIds: ["market-1"], firstSeenAtMs: 0, lastSeenAtMs: finishedAtMs,
-    firstBookAtMs: 0, lastBookAtMs: finishedAtMs, lastBookRunId: "run-1", bookUpdates: 4, trades: 0,
+    firstBookAtMs: 0, lastBookAtMs: finishedAtMs, lastActiveBookAtMs: finishedAtMs, lastBookRunId: "run-1", lastActiveBookRunId: "run-1", bookUpdates: 4, trades: 0,
     stateObservations: 1, finishedAtMs, finishConflict: false, retiredEventIds: [key], phase: "postmatch", sources: []
   };
 }
@@ -477,6 +477,40 @@ describe("compact sqlite tail store", () => {
     expect(row).toMatchObject({ windowComplete: false });
     expect(row?.missingFrontMs).toBeGreaterThan(0);
     reopened.close();
+  });
+
+  test("repairs legacy book-quiet anchors to the last active book frame", async () => {
+    const path = await root();
+    const finish = 200_000;
+    const store = await open(path, () => finish, { tailWindowMs: 180_000, bufferMs: 30_000 });
+    store.ingest({ ...record(1, 0, {
+      tokenId: "yes",
+      response: { asset_id: "yes", bids: [{ price: "0.50", size: "5" }], asks: [] }
+    }), kind: "book_snapshot" }, ["game:1"]);
+    store.ingest(record(2, 180_000, {
+      event_type: "book", asset_id: "yes", bids: [{ price: "0.90", size: "5" }], asks: []
+    }), ["game:1"]);
+    store.ingest(record(3, finish - 1_000, {
+      event_type: "price_change",
+      price_changes: [
+        { asset_id: "yes", size: "0", best_bid: "0", best_ask: "1" },
+        { asset_id: "no", size: "0", best_bid: "0", best_ask: "1" }
+      ]
+    }), ["game:1"]);
+    store.flush();
+    store.finalize({ ...game("game:1", finish), finishAnchor: "book-quiet" }, finish);
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ finishedAtMs: finish, windowComplete: true });
+
+    const dry = store.repairAttribution({ apply: false });
+    expect(dry).toMatchObject({ anchorsRepaired: 1 });
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ finishedAtMs: finish });
+
+    const applied = store.repairAttribution({ apply: true });
+    expect(applied).toMatchObject({ anchorsRepaired: 1 });
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ finishedAtMs: 180_000, windowComplete: true });
+    // The terminal clearing frame is evidence and must remain in the archive.
+    expect(store.readFinalized("game:1").some(row => row.receivedAtMs === finish - 1_000)).toBe(true);
+    store.close();
   });
 
   test("repair drops a legacy record that holds only foreign frames", async () => {

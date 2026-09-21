@@ -74,7 +74,7 @@ function game(overrides: Partial<CapturedGame> = {}): CapturedGame {
     key: "game:123", title: "甲队 vs 乙队", sport: "tennis", gameId: "123",
     eventIds: ["event"], eventSlugs: ["match"], tokenIds: ["A", "B"], marketIds: ["winner"],
     firstSeenAtMs: 1000, lastSeenAtMs: 15_000, firstBookAtMs: 2000, lastBookAtMs: 14_000,
-    lastBookRunId: "run-test", bookUpdates: 12, trades: 3, stateObservations: 4,
+    lastActiveBookAtMs: 14_000, lastBookRunId: "run-test", lastActiveBookRunId: "run-test", bookUpdates: 12, trades: 3, stateObservations: 4,
     finishedAtMs: null, finishConflict: false, retiredEventIds: [], phase: "watching", sources: [], ...overrides
   };
 }

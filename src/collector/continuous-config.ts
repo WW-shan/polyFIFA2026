@@ -137,7 +137,7 @@ export function continuousConfig(
     singleMatchOnly: true,
     compactStorageEnabled: false,
     compactAnchorSnapshots: false,
-    tailWindowSeconds: 180,
+    tailWindowSeconds: 181,
     tailBufferSeconds: 30,
     tailRetentionDays: 30,
     maxTailStoreBytes: 8 * 1024 ** 3,

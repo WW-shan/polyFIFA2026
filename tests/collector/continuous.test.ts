@@ -258,7 +258,7 @@ test("compact mode keeps raw market frames out of NDJSON and finalizes them in S
     await manager.pulse();
     await until(() => manager.state.snapshot().games.some(game => game.key === "game:A" && game.archive?.status === "complete"));
     const sqlite = await import("../../src/collector/continuous-tail-store.js");
-    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
     const finalized = store.readFinalized("game:A");
     expect(finalized).toHaveLength(3);
@@ -303,7 +303,7 @@ test("the anchor container is audit evidence and does not file every book twice"
     await manager.pulse();
     await until(() => manager.state.snapshot().games.some(game => game.key === "game:A" && game.archive?.status === "complete"));
     const sqlite = await import("../../src/collector/continuous-tail-store.js");
-    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
     const rows = store.readFinalized("game:A");
     const anchors = rows.filter(row => row.kind === "book_snapshot");
@@ -372,7 +372,7 @@ test("end-to-end: batched CLOB frames are attributed per game and finalize into 
     }
 
     const sqlite = await import("../../src/collector/continuous-tail-store.js");
-    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
     // Each game keeps only its own frames: no foreign token leaks across.
     for (const [id, own, foreign] of [["A", "A-yes", "B-yes"], ["B", "B-yes", "A-yes"]] as const) {
@@ -452,7 +452,7 @@ test("a finish label that arrives minutes late still retries and archives the co
     }
     sink!.record({ source: "gamma", kind: "event_metadata", data: { event: rawEvent("target") } });
     // One book frame per 10s across the whole final window.
-    for (let offset = 180_000; offset >= 0; offset -= 10_000) {
+    for (let offset = 181_000; offset >= 0; offset -= 10_000) {
       now = finish - offset;
       sink!.record({ source: "clob", kind: "ws_message", connectionId: "c",
         data: book("target-yes", "0.5", "0.6", now, `target-${offset}`) });
@@ -474,12 +474,12 @@ test("a finish label that arrives minutes late still retries and archives the co
     expect(targetLookups.at(-1)!.atMs).toBeGreaterThanOrEqual(labelAtMs);
 
     const sqlite = await import("../../src/collector/continuous-tail-store.js");
-    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
     const rows = store.readFinalized("game:target");
     expect(rows.length).toBeGreaterThan(0);
-    expect(Math.min(...rows.map(row => row.receivedAtMs))).toBe(finish - 180_000);
-    expect(store.readMatchCoverage("game:target")).toMatchObject({ windowStartMs: finish - 180_000, windowComplete: true, missingFrontMs: 0 });
+    expect(Math.min(...rows.map(row => row.receivedAtMs))).toBe(finish - 181_000);
+    expect(store.readMatchCoverage("game:target")).toMatchObject({ windowStartMs: finish - 181_000, windowComplete: true, missingFrontMs: 0 });
     store.close();
   } finally { await manager.stop(); }
 }, 30_000);
@@ -508,12 +508,14 @@ test("a match whose source never publishes a finish clock anchors on its own las
   try {
     await manager.start(); await until(() => runtime?.status === "running");
     sink!.record({ source: "gamma", kind: "event_metadata", data: { event: rawEvent("target") } });
-    for (let offset = 180_000; offset >= 0; offset -= 10_000) {
+    for (let offset = 181_000; offset >= 0; offset -= 10_000) {
       now = finish - offset;
       sink!.record({ source: "clob", kind: "ws_message", connectionId: "c",
         data: book("target-yes", "0.5", "0.6", now, `target-${offset}`) });
     }
     now = finish;
+    sink!.record({ source: "clob", kind: "ws_message", connectionId: "c",
+      data: book("target-yes", "0.5", "0.6", now, "target-0") });
     // The match ends and the event retires, but nothing ever publishes a clock.
     sink!.record({ source: "collector", kind: "event_retired", data: { eventId: "target", finishedAtMs: null } });
     for (let step = 0; step < 100; step++) {
@@ -528,12 +530,12 @@ test("a match whose source never publishes a finish clock anchors on its own las
     expect(game?.archive?.status).toBe("complete");
 
     const sqlite = await import("../../src/collector/continuous-tail-store.js");
-    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
-    expect(store.readMatchCoverage("game:target")).toMatchObject({ windowStartMs: finish - 180_000,
+    expect(store.readMatchCoverage("game:target")).toMatchObject({ windowStartMs: finish - 181_000,
       windowComplete: true, missingFrontMs: 0, finishAnchor: "book-quiet" });
     const rows = store.readFinalized("game:target");
-    expect(Math.min(...rows.map(row => row.receivedAtMs))).toBe(finish - 180_000);
+    expect(Math.min(...rows.map(row => row.receivedAtMs))).toBe(finish - 181_000);
     store.close();
   } finally { await manager.stop(); }
 }, 30_000);
@@ -561,12 +563,15 @@ test("a finish clock later than the last stored frame still archives the frames 
   try {
     await manager.start(); await until(() => runtime?.status === "running");
     sink!.record({ source: "gamma", kind: "event_metadata", data: { event: rawEvent("target", null) } });
-    for (let offset = 180_000; offset >= 0; offset -= 10_000) {
+    for (let offset = 181_000; offset >= 0; offset -= 10_000) {
       now = lastFrame - offset;
       await manager.pulse();
       sink!.record({ source: "clob", kind: "ws_message", connectionId: "c",
         data: book("target-yes", "0.5", "0.6", now, `target-${offset}`) });
     }
+    now = lastFrame;
+    sink!.record({ source: "clob", kind: "ws_message", connectionId: "c",
+      data: book("target-yes", "0.5", "0.6", now, "target-0") });
     // The published clock arrives well after the last quote: anchoring the
     // window on it would leave nothing to archive.
     now = lastFrame + 400_000;
@@ -583,7 +588,7 @@ test("a finish clock later than the last stored frame still archives the frames 
     expect(game?.archive?.error).toContain("finish anchor moved to the last stored frame");
 
     const sqlite = await import("../../src/collector/continuous-tail-store.js");
-    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
     expect(store.readMatchCoverage("event:target")).toMatchObject({ windowComplete: true, missingFrontMs: 0,
       finishAnchor: "book-tail" });
@@ -659,7 +664,7 @@ test("a clock that arrives after the market moved on archives the real market ta
     expect(game?.archive?.error).toContain("finish anchor moved to the last stored frame");
 
     const sqlite = await import("../../src/collector/continuous-tail-store.js");
-    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
     const rows = store.readFinalized("event:target");
     expect(rows.length).toBeGreaterThan(0);

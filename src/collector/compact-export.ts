@@ -10,6 +10,7 @@ import type { JournalRecord } from "./types.js";
 
 export interface CompactExportOptions {
   outputDirectory: string;
+  /** Holding window in seconds; the exported archive adds one reference second before it. */
   windowSeconds?: number;
   /**
    * How long a carried book may go unrefreshed before it is reported stale.
@@ -44,6 +45,8 @@ export interface CompactExportResult {
 }
 
 const DEFAULT_WINDOW_SECONDS = 180;
+/** A backtest entry at the holding-window boundary must read the prior second, never its future. */
+const ENTRY_REFERENCE_SECONDS = 1;
 const DEFAULT_MAX_FEED_SILENCE_MS = 90_000;
 const SYNTHETIC_CONNECTION = "compact-anchor";
 
@@ -118,9 +121,12 @@ function clobFrameTokens(data: unknown): string[] {
  * raw run itself.
  */
 export async function exportCompactMatch(store: CompactTailStore, gameKey: string, options: CompactExportOptions): Promise<CompactExportResult> {
-  const windowSeconds = options.windowSeconds ?? DEFAULT_WINDOW_SECONDS;
+  const holdingWindowSeconds = options.windowSeconds ?? DEFAULT_WINDOW_SECONDS;
   const maxFeedSilenceMs = options.maxFeedSilenceMs ?? DEFAULT_MAX_FEED_SILENCE_MS;
-  if (!Number.isSafeInteger(windowSeconds) || windowSeconds < 1 || windowSeconds > 3600) throw new Error("COMPACT_EXPORT_OPTIONS_INVALID: windowSeconds");
+  if (!Number.isSafeInteger(holdingWindowSeconds) || holdingWindowSeconds < 1 || holdingWindowSeconds > 3599) {
+    throw new Error("COMPACT_EXPORT_OPTIONS_INVALID: windowSeconds");
+  }
+  const windowSeconds = holdingWindowSeconds + ENTRY_REFERENCE_SECONDS;
   if (!Number.isFinite(maxFeedSilenceMs) || maxFeedSilenceMs <= 0) throw new Error("COMPACT_EXPORT_OPTIONS_INVALID: maxFeedSilenceMs");
   const coverage = store.readMatchCoverage(gameKey);
   if (!coverage) throw new Error("COMPACT_EXPORT_UNKNOWN_MATCH: " + gameKey);
@@ -182,7 +188,12 @@ export async function exportCompactMatch(store: CompactTailStore, gameKey: strin
     }
     emit(record.source, record.kind, record.receivedAtMs, record.data, record.connectionId);
   }
-  emit("collector", "session_end", coverage.finishedAtMs, { status: "stopped", endedAt: new Date(coverage.finishedAtMs).toISOString() });
+  // A repaired `book-quiet` boundary can precede the terminal clearing frame
+  // that is still retained as evidence. The journal must remain monotonic, so
+  // close the run after every emitted record while the finish fact continues
+  // to define the replay window end.
+  const sessionEndAtMs = Math.max(coverage.finishedAtMs, records.at(-1)?.receivedAtMs ?? coverage.finishedAtMs);
+  emit("collector", "session_end", sessionEndAtMs, { status: "stopped", endedAt: new Date(sessionEndAtMs).toISOString() });
 
   const workRoot = options.workDirectory === undefined
     ? await mkdtemp(join(tmpdir(), "compact-export-"))

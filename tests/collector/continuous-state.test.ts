@@ -51,6 +51,15 @@ describe("persistent continuous capture observations", () => {
     expect(games()["event:second"]?.lastBookAtMs).toBe(2_000);
   });
 
+  test("credits an HTTP anchor even when the response omits asset_id", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    state.observe(journalRecord(1, 100, "gamma", "event_metadata", eventMetadata(0)));
+    state.observe(journalRecord(2, 200, "clob", "book_snapshot", {
+      tokenId: "A", response: { bids: [{ price: "0.95", size: "5" }], asks: [] }
+    }, "clob"));
+    expect(state.snapshot().games[0]).toMatchObject({ firstBookAtMs: 200, lastBookAtMs: 200, lastActiveBookAtMs: 200 });
+  });
+
   test("anchors a retired match on its own last frame only when no clock was published", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     // The fixture's Gamma metadata carries a finish clock; this match has none,
@@ -88,6 +97,23 @@ describe("persistent continuous capture observations", () => {
     expect(state.snapshot().games[0]).toMatchObject({ finishedAtMs: null });
     expect(state.snapshot().games[0]?.finishAnchor ?? null).toBeNull();
     expect(state.readyToArchive("tail-test")).toEqual([]);
+  });
+
+  test("anchors book-quiet on the last non-clearing book, not the terminal clearing frame", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    state.observe(journalRecord(1, 100, "gamma", "event_metadata", eventMetadata(0)));
+    state.observe(journalRecord(2, 200, "clob", "ws_message", book("A", "0.95", "0.97", 200, "h1"), "clob"));
+    state.observe(journalRecord(3, 300, "clob", "ws_message", JSON.stringify({
+      event_type: "price_change", timestamp: "300", price_changes: [
+        { asset_id: "A", side: "BUY", price: "0.95", size: "0", best_bid: "0", best_ask: "1" }
+      ]
+    }), "clob"));
+    state.observe(journalRecord(4, 301, "collector", "event_retired", {
+      eventId: "event", eventSlug: "game", gameId: "123", finishedAtMs: null
+    }));
+
+    expect(state.snapshot().games[0]).toMatchObject({ lastBookAtMs: 300, lastActiveBookAtMs: 200 });
+    expect(state.anchorQuietFinishes(500_000, 300_000, 900_000).map(game => game.finishedAtMs)).toEqual([200]);
   });
 
   test("a published clock beats the fallback, and a late clock is retained as conflicting evidence", () => {

@@ -46,7 +46,7 @@ function lifecycle(sequence: number, receivedAtMs: number, kind: string, connect
 function game(): CapturedGame {
   return { key: "game:42", title: "A vs B", sport: "tennis", gameId: "42", eventIds: ["evt-1"], eventSlugs: ["a-vs-b"],
     tokenIds: ["yes", "no"], marketIds: ["market-1"], firstSeenAtMs: 0, lastSeenAtMs: FINISH,
-    firstBookAtMs: 0, lastBookAtMs: FINISH, lastBookRunId: "run-1", bookUpdates: 9, trades: 0, stateObservations: 1,
+    firstBookAtMs: 0, lastBookAtMs: FINISH, lastActiveBookAtMs: FINISH, lastBookRunId: "run-1", lastActiveBookRunId: "run-1", bookUpdates: 9, trades: 0, stateObservations: 1,
     finishedAtMs: FINISH, finishAnchor: "book-quiet", finishConflict: false, retiredEventIds: ["evt-1"],
     phase: "postmatch", sources: [], eventMetadata: compactEventMetadata(metadata()) };
 }
@@ -54,9 +54,9 @@ function game(): CapturedGame {
 describe("compact tail export", () => {
   test("rebuilds a replayable archive from a compact tail whose only full book is an HTTP anchor", async () => {
     const path = await root();
-    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
-    const START = FINISH - 180_000;
+    const START = FINISH - 181_000;
     // The subscription's original `book` push happened hours earlier and is long
     // pruned; only HTTP anchors and price changes survive in compact storage.
     store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
@@ -90,9 +90,9 @@ describe("compact tail export", () => {
 
   test("keeps a connection gap in the compact archive and invalidates later book seconds", async () => {
     const path = await root();
-    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
-    const START = FINISH - 180_000;
+    const START = FINISH - 181_000;
     store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
     store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
     store.ingest(clob(3, START + 60_000, { market: CONDITION, event_type: "price_change", timestamp: "2000",
@@ -113,9 +113,9 @@ describe("compact tail export", () => {
 
   test("labels a book-anchored window with the real anchor instead of inventing a clock", async () => {
     const path = await root();
-    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
-    const START = FINISH - 180_000;
+    const START = FINISH - 181_000;
     store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
     store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
     store.flush();
@@ -123,17 +123,49 @@ describe("compact tail export", () => {
 
     const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
     const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    // A 180-second holding window keeps one additional second before its
+    // boundary so an exact entry can use the prior complete book.
+    expect(summary.windowSeconds).toBe(181);
+    expect(summary.tokens.every((token: { expectedSeconds: number }) => token.expectedSeconds === 181)).toBe(true);
     // The window ends on the collector's last order-book frame. Writing that as
     // `finishedTimestamp` would claim Gamma published a clock that never existed.
     expect(summary.windows[0].finishSources).toEqual(["book-quiet"]);
     store.close();
   });
 
+  test("exports a repaired book-quiet anchor with post-finish clearing frames", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
+    store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
+    store.ingest(clob(3, FINISH - 10_000, { market: CONDITION, event_type: "book", asset_id: "yes",
+      bids: [{ price: "0.5", size: "10" }], asks: [{ price: "0.6", size: "20" }], timestamp: "2000", hash: "h3" }), ["game:42"]);
+    store.ingest(clob(4, FINISH - 1_000, { market: CONDITION, event_type: "price_change", timestamp: "3000",
+      price_changes: [
+        { asset_id: "yes", price: "0.5", size: "0", side: "BUY", hash: "h4", best_bid: "0", best_ask: "1" },
+        { asset_id: "no", price: "0.5", size: "0", side: "SELL", hash: "h4", best_bid: "0", best_ask: "1" }
+      ] }), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+    expect(store.repairAttribution({ apply: true }).anchorsRepaired).toBe(1);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    expect(result.archive.outputDirectory).toContain("archive");
+    // The terminal clear remains in the replay journal, but the finish fact
+    // still defines the earlier, active-book boundary.
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    expect(summary.windows[0].finishSources).toEqual(["book-quiet"]);
+    expect(summary.windows[0].endAtMs).toBe(FINISH - 10_000);
+    store.close();
+  });
+
   test("assigns an HTTP anchor to the connection that is active after a reconnect", async () => {
     const path = await root();
-    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
-    const START = FINISH - 180_000;
+    const START = FINISH - 181_000;
     store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
     store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
     store.ingest(lifecycle(3, START + 1_000, "connection_open", "clob-0-e1", { source: "clob" }), ["game:42"]);
@@ -157,9 +189,9 @@ describe("compact tail export", () => {
 
   test("preserves every finish witness and the conflict flag in the exported archive", async () => {
     const path = await root();
-    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
-    const START = FINISH - 180_000;
+    const START = FINISH - 181_000;
     store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
     store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
     const facts = [
@@ -180,7 +212,7 @@ describe("compact tail export", () => {
 
   test("refuses a match that has no stored market identity", async () => {
     const path = await root();
-    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 180_000, bufferMs: 30_000,
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
       retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
     store.ingest(clob(1, FINISH - 1_000, { market: CONDITION, event_type: "price_change", timestamp: "2000", price_changes: [] }), ["game:42"]);
     store.flush();

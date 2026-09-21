@@ -338,7 +338,7 @@ export class ContinuousCollector {
     this.archiveCancellation = controller;
     const signal = AbortSignal.any([controller.signal, this.cancellation.signal]);
     const attempt = (game.archive?.attempt ?? 0) + 1;
-    const sourceRunId = game.lastBookRunId ?? journal.runId;
+    const sourceRunId = game.lastActiveBookRunId ?? game.lastBookRunId ?? journal.runId;
     const revision = game.finishRevision ?? 0;
     const finishAtMs = game.finishedAtMs ?? this.now();
     this.state.markArchive(game.key, { status: "running", runId: sourceRunId, attempt, finishRevision: revision });
@@ -396,7 +396,7 @@ export class ContinuousCollector {
     const existingSnapshot = !refresh && game.archive?.status === "failed" ? game.archive.snapshotDirectory : undefined;
     // Price evidence stays in its recorded run. Newer finish evidence is an
     // independent facts sidecar, never a replacement by an empty newer run.
-    const sourceRunId = existingSnapshot ? game.archive!.runId : game.lastBookRunId ?? journal.runId;
+    const sourceRunId = existingSnapshot ? game.archive!.runId : game.lastActiveBookRunId ?? game.lastBookRunId ?? journal.runId;
     const stoppedSource = sourceRunId !== journal.runId ? game.sources.find(source => source.runId === sourceRunId)?.runDirectory : undefined;
     const inputDirectory = existingSnapshot ?? stoppedSource;
     let inputReady = false;
@@ -507,7 +507,7 @@ export class ContinuousCollector {
    * honest clock for "how long is this window still worth chasing".
    */
   private finishEvidenceAt(game: CapturedGame): number {
-    return game.lastBookAtMs ?? -Infinity;
+    return game.lastActiveBookAtMs ?? game.lastBookAtMs ?? -Infinity;
   }
 
   private finishLookupDue(now: number, game: CapturedGame): boolean {

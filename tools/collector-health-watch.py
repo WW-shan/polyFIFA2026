@@ -149,7 +149,7 @@ class HealthWatch:
             "FROM staging_records GROUP BY game_key").fetchall()
         return {row[0]: {"records": row[1], "oldest": row[2], "newest": row[3]} for row in rows}
 
-    def read_db_metrics(self, attempts: int = 3, delay_s: float = 0.5) -> tuple[dict, dict]:
+    def read_db_metrics(self, attempts: int = 20, delay_s: float = 0.5) -> tuple[dict, dict]:
         """Read metrics, tolerating the collector's short restart window.
 
         ``collect:start`` can briefly replace or lock the SQLite files while the

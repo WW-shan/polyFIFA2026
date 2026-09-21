@@ -24,7 +24,7 @@
   "port": 8765,
   "compactStorageEnabled": true,
   "compactAnchorSnapshots": true,
-  "tailWindowSeconds": 180,
+  "tailWindowSeconds": 181,
   "tailBufferSeconds": 30,
   "tailRetentionDays": 90,
   "maxTailStoreBytes": 34359738368,

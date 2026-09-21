@@ -144,6 +144,16 @@ describe("collected orderbook ex-ante entry", () => {
     expect(backtestTailArchives([archive(301)], config).trials[0]).toMatchObject({ exclusions: [], referenceAtMs: finish - 300_000 });
   });
 
+  test("exact 180-second entry requires a prior complete second supplied by a 181-second archive", () => {
+    const config = { ...options, windowsSeconds: [180] };
+    const excluded = backtestTailArchives([archive(180)], config).trials[0]!;
+    expect(excluded.exclusions).toContain("missing-entry-reference");
+    expect(excluded.modeledFilledShares).toBeNull();
+    expect(backtestTailArchives([archive(181)], config).trials[0]).toMatchObject({
+      exclusions: [], referenceAtMs: finish - 180_000
+    });
+  });
+
   test("needs every outcome's entry book", () => {
     const data = archive(); data.seconds = data.seconds.filter(row => !(row.tokenId === "B" && row.secondIndex === 0));
     const result = backtestTailArchives([data], options);

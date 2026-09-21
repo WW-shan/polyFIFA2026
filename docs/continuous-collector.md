@@ -28,15 +28,15 @@ npm run collect:stop
 
 生产配置已启用 `compactStorageEnabled=true`。这不是减少比赛范围，而是减少无用落盘：所有配置 profile 发现的比赛仍参与身份、比分和生命周期处理，但完整 CLOB/Sports 原始帧不再永久写进 NDJSON。
 
-- 订单簿、成交和状态帧先进入有界的 SQLite staging 区，正常情况只保留最近 `tailWindowSeconds + tailBufferSeconds`（当前 180+30 秒）；连续重复 payload 按 hash 合并，但同一场比赛最多只合并 60 秒：全天合并会让静止不动的盘口在自己窗口里一行都不剩，finalize 拿到空窗口反而无法归档（`redundantKeepAliveMs`）。仍未拿到终场标签的比赛会豁免这条墙钟规则：只保留该场自己最后 `tailWindowSeconds` 的滚动片段，`pendingFinishRetentionMs`（当前 15 分钟）后释放。理由见下面“终场标签补查”。这个豁免在 finalize 写入 `matches` 后立即失效，所以不会让已归档的场次继续占空间。
+- 订单簿、成交和状态帧先进入有界的 SQLite staging 区，正常情况只保留最近 `tailWindowSeconds + tailBufferSeconds`（当前 181+30 秒；180 秒持有窗口 + 1 秒入场参考）；连续重复 payload 按 hash 合并，但同一场比赛最多只合并 60 秒：全天合并会让静止不动的盘口在自己窗口里一行都不剩，finalize 拿到空窗口反而无法归档（`redundantKeepAliveMs`）。仍未拿到终场标签的比赛会豁免这条墙钟规则：只保留该场自己最后 `tailWindowSeconds` 的滚动片段（当前 181 秒），`pendingFinishRetentionMs`（当前 15 分钟）后释放。理由见下面“终场标签补查”。这个豁免在 finalize 写入 `matches` 后立即失效，所以不会让已归档的场次继续占空间。
 - 已知终场但尚未 finalize 的比赛会把自己的窗口钉住：维护任务按墙钟时间裁剪，若不等归档完成就删，尾窗最前面的秒数会被静默吃掉。finalize 返回窗口覆盖情况，前段缺失时写入 `error`，不再当成干净成功。
 - CLOB WebSocket 一条消息会批量携带多场比赛的帧。落库前按 token 归属逐帧拆分，只写给拥有该 token 的比赛；无归属或跨比赛的帧丢弃，避免把别场的盘口混进本场 tail。
 - `/books` 批量锚点一次请求 50 个 token，上游可能只答其中一部分：状态机只把**响应里真正返回**的 token 记为收到盘口（`book_snapshot_batch` 的 `response`，不是请求列表 `tokenIds`）。把请求列表当证据会把 `lastBookAtMs` 推到该场真实最后一帧之后，静默锚点落在空窗口上，整场归档成 `no compact records in final window`。
-- 归档前先看请求窗口 `[终点-180s, 终点]` 里到底有没有帧。没有帧时说明发布的终点时钟和库里的帧不重叠，两个方向都会发生：时钟晚于最后一帧（`/books` 批量只答了别的 token、或时钟本身迟到），或者时钟早于最后一帧（网球盘口在比赛结束后仍继续交易、终场标签晚十几分钟才到，此时比赛末尾那 180s 已被墙钟规则释放）。两种情况下都改用**库里真实持有的最后一帧**当窗口终点，`finish_anchor` 记为 `book-tail`，并在归档 `error` 里写清发布时钟与所用尾帧（`finish anchor moved to the last stored frame (...)`）。这样发布的是真实市场尾段，而不是一个空窗口；原始终点时钟仍然保留在错误说明里。
+- 归档前先看请求窗口 `[终点-180s, 终点]`（存储额外保留 `终点-181s` 作为入场参考）里到底有没有帧。没有帧时说明发布的终点时钟和库里的帧不重叠，两个方向都会发生：时钟晚于最后一帧（`/books` 批量只答了别的 token、或时钟本身迟到），或者时钟早于最后一帧（网球盘口在比赛结束后仍继续交易、终场标签晚十几分钟才到，此时比赛末尾那 180s 已被墙钟规则释放）。两种情况下都改用**库里真实持有的最后一帧**当窗口终点，`finish_anchor` 记为 `book-tail`，并在归档 `error` 里写清发布时钟与所用尾帧（`finish anchor moved to the last stored frame (...)`）。这样发布的是真实市场尾段，而不是一个空窗口；原始终点时钟仍然保留在错误说明里。
 - 因为拆分后同一 `(game, run, sequence)` 会对应多条帧，`staging_records` / `tail_records` 的主键包含 `frame_index`（schema v2）。旧库启动时自动原地迁移，已有行以 `frame_index=0` 保留；`compact_meta.schema_version` 记录版本。
-- `matches` 另存窗口覆盖（`window_start_ms` / `window_complete` / `missing_front_ms`，schema v3）与窗口终点来源 `finish_anchor`（schema v4）。回测筛选样本时以 `window_complete` 为准，不要假定每场都是完整 180 秒；需要只用官方终场钟的样本时按 `finish_anchor` 过滤。
+- `matches` 另存窗口覆盖（`window_start_ms` / `window_complete` / `missing_front_ms`，schema v3）与窗口终点来源 `finish_anchor`（schema v4）。回测筛选样本时以 `window_complete` 为准，不要假定每场都是完整 180 秒；生产配置额外保留 1 秒参考边界；需要只用官方终场钟的样本时按 `finish_anchor` 过滤。
 - 逐帧归属修复前写入的 tail 含别场帧。用 `npm run collect:compact -- repair-tail --data-root <PATH>` 先做 dry-run，确认后加 `--apply` 就地重写：只保留本场帧、丢弃只剩别场帧的记录，并按保留帧回填真实窗口覆盖。命令不做锁，执行前必须先 `collect:stop`。
-- 比赛确认结束后，只把终场前 180 秒复制到最终结果表；成功写入后删除该比赛的 staging 记录。
+- 比赛确认结束后，把终场前 180 秒及之前 1 秒参考边界复制到最终结果表；成功写入后删除该比赛的 staging 记录。
 - compact 模式默认不再做每分钟逐 token HTTP book 快照；WebSocket 的市场帧是主要价格来源，发现 metadata、身份冲突和终场证据仍保留。
 - `compactAnchorSnapshots=true`（当前生产配置）时保留低频 HTTP book 快照作为**锚点**：`price_change` 只是增量，没有全量 book 锚点就无法把 SELL 档位变化重建成 ask ladder，而 WebSocket 并不保证对每个 token 都推全量 book。实测开启后 91% 的订阅 token 在窗口内拿到锚点。HTTP 锚点同样计入 `firstBookAtMs`，否则只靠锚点拿到全量 book 的比赛会被误判为 `missed` 而永不归档。
 - 已解析子盘口（每盘胜者、大小分、让盘等）会在 Gamma 翻转 `closed` **之前**先从 CLOB 撤掉订单簿。旧实现把它们当成“批量响应身份不匹配”，每个快照周期都对同一批 token 重新请求、重新记一条 `book_snapshot_batch_error`：实测 4 个 raw run 里有 876 条这类记录、1150 个 token。逐 token 复核证明这些 token 调单 token `/book` 一律返回 404 `No orderbook exists`，且 151 个“既拿到过锚点又被报缺失”的 token 中，**没有一个**是在报缺失之后才拿到锚点的——缺失始终是真实无盘口，不是上游偶发漏发，所以不能加 GET 兜底。现在 `absentBookCooldownMs`（默认 5 分钟）记住这类 token 并暂时移出锚点轮换，同一段缺失期只报告一次；token 重新拿到 book 后立即清除记录，之后的再次缺失会重新报告。这既省掉无意义的上游配额，也不再往 raw run 里写重复诊断。
@@ -54,7 +54,7 @@ npm run collect:stop
 1. 周期查询各项目目录，独立处理项目或关联事件的查询失败；有效新场次继续加入，旧场次不会因一次接口失败就被当作结束。
 2. 在 compact 模式下处理收到的 CLOB 深度／成交帧和 Sports 状态帧，按比赛和 payload hash 去重并只保留滚动窗口；旧 NDJSON 模式才原样保留全量 raw。订阅不会等几千个 HTTP 快照全取完才开始下一轮发现。
 3. compact 模式不做周期性逐 token HTTP book 快照；发现 metadata、身份冲突和必要的 HTTP 摘要仍留证。旧模式仍可使用公共 `/books` 批量审计，每批 50 个 token，按 asset ID 关联响应。
-4. 对明确的结束信息执行短暂保留期，当前生产配置为 30 秒；终场前 180 秒由 SQLite 结果层固定保存。结束信号的重复出现不重置计时；子盘口早关闭不等于全场结束。
+4. 对明确的结束信息执行短暂保留期，当前生产配置为 30 秒；终场前 180 秒及 1 秒参考边界由 SQLite 结果层固定保存。结束信号的重复出现不重置计时；子盘口早关闭不等于全场结束。
 5. 对达到条件的场次把滚动帧事务性写入 `tail.sqlite`，不为每场再复制一份全量 raw checkpoint；回放导出放到单独进程执行，不占用接收行情的事件循环。
 6. 结束标签晚到时继续补查，记录原始响应；不把后来比分倒灌到此前的每秒数据。终场钟始终缺失时按 `finishAnchorGraceMs` 回落到该场最后一帧盘口时间，并把来源写进 `finish_anchor`，不把回落终点伪装成官方终场时间。重启后的待导出场次仍关联原来的 raw run，不拿一个新空运行冒充旧数据。
 
@@ -62,7 +62,7 @@ npm run collect:stop
 
 现在的规则：证据最新的场次优先（陈旧场次不能挤掉刚结束的比赛），证据仍在 `pendingFinishRetentionMs` 内的场次按 `finishFollowupIntervalMs`（当前 15 秒）重试，每轮 `finishFollowupBatchSize` 个请求并发执行；证据已经过期、标签再查也拼不出窗口的场次只做一次尝试后停止，避免继续消耗配额。跨运行的终场事实保存源 run、原始序号、帧下标和观察时间，只用于补充边界；不会改写旧盘口、旧比分或关闭状态。终场证据变化会让旧归档重新核验，不能继续复用过时结论。
 
-窗口终点来源（2026-09-20 修正）：Gamma 只在少数事件上写 `finishedTimestamp`。实测抽样 30 场已收盘、确实收到过盘口的网球／乒乓球比赛，`closed=true` 且 `finishedTimestamp=null`（多数事件永远不写这个字段）；Sports 状态流也只为部分比赛推送终场帧。因此“等官方终场钟”本身就会丢样本。现在按 `finishAnchorGraceMs`（当前 5 分钟）给官方时钟留出补发时间，之后用该场自己**最后一帧盘口时间**作为窗口终点，记为 `finish_anchor='book-quiet'`。这个终点按定义落在比赛之内，窗口是真实末尾 180 秒的子集，不是猜测；已经用 `book-quiet` 发布的窗口不会被后来才出现的时钟改写（差别只有秒级，重写只会让已发布样本不可复现）。`finish_anchor` 取值：`gamma.finishedTimestamp` / `sports.finishedAt`（官方钟）、`book-quiet`（来源从未发布时钟时的盘口静默回落）或 `book-tail`（发布时钟与库内帧不重叠时改用真实最后一帧），旧行升级后为 NULL 表示来源未知，不假定。
+窗口终点来源（2026-09-20 修正）：Gamma 只在少数事件上写 `finishedTimestamp`。实测抽样 30 场已收盘、确实收到过盘口的网球／乒乓球比赛，`closed=true` 且 `finishedTimestamp=null`（多数事件永远不写这个字段）；Sports 状态流也只为部分比赛推送终场帧。因此“等官方终场钟”本身就会丢样本。现在按 `finishAnchorGraceMs`（当前 5 分钟）给官方时钟留出补发时间，之后用该场自己**最后一帧盘口时间**作为窗口终点，记为 `finish_anchor='book-quiet'`。这个终点按定义落在比赛之内，窗口是真实末尾 180 秒（另加 1 秒入场参考）的子集，不是猜测；已经用 `book-quiet` 发布的窗口不会被后来才出现的时钟改写（差别只有秒级，重写只会让已发布样本不可复现）。`finish_anchor` 取值：`gamma.finishedTimestamp` / `sports.finishedAt`（官方钟）、`book-quiet`（来源从未发布时钟时的盘口静默回落）或 `book-tail`（发布时钟与库内帧不重叠时改用真实最后一帧），旧行升级后为 NULL 表示来源未知，不假定。
 
 当前捕获的“结束”是源报告，不是视频核准的场上结束毫秒。默认尾窗跟随全场实际结束标签；每一盘、每一局等自己的尾窗仍需要独立且可信的阶段终点。原始阶段信息会保留，不用全场终点冒充盘末终点。
 
@@ -72,7 +72,7 @@ npm run collect:stop
 
 ```text
 state.json                 当前运行及热缓存内的比赛状态，不是完整历史归档目录
-tail.sqlite                去重后的滚动窗口与终场前 180 秒结果库
+tail.sqlite                去重后的滚动窗口与终场前 180 秒 + 1 秒参考结果库
 collector.lock             当前写入实例的独占锁
 runs/<runId>/*.ndjson[.gz]  compact 模式下主要是控制/metadata；旧模式才是全量原始记录
 *.gz.integrity.json       解压字节数与 SHA-256、压缩文件 SHA-256
@@ -126,7 +126,7 @@ npm run collect:start
 
 连续导出使用 `--clock-policy flag-backsteps`：原始 UTC、单调时钟和序号全部保留，受小幅 UTC 回拨影响的秒明确标为不确定，其他时间窗仍可核验。单调时钟倒退、大幅偏移仍不能通过；连续进程发现超过 5 秒的时钟偏移会换新 run。普通手工 `collect:tail` 仍默认严格模式。
 
-连续导出保留 **301 秒**：最后 300 秒用于研究，额外 1 秒提供 T−300 之前已经知道的入场报价。旧的 300 秒归档仍可回放，也可研究其中的 60／180 秒窗口，但不能凭空制造 T−300 的事前报价。
+连续导出保留 **301 秒**：最后 300 秒用于研究，额外 1 秒提供 T−300 之前已经知道的入场报价。同理，180 秒持有窗口导出为 **181 秒**（额外 1 秒用于 T−180 入场参考）；旧的 300／180 秒归档仍可回放，但不能凭空制造边界前一秒的事前报价。
 
 ## 盘口挂单回测
 
@@ -306,13 +306,13 @@ npm run research:books -- --archive-dir <该目录> --output-dir <新目录>
 
 导出时会把每个锚点**同时**写两条记录：原样的 `book_snapshot`（保留审计）和一条等价的 WS `book` 帧（用同一 connectionId，用来播种）。因此重建的盘口仍然被后续锚点独立校验（`snapshotMatches`），不是自证。
 
-### 3. finalize 以前只拷 `[终点-180s, 终点]`，把种子锚点丢在外面（已修）
+### 3. finalize 以前只拷 `[终点-180s, 终点]`，把种子锚点和入场参考秒丢在外面（已修）
 
 窗口地板是边界，不是起始状态。要能从地板重建 ask 阶梯，必须保留**地板之前最后一个全量锚点**以及它到地板之间的所有增量。以前这些行留在 staging 里随后被裁掉，导出的窗口前段只能是空的。
 
 现在：
 
-- `finalize` 的拷贝区间从“地板前最后一个 `book_snapshot` 锚点”开始；找不到锚点时才退回原来的 `[地板, 终点]`。
+- `finalize` 的拷贝区间从“地板前最后一个 `book_snapshot` 锚点”开始；找不到锚点时才退回 `[地板 - 1s, 终点]`，保证 T−180 的入场参考不会缺失。
 - `missing_front_ms` 按“盘口何时已知”计算：地板之前有锚点 → `0`，否则按第一个已知状态到地板的距离计。以前它只按“窗口内第一帧”算，导致 87% 的场次被误判为不完整。
 - 保护窗口相应多留一个窗口（未决比赛 `2 × tailWindowSeconds`），否则种子锚点会在归档前先被裁掉。
 

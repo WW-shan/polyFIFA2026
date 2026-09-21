@@ -7,6 +7,7 @@ import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { CapturedGame } from "./continuous-state.js";
 import type { TailFinishFact } from "./tail-types.js";
 import { objectValue } from "./replay-values.js";
+import { recordMarksActiveBook } from "./book-evidence.js";
 import type { JournalRecord } from "./types.js";
 
 const DATABASE_NAME = "tail.sqlite";
@@ -57,10 +58,12 @@ export interface RepairReport {
   recordsRewritten: number;
   recordsDropped: number;
   foreignFramesDropped: number;
+  anchorsRepaired: number;
   windowComplete: number;
   windowIncomplete: number;
   details: Array<{ gameKey: string; recordsRewritten: number; recordsDropped: number;
-    foreignFramesDropped: number; windowComplete: boolean; missingFrontMs: number }>;
+    foreignFramesDropped: number; anchorRepaired: boolean; previousFinishedAtMs: number;
+    finishedAtMs: number; windowComplete: boolean; missingFrontMs: number }>;
 }
 
 export interface CompactStoredRecord {
@@ -883,13 +886,17 @@ export class CompactTailStore {
   repairAttribution(options: { apply: boolean }): RepairReport {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
     const report: RepairReport = { matches: 0, recordsRewritten: 0, recordsDropped: 0, foreignFramesDropped: 0,
-      windowComplete: 0, windowIncomplete: 0, details: [] };
-    const matches = this.db.prepare("SELECT game_key, token_ids_json, finished_at_ms FROM matches ORDER BY finished_at_ms").all() as
-      Array<{ game_key: string; token_ids_json: string; finished_at_ms: number }>;
+      anchorsRepaired: 0, windowComplete: 0, windowIncomplete: 0, details: [] };
+    const matches = this.db.prepare(`SELECT game_key, token_ids_json, finished_at_ms, finish_anchor,
+      finish_conflict, finish_facts_json FROM matches ORDER BY finished_at_ms`).all() as
+      Array<{ game_key: string; token_ids_json: string; finished_at_ms: number; finish_anchor: string | null;
+        finish_conflict: number; finish_facts_json: string | null }>;
     const updateRecord = this.db.prepare("UPDATE tail_records SET payload_hash = ? WHERE game_key = ? AND run_id = ? AND sequence = ? AND frame_index = ?");
     const deleteRecord = this.db.prepare("DELETE FROM tail_records WHERE game_key = ? AND run_id = ? AND sequence = ? AND frame_index = ?");
     const upsertPayload = this.db.prepare("INSERT OR IGNORE INTO payloads(hash, payload) VALUES (?, ?)");
-    const updateMatch = this.db.prepare("UPDATE matches SET window_start_ms = ?, window_complete = ?, missing_front_ms = ? WHERE game_key = ?");
+    const updateMatch = this.db.prepare(`UPDATE matches SET finished_at_ms = ?, window_start_ms = ?,
+      window_complete = ?, missing_front_ms = ?, finish_facts_json = COALESCE(?, finish_facts_json),
+      updated_at_ms = ? WHERE game_key = ?`);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const match of matches) {
@@ -901,6 +908,7 @@ export class CompactTailStore {
             run_id: string; sequence: number; frame_index: number; source: JournalRecord["source"];
             kind: string; received_at_ms: number; payload_hash: string; payload: Uint8Array }>;
         let rewritten = 0, dropped = 0, foreign = 0;
+        let lastActive: { atMs: number; runId: string; sequence: number; frameIndex: number } | null = null;
         for (const row of rows) {
           const decoded = decodePayload(row.payload);
           // Legacy rows stored the raw WebSocket text; unwrap it so the frames
@@ -908,6 +916,9 @@ export class CompactTailStore {
           // string that can never look foreign.
           let data = decoded.data;
           if (typeof data === "string") { try { data = JSON.parse(data) as unknown; } catch { /* keep as-is */ } }
+          if (recordMarksActiveBook(data, own)) {
+            lastActive = { atMs: row.received_at_ms, runId: row.run_id, sequence: row.sequence, frameIndex: row.frame_index };
+          }
           const frames = Array.isArray(data) ? data : [data];
           const kept: unknown[] = [];
           let sawForeign = false;
@@ -935,9 +946,17 @@ export class CompactTailStore {
           updateRecord.run(hash, match.game_key, row.run_id, row.sequence, row.frame_index);
           rewritten++;
         }
-        const retained = this.db.prepare("SELECT MIN(received_at_ms) AS oldest, COUNT(*) AS count FROM tail_records WHERE game_key = ?")
-          .get(match.game_key) as { oldest?: number | null; count?: number } | undefined;
-        const floor = match.finished_at_ms - this.tailWindowMs;
+        // Old `book-quiet` rows were anchored on the terminal clearing frame.
+        // Re-anchor them on the newest retained frame that still proves depth.
+        const anchorRepaired = match.finish_anchor === "book-quiet" && match.finish_conflict !== 1 &&
+          lastActive !== null && lastActive.atMs !== match.finished_at_ms;
+        const finishedAtMs = anchorRepaired ? lastActive!.atMs : match.finished_at_ms;
+        const floor = finishedAtMs - this.tailWindowMs;
+        const depth = this.db.prepare(`SELECT COUNT(*) AS count FROM tail_records
+          WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
+            AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')`)
+          .get(match.game_key, floor, finishedAtMs) as { count?: number } | undefined;
+        const depthCount = depth?.count ?? 0;
         // Bound the seed anchor exactly as `seedStart` does. An anchor older
         // than one extra window cannot prove the book at the floor, because the
         // deltas that moved it in between were not retained either.
@@ -946,20 +965,34 @@ export class CompactTailStore {
           .get(match.game_key, floor, floor - this.tailWindowMs) as { at?: number | null } | undefined;
         const anchorAtMs = typeof seed?.at === "number" ? seed.at : null;
         const inWindow = this.db.prepare(`SELECT MIN(received_at_ms) AS oldest FROM tail_records
-          WHERE game_key = ? AND received_at_ms >= ?`).get(match.game_key, floor) as { oldest?: number | null } | undefined;
-        // Only rows inside the window count as coverage. A row that merely
-        // predates the floor proves nothing about the floor itself, so falling
-        // back to it would report an empty window as a complete one.
+          WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
+            AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')`)
+          .get(match.game_key, floor, finishedAtMs) as { oldest?: number | null } | undefined;
         const windowStartMs = typeof inWindow?.oldest === "number" ? inWindow.oldest : null;
         const coveredFromMs = anchorAtMs ?? windowStartMs;
         const missingFrontMs = coveredFromMs === null ? this.tailWindowMs : Math.max(0, coveredFromMs - floor);
         const toleranceMs = Math.min(1_000, Math.floor(this.tailWindowMs / 100));
-        const complete = (retained?.count ?? 0) > 0 && missingFrontMs <= toleranceMs;
-        if (options.apply) updateMatch.run(windowStartMs, complete ? 1 : 0, missingFrontMs, match.game_key);
+        const complete = depthCount > 0 && missingFrontMs <= toleranceMs;
+        let finishFactsJson: string | null = null;
+        if (anchorRepaired && match.finish_facts_json) {
+          const facts: unknown = JSON.parse(match.finish_facts_json);
+          if (Array.isArray(facts)) {
+            finishFactsJson = JSON.stringify(facts.map(fact => {
+              const value = objectValue(fact);
+              if (value?.source !== "book-quiet") return fact;
+              return { ...value, atMs: finishedAtMs, observedAtMs: finishedAtMs,
+                sourceRunId: lastActive!.runId, sequence: lastActive!.sequence, frameIndex: lastActive!.frameIndex };
+            }));
+          }
+        }
+        if (options.apply) updateMatch.run(finishedAtMs, windowStartMs, complete ? 1 : 0, missingFrontMs,
+          finishFactsJson, this.now(), match.game_key);
+        if (anchorRepaired) report.anchorsRepaired++;
         if (complete) report.windowComplete++; else report.windowIncomplete++;
         report.recordsRewritten += rewritten; report.recordsDropped += dropped; report.foreignFramesDropped += foreign;
         report.details.push({ gameKey: match.game_key, recordsRewritten: rewritten, recordsDropped: dropped,
-          foreignFramesDropped: foreign, windowComplete: complete, missingFrontMs });
+          foreignFramesDropped: foreign, anchorRepaired, previousFinishedAtMs: match.finished_at_ms,
+          finishedAtMs, windowComplete: complete, missingFrontMs });
       }
       if (options.apply) this.db.exec("COMMIT");
       else this.db.exec("ROLLBACK");

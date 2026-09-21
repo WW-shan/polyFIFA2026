@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { metadataFromRecord, observationsFromRecord, windowKeyForIdentity } from "./tail-context.js";
 import { objectValue } from "./replay-values.js";
+import { activeSnapshotTokens, isTerminalClearFrame } from "./book-evidence.js";
 import type { JournalRecord } from "./types.js";
 import type { TailFinishFact, TailMetadata } from "./tail-types.js";
 import type { CompactTailStoreStatus } from "./continuous-tail-store.js";
@@ -16,8 +17,9 @@ export interface ArchiveState {
 /**
  * How the end of a match window was established.
  * - the two source clocks are published finish timestamps;
- * - `book-quiet` is the last order-book frame of a match whose source never
- *   published a clock at all, which is the common case for closed events;
+ * - `book-quiet` is the last order-book second with active depth for a match
+ *   whose source never published a clock at all, which is the common case for
+ *   closed events; terminal clearing frames remain stored but do not move it;
  * - `book-tail` is the last frame the store still held when the published
  *   clock and the stored frames did not overlap, so the window had to move to
  *   the real market tail instead of being published empty.
@@ -33,7 +35,8 @@ export interface CapturedGame {
   key: string; title: string; sport: string | null; gameId: string | null;
   eventIds: string[]; eventSlugs: string[]; tokenIds: string[]; marketIds: string[];
   firstSeenAtMs: number; lastSeenAtMs: number; firstBookAtMs: number | null; lastBookAtMs: number | null;
-  lastBookRunId: string | null; bookUpdates: number; trades: number; stateObservations: number;
+  lastActiveBookAtMs: number | null; lastBookRunId: string | null; lastActiveBookRunId: string | null;
+  bookUpdates: number; trades: number; stateObservations: number;
   finishedAtMs: number | null; finishAnchor?: FinishAnchor | null; finishConflict: boolean; retiredEventIds: string[];
   /**
    * Trimmed copy of the last Gamma event document seen for this game.
@@ -405,13 +408,15 @@ export class ContinuousState {
   anchorQuietFinishes(nowMs: number, graceMs: number, retentionMs: number): CapturedGame[] {
     const anchored: CapturedGame[] = [];
     for (const game of this.games.values()) {
-      if (game.finishedAtMs !== null || game.firstBookAtMs === null || game.lastBookAtMs === null) continue;
+      const lastActiveBookAtMs = game.lastActiveBookAtMs ?? game.lastBookAtMs;
+      if (game.finishedAtMs !== null || game.firstBookAtMs === null || lastActiveBookAtMs === null) continue;
       if (!game.eventIds.length || !game.eventIds.every(id => game.retiredEventIds.includes(id))) continue;
-      const quietMs = nowMs - game.lastBookAtMs;
+      const quietMs = nowMs - lastActiveBookAtMs;
       if (quietMs < graceMs || quietMs > retentionMs) continue;
-      game.finishedAtMs = game.lastBookAtMs;
+      game.finishedAtMs = lastActiveBookAtMs;
       game.finishAnchor = "book-quiet";
-      if (game.lastBookRunId !== null) game.finishRunId = game.lastBookRunId;
+      const finishRunId = game.lastActiveBookRunId ?? game.lastBookRunId;
+      if (finishRunId !== null) game.finishRunId = finishRunId;
       game.finishRevision = 1;
       this.newlyFinished.add(game.key);
       anchored.push(game);
@@ -485,7 +490,8 @@ export class ContinuousState {
       const resolvedKey = previousKey && previousKey !== key ? previousKey : key;
       const game: CapturedGame = this.games.get(resolvedKey) ?? { key: resolvedKey, title: meta.title, sport: meta.sport, gameId: meta.gameId,
         eventIds: [], eventSlugs: [], tokenIds: [], marketIds: [], firstSeenAtMs: record.receivedAtMs, lastSeenAtMs: record.receivedAtMs,
-        firstBookAtMs: null, lastBookAtMs: null, lastBookRunId: null, bookUpdates: 0, trades: 0, stateObservations: 0,
+        firstBookAtMs: null, lastBookAtMs: null, lastActiveBookAtMs: null, lastBookRunId: null, lastActiveBookRunId: null,
+        bookUpdates: 0, trades: 0, stateObservations: 0,
         finishedAtMs: null, finishConflict: false, retiredEventIds: [], phase: "watching", sources: [] };
       this.events.set(meta.eventId, resolvedKey);
       if (!game.eventIds.includes(meta.eventId)) game.eventIds.push(meta.eventId);
@@ -549,12 +555,17 @@ export class ContinuousState {
       const tokenIds = record.kind === "book_snapshot"
         ? (typeof data?.tokenId === "string" ? [data.tokenId] : [])
         : batchBookTokens(data);
+      const activeTokens = activeSnapshotTokens(data, tokenIds);
       for (const token of new Set(tokenIds)) {
         const key = this.tokens.get(token), game = key ? this.games.get(key) : undefined;
         if (!game) continue;
         this.source(game, record);
         game.bookUpdates++; game.lastBookAtMs = record.receivedAtMs; game.lastBookRunId = record.runId;
-        game.firstBookAtMs ??= record.receivedAtMs;
+        if (activeTokens.has(token)) {
+          game.lastActiveBookAtMs = record.receivedAtMs;
+          game.lastActiveBookRunId = record.runId;
+          game.firstBookAtMs ??= record.receivedAtMs;
+        }
       }
       this.rememberConnectionGames(record);
       return;
@@ -577,16 +588,24 @@ export class ContinuousState {
         this.source(game, record);
         if (frame.event_type === "book" || frame.event_type === "price_change") {
           game.bookUpdates++; game.lastBookAtMs = record.receivedAtMs; game.lastBookRunId = record.runId;
-          if (frame.event_type === "book") game.firstBookAtMs ??= record.receivedAtMs;
+          if (!isTerminalClearFrame(frame)) {
+            game.lastActiveBookAtMs = record.receivedAtMs;
+            game.lastActiveBookRunId = record.runId;
+            if (frame.event_type === "book") game.firstBookAtMs ??= record.receivedAtMs;
+          }
         } else if (frame.event_type === "last_trade_price") game.trades++;
       }
     }
     this.rememberConnectionGames(record);
   }
   readyToArchive(runId: string, nowMs = Date.now()): CapturedGame[] {
-    return [...this.games.values()].filter(game => game.firstBookAtMs !== null && game.finishedAtMs !== null &&
-      (game.lastBookRunId === runId || !!game.archive?.snapshotDirectory || game.sources.some(source => source.runId === game.lastBookRunId)) && game.eventIds.every(id => game.retiredEventIds.includes(id)) &&
-      (!game.archive || (game.archive.status === "failed" && (game.archive.retryAtMs ?? 0) <= nowMs)));
+    return [...this.games.values()].filter(game => {
+      const activeRunId = game.lastActiveBookRunId ?? game.lastBookRunId;
+      return game.firstBookAtMs !== null && game.finishedAtMs !== null &&
+        (activeRunId === runId || !!game.archive?.snapshotDirectory || game.sources.some(source => source.runId === activeRunId)) &&
+        game.eventIds.every(id => game.retiredEventIds.includes(id)) &&
+        (!game.archive || (game.archive.status === "failed" && (game.archive.retryAtMs ?? 0) <= nowMs));
+    });
   }
   markArchive(key: string, archive: ArchiveState): void {
     const game = this.games.get(key); if (!game) throw new Error("CAPTURE_GAME_UNKNOWN");
@@ -616,6 +635,8 @@ export class ContinuousState {
       if (value.lastSeenAtMs < cutoff && !this.hasPendingArchive(value)) continue;
       const game = structuredClone(value);
       if (!game || typeof game.key !== "string" || !Array.isArray(game.tokenIds) || !Array.isArray(game.eventIds)) throw new Error("CAPTURE_STATE_INVALID");
+      if (!Object.hasOwn(game, "lastActiveBookAtMs")) game.lastActiveBookAtMs = game.lastBookAtMs;
+      if (!Object.hasOwn(game, "lastActiveBookRunId")) game.lastActiveBookRunId = game.lastBookRunId;
       if (game.archive?.status === "running") game.archive = { ...game.archive, status: "failed", error: "export interrupted by restart", retryAtMs: 0 };
       if (game.archive?.status === "failed") game.archive.retryAtMs = 0;
       if (game.finishConflict && game.archive) {
