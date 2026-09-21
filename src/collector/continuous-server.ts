@@ -25,8 +25,15 @@ const browserScript = String.raw`
   const label = (labels, value) => Object.hasOwn(labels, value) ? labels[value] : text(value);
   const safeKey = key => typeof key === "string" && key.length > 0 && key !== "." && key !== ".."
     && !["/", "\\", "%"].some(part => key.includes(part)) && !/[\u0000-\u001f\u007f]/.test(key);
+  const tooOld = (atMs, limitMs) => !Number.isFinite(atMs) || atMs > Date.now() || Date.now() - atMs > limitMs;
+  function freshness(status) {
+    const stateLimit = Number.isFinite(status.stateStaleAfterMs) && status.stateStaleAfterMs > 0 ? status.stateStaleAfterMs : 15000;
+    return { stateStale: tooOld(status.updatedAtMs, stateLimit), dataStale: status.mode === "collecting" && tooOld(status.lastRecordAtMs, 60000) };
+  }
   function render(status) {
-    byId("mode").textContent = label(modes, status.mode) + " (" + text(status.mode) + ")";
+    const health = freshness(status);
+    const mode = health.stateStale ? "采集状态未经确认" : health.dataStale ? "采集停滞" : label(modes, status.mode);
+    byId("mode").textContent = mode + " (" + text(status.mode) + ")";
     byId("free-gb").textContent = status.freeBytes == null ? "未知" : (status.freeBytes / 1e9).toFixed(2) + " GB";
     byId("last-record-age").textContent = age(status.lastRecordAtMs);
     byId("received-records").textContent = text(status.receivedRecords);
@@ -40,10 +47,12 @@ const browserScript = String.raw`
     byId("compression-mode").textContent = !compression || !compression.enabled ? "未启用" : compression.running ? "压缩中" : "等待下轮";
     byId("compression-segments").textContent = text(compression ? compression.compressedSegments : 0);
     byId("compression-saved").textContent = ((compression ? compression.logicalBytesSaved : 0) / (1024 ** 3)).toFixed(2) + " GiB";
-    byId("connection-counts").textContent = status.connections.filter(connection => connection.open).length + " / " + status.connections.length;
+    const currentConnection = connection => connection.open && !health.stateStale && !tooOld(connection.lastMessageAtMs, 60000);
+    byId("connection-counts").textContent = status.connections.filter(currentConnection).length + " / " + status.connections.length;
     byId("connections").replaceChildren(...status.connections.map(connection => {
       const row = node("tr");
-      for (const value of [connection.source, connection.id, connection.open ? "已连接" : "已断开", age(connection.lastMessageAtMs)]) row.append(node("td", value));
+      const connectionState = !connection.open ? "已断开" : currentConnection(connection) ? "已连接" : "连接记录陈旧";
+      for (const value of [connection.source, connection.id, connectionState, age(connection.lastMessageAtMs)]) row.append(node("td", value));
       return row;
     }));
     byId("game-counts").textContent = Object.entries(phases).map(([phase, title]) => title + " " + status.games.filter(game => game.phase === phase).length).join(" · ");
@@ -130,7 +139,10 @@ const browserScript = String.raw`
       const status = await response.json();
       latest = status;
       render(status);
-      byId("health").textContent = "状态已刷新 · 快照距今 " + age(status.updatedAtMs);
+      const health = freshness(status);
+      byId("health").textContent = health.stateStale ? "状态陈旧；采集状态未经确认 · 最近状态更新距今 " + age(status.updatedAtMs)
+        : health.dataStale ? "采集停滞；没有近期日志 · 最后记录距今 " + age(status.lastRecordAtMs)
+        : "状态已刷新 · 最近状态更新距今 " + age(status.updatedAtMs);
     } catch {
       if (latest) render(latest);
       byId("health").textContent = latest ? "状态刷新失败；下方保留上次结果。" : "状态刷新失败；尚无结果。";
@@ -162,7 +174,7 @@ const dashboard = `<!doctype html>
 <div><dt>距最后接收</dt><dd id="last-record-age">—</dd></div><div><dt>已接收记录</dt><dd id="received-records">—</dd></div>
 <div><dt>目标 tokens</dt><dd id="desired-tokens">—</dd></div><div><dt>本轮原始字节</dt><dd id="raw-bytes">—</dd></div>
 <div><dt>排队字节</dt><dd id="queued-bytes">—</dd></div><div><dt>紧凑库大小</dt><dd id="compact-bytes">—</dd></div>
-<div><dt>紧凑库记录</dt><dd id="compact-records">—</dd></div><div><dt>已连接 / 总连接</dt><dd id="connection-counts">—</dd></div>
+<div><dt>紧凑库记录</dt><dd id="compact-records">—</dd></div><div><dt>近期有消息 / 已知连接</dt><dd id="connection-counts">—</dd></div>
 <div><dt>后台压缩</dt><dd id="compression-mode">—</dd></div><div><dt>本进程已压缩分段</dt><dd id="compression-segments">—</dd></div>
 <div><dt>本进程压缩减少的逻辑字节</dt><dd id="compression-saved">—</dd></div>
 </dl><div class="scroll"><table><thead><tr><th>来源</th><th>连接</th><th>状态</th><th>距最后消息</th></tr></thead><tbody id="connections"></tbody></table></div></section>

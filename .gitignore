@@ -28,3 +28,7 @@ data/research/
 
 # local git worktrees
 .worktrees/
+
+# Python caches
+__pycache__/
+*.py[cod]

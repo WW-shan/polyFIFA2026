@@ -62,6 +62,7 @@ test("help is read-only, returns captured output, and does not install process s
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("--windows-seconds");
   expect(result.stdout).toContain("--fetch-settlements");
+  expect(result.stdout).toContain("--allow-partial-archive-window");
   expect(result.stdout).toMatch(/hypothetical/i);
   expect(result.stderr).toBe("");
   expect(request).not.toHaveBeenCalled();
@@ -103,13 +104,14 @@ test("runs a real exported archive offline and preserves exact price strings and
   const result = await run(["--archive-dir", f.directory, "--output-dir", f.output, "--sport", "soccer",
     "--prices", "0.70000000000000001,0.8000", "--windows-seconds", "60,180", "--entry-min-bid", "0.9000",
     "--shares", "2.5", "--queue-ahead-shares", "0.25", "--maker-fee-bps", "12.5",
-    "--fill-model", "sell-through-volume", "--require-fresh-context"], { request });
+    "--fill-model", "sell-through-volume", "--require-fresh-context", "--allow-book-anchor-finish", "--allow-partial-archive-window"], { request });
   expect(result.exitCode, result.stderr).toBe(0);
   const paths = JSON.parse(result.stdout);
   expect(paths.reportPath).toBe(join(await realpath(f.root), "report", "report.json"));
   const report = JSON.parse(await readFile(paths.reportPath, "utf8"));
   expect(report.options).toEqual({ prices: ["0.70000000000000001", "0.8000"], windowsSeconds: [60, 180], entryMinBid: "0.9000",
-    shares: 2.5, queueAheadShares: .25, makerFeeBps: 12.5, fillModel: "sell-through-volume", requireFreshContext: true });
+    shares: 2.5, queueAheadShares: .25, makerFeeBps: 12.5, fillModel: "sell-through-volume", requireFreshContext: true,
+    allowBookAnchorFinish: true, allowPartialArchiveWindow: true });
   expect(report.sources).toHaveLength(1);
   expect(report.sources[0].sport).toBe("soccer");
   expect(report.trials).toHaveLength(4);

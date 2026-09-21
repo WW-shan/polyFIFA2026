@@ -30,6 +30,27 @@ export interface TailBacktestOptions {
   makerFeeBps?: number;
   fillModel?: TailFillModel;
   requireFreshContext?: boolean;
+  /**
+   * Price trials whose window end is the collector's own book anchor
+   * (`book-quiet` / `book-tail`) instead of a published match clock.
+   *
+   * Off by default. Tennis and table-tennis events on this feed almost never
+   * publish `finishedTimestamp`, so the collector anchors those windows on the
+   * last order-book frame, which is inside the match by construction but can be
+   * earlier than the true finish. Turning this on trades that precision for
+   * coverage, and the anchor source stays recorded on every trial.
+   */
+  allowBookAnchorFinish?: boolean;
+  /**
+   * Allow archive-wide token coverage to be incomplete outside the selected
+   * holding window. Every priced trial still requires its own holding window to
+   * be complete and every aggregate token counter to agree with the rows.
+   *
+   * Off by default. Compact tail windows often begin before an outcome's order
+   * book exists, so the archive can legitimately contain missing front seconds
+   * even when the final minutes used by a trial are complete.
+   */
+  allowPartialArchiveWindow?: boolean;
 }
 export type EffectiveTailBacktestOptions = Required<TailBacktestOptions>;
 export type TailBacktestFinishEvidence = NonNullable<TailWindow["finishEvidence"]>[number];

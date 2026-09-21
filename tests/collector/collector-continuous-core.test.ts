@@ -434,6 +434,72 @@ describe("batch HTTP snapshots", () => {
     });
   });
 
+  test("backs off a token whose /books reply proved there is no orderbook", async () => {
+    let clock = 1_000;
+    const requests: string[][] = [];
+    const run = fixture({ snapshotBatchSize: 50, snapshotConcurrency: 1, absentBookCooldownMs: 60_000 }, {
+      now: () => clock,
+      discover: async () => [game("A")],
+      request: async (_url, options) => {
+        const tokens = (JSON.parse(options!.body!) as Array<{ token_id: string }>).map(value => value.token_id);
+        requests.push(tokens);
+        // Upstream omits tokens whose market has no orderbook at all.
+        return tokens.filter(token => token === "A-yes").map(token => book(token));
+      }
+    });
+    try {
+      await run.runtime.start();
+      expect(requests).toEqual([["A-yes", "A-no"]]);
+      const issues = run.records.filter(row => row.kind === "book_snapshot_batch_error");
+      expect(issues).toHaveLength(1);
+      expect((issues[0]!.data as { missingTokenIds: string[] }).missingTokenIds).toEqual(["A-no"]);
+      expect(run.records.filter(row => row.kind === "book_snapshot")).toHaveLength(1);
+
+      // The proven-absent token stays out of the next pass entirely.
+      await run.runtime.snapshotOnce();
+      expect(requests).toEqual([["A-yes", "A-no"], ["A-yes"]]);
+      expect(run.records.filter(row => row.kind === "book_snapshot_batch_error")).toHaveLength(1);
+
+      // Once the cooldown lapses it is asked for again, but one absence
+      // episode is reported once rather than once per retry.
+      clock += 60_000;
+      await run.runtime.snapshotOnce();
+      expect(requests.at(-1)).toEqual(["A-yes", "A-no"]);
+      expect(run.records.filter(row => row.kind === "book_snapshot_batch_error")).toHaveLength(1);
+    } finally { await run.runtime.stop(); }
+  });
+
+  test("clears a proven-absent token once its book comes back", async () => {
+    let clock = 1_000;
+    let bookAvailable = false;
+    const requests: string[][] = [];
+    const run = fixture({ snapshotBatchSize: 50, snapshotConcurrency: 1, absentBookCooldownMs: 60_000 }, {
+      now: () => clock,
+      discover: async () => [game("A")],
+      request: async (_url, options) => {
+        const tokens = (JSON.parse(options!.body!) as Array<{ token_id: string }>).map(value => value.token_id);
+        requests.push(tokens);
+        return tokens.filter(token => token === "A-yes" || bookAvailable).map(token => book(token));
+      }
+    });
+    try {
+      await run.runtime.start();
+      expect(requests).toEqual([["A-yes", "A-no"]]);
+      clock += 60_000;
+      bookAvailable = true;
+      await run.runtime.snapshotOnce();
+      expect(requests.at(-1)).toEqual(["A-yes", "A-no"]);
+      expect(run.records.filter(row => row.kind === "book_snapshot")).toHaveLength(3);
+
+      // The recovered book clears the absence, so a fresh gap is reported again.
+      clock += 60_000;
+      bookAvailable = false;
+      await run.runtime.snapshotOnce();
+      expect(requests.at(-1)).toEqual(["A-yes", "A-no"]);
+      expect(run.records.filter(row => row.kind === "book_snapshot_batch_error")).toHaveLength(2);
+    } finally { await run.runtime.stop(); }
+  });
+
   test.each([{ response: [] }, { response: { error: "not an array" } }])("an empty or malformed reply remains explicit absence: %j", async ({ response }) => {
     let requests = 0;
     const run = fixture({ durationSeconds: 0, snapshotBatchSize: 100 }, {

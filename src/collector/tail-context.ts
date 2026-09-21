@@ -150,7 +150,13 @@ function observation(raw: Record<string, unknown>, record: JournalRecord, source
   const clock = raw.clock ?? raw.elapsed ?? raw.gameTimeDisplay ?? state?.clock ?? state?.elapsed ?? state?.gameTimeDisplay ?? null;
   const live = booleanValue(raw.live) ?? booleanValue(state?.live);
   const ended = booleanValue(raw.ended) ?? booleanValue(state?.ended);
-  const finishAtMs = explicitTime(source === "gamma" ? raw.finishedTimestamp : raw.finishedAt);
+  // Sports sends its terminal frame with the same `finishedTimestamp` clock
+  // Gamma later republishes; older frames used `finishedAt`. Reading only
+  // `finishedAt` threw that clock away, so every match had to wait for a Gamma
+  // round trip that regularly arrived after the tail had been pruned.
+  const finishAtMs = explicitTime(source === "gamma"
+    ? raw.finishedTimestamp
+    : raw.finishedAt ?? raw.finishedTimestamp);
   if ([score, period, clock, live, ended, finishAtMs].every(value => value === null)) return null;
 
   return {

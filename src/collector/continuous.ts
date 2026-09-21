@@ -60,12 +60,14 @@ export class ContinuousCollector {
   private clockFaultRunId: string | undefined;
   private clockRestartRequested = false;
   private compactStore: CompactTailStore | undefined;
+  private readonly hotStateMaxAgeMs: number;
   private nextMaintenanceAtMs: number;
   private readonly compactMetadataHashes = new Map<string, string>();
 
   constructor(readonly config: ContinuousConfig, private readonly dependencies: ContinuousDependencies = {}) {
     this.now = dependencies.now ?? Date.now;
-    this.state = new ContinuousState(config.dataRoot, config.port);
+    this.hotStateMaxAgeMs = (config.lookbackHours + config.aheadHours + 2) * 3600_000;
+    this.state = new ContinuousState(config.dataRoot, config.port, config.pulseIntervalMs * 3, this.hotStateMaxAgeMs);
     this.state.compression.enabled = config.compressionEnabled;
     this.nextCompressionAtMs = this.now() + config.compressionIntervalMs;
     this.nextMaintenanceAtMs = this.now() + config.maintenanceIntervalMs;
@@ -87,13 +89,25 @@ export class ContinuousCollector {
     if (this.config.compactStorageEnabled) {
       this.compactStore = await openCompactTailStore({ dataRoot: this.config.dataRoot,
         tailWindowMs: this.config.tailWindowSeconds * 1000, bufferMs: this.config.tailBufferSeconds * 1000,
-        retentionMs: this.config.tailRetentionDays * 24 * 3600_000 || 1, maxBytes: this.config.maxTailStoreBytes, now: this.now });
+        retentionMs: this.config.tailRetentionDays * 24 * 3600_000 || 1, maxBytes: this.config.maxTailStoreBytes,
+        pendingFinishMs: this.config.pendingFinishRetentionMs, now: this.now });
       this.state.setCompactStorage(this.compactStore.snapshot());
     }
     this.lock = await acquireCaptureLock(this.config.dataRoot);
     this.cancellation.signal.throwIfAborted();
     const previous = await readCaptureState(this.config.dataRoot);
     if (previous) this.state.restore(previous);
+    // Restoring a finish does not replay `consumeNewlyFinishedGames`. Re-pin
+    // every unfinished compact archive before the first maintenance pass can
+    // prune the tail it still needs to finalize.
+    if (this.compactStore) {
+      for (const game of this.state.gamesView()) {
+        if (game.finishFacts?.length) this.compactStore.refreshFinishEvidence(game);
+        if (game.finishedAtMs !== null && game.archive?.status !== "complete") {
+          this.compactStore.markPendingFinalize(game.key, game.finishedAtMs);
+        }
+      }
+    }
     this.stateReady = true;
     this.server = await (this.dependencies.startServer ?? startContinuousServer)({ port: this.config.port, dataRoot: this.config.dataRoot, getStatus: () => this.state.snapshot() });
     this.cancellation.signal.throwIfAborted();
@@ -110,8 +124,30 @@ export class ContinuousCollector {
     const record = journal.record(input);
     this.state.observe(record);
     if (this.compactStore) {
-      this.compactStore.ingest(record, this.state.gameKeysForRecord(record));
-      this.state.consumeNewlyFinishedGames();
+      if (record.source === "clob") {
+        if (record.kind === "book_snapshot_batch") {
+          // The anchor pass emits the raw container *and* one `book_snapshot`
+          // per usable token it carried. Filing both stored every anchor book
+          // twice, so the container stays audit evidence and the per-token
+          // records are the single stored copy. It also keeps the store clear
+          // of the container's positional-ID fallback, which could attribute a
+          // malformed entry to the wrong token.
+        } else {
+          const frames = this.state.clobFramesForRecord(record);
+          if (frames.length === 0) this.compactStore.ingest(record, this.state.gameKeysForRecord(record));
+          else for (const { gameKey, frame, frameIndex, kind } of frames) {
+            this.compactStore.ingestFrame(record, gameKey, frame, frameIndex, kind ?? record.kind);
+          }
+        }
+      } else {
+        this.compactStore.ingest(record, this.state.gameKeysForRecord(record));
+      }
+      // Pin the final window the moment a finish is observed. The archive turn
+      // may not run for minutes; without this, wall-clock maintenance would
+      // prune the oldest seconds of the tail before it is copied.
+      for (const finished of this.state.consumeNewlyFinishedGames()) {
+        if (finished.finishedAtMs !== null) this.compactStore.markPendingFinalize(finished.key, finished.finishedAtMs);
+      }
     }
     const mono = BigInt(record.monotonicNs);
     if (this.clock?.runId !== record.runId) {
@@ -156,7 +192,9 @@ export class ContinuousCollector {
       discoveryIntervalMs: config.discoveryIntervalMs, snapshotIntervalMs: config.snapshotIntervalMs,
       httpTimeoutMs: config.httpTimeoutMs, postFinishRetentionMs: config.postFinishRetentionMs, reconciliationConcurrency: 4,
       backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true,
-      compactStorageEnabled: config.compactStorageEnabled
+      absentBookCooldownMs: config.absentBookCooldownMs,
+      compactStorageEnabled: config.compactStorageEnabled,
+      compactAnchorSnapshots: config.compactAnchorSnapshots
     }, dependencies);
     this.runtime = runtime;
     this.state.mode = "starting";
@@ -179,6 +217,7 @@ export class ContinuousCollector {
     const free = await (this.dependencies.diskBytes ?? availableDiskBytes)(this.config.dataRoot);
     if (this.stopping) return;
     this.state.freeBytes = free;
+    this.state.pruneStaleGames(this.now() - this.hotStateMaxAgeMs);
     if (this.clockRestartRequested && this.runtime) {
       this.clockRestartRequested = false; this.state.mode = "restarting";
       await this.runtime.stop().catch(error => this.state.issue("capture", error));
@@ -206,8 +245,15 @@ export class ContinuousCollector {
         this.compactStore.flush();
         if (this.now() >= this.nextMaintenanceAtMs) {
           this.compactStore.maintain(this.now());
+          // Compact mode keeps the book evidence in SQLite, so a sealed raw run
+          // is discovery/audit context rather than the record of the match:
+          // holding it for the final-result retention period is what filled the
+          // disk. The legacy path still needs the raw run to export.
+          const rawRetentionMs = this.config.compactStorageEnabled
+            ? this.config.rawRunRetentionHours * 3600_000
+            : this.config.tailRetentionDays * 24 * 3600_000;
           await pruneRawRunDirectories(this.config.dataRoot, this.journal?.runId ?? null,
-            this.config.tailRetentionDays * 24 * 3600_000, this.now());
+            rawRetentionMs, this.now());
           this.nextMaintenanceAtMs = this.now() + this.config.maintenanceIntervalMs;
         }
         this.state.setCompactStorage(this.compactStore.snapshot());
@@ -218,7 +264,16 @@ export class ContinuousCollector {
         await this.captureTask;
       }
     }
-    if (!this.pausedForDisk && this.journal && this.runtime?.status === "running") await this.refreshMissingFinish(this.journal);
+    if (!this.pausedForDisk && this.journal && this.runtime?.status === "running") {
+      await this.refreshMissingFinish(this.journal);
+      // A clock that never arrives must not cost the match. Games whose events
+      // are retired and whose order book has been quiet past the grace period
+      // fall back to their own last frame as the window end.
+      for (const game of this.state.anchorQuietFinishes(this.now(), this.config.finishAnchorGraceMs,
+        this.config.pendingFinishRetentionMs)) {
+        if (game.finishedAtMs !== null) this.compactStore?.markPendingFinalize(game.key, game.finishedAtMs);
+      }
+    }
     if (this.stopping) return;
     const game = !this.pausedForDisk && !this.archiveTask && !this.compressionTask && this.journal && this.runtime?.status === "running"
       ? this.state.readyToArchive(this.journal.runId, this.now())[0] : undefined;
@@ -290,11 +345,34 @@ export class ContinuousCollector {
     this.archiveTask = (async () => {
       await this.persist(); signal.throwIfAborted();
       await journal.flush(); signal.throwIfAborted();
-      this.compactStore!.finalize(game, finishAtMs);
+      // The requested window is `[finishAtMs - tailWindow, finishAtMs]`. A
+      // published clock can miss the frames the store holds in both
+      // directions: it can post-date the last frame (a `/books` batch that
+      // answered for other tokens, or a clock that simply arrives after the
+      // last quote), and it can pre-date them (the market kept trading after
+      // the match and the label only arrived minutes later, by which time the
+      // wall-clock rule had released the pre-finish seconds). Either way an
+      // empty window loses the whole match, so fall back to the newest frame
+      // the store really holds and publish the real market tail instead.
+      const tailWindowMs = this.config.tailWindowSeconds * 1000;
+      const hasRequestedWindow = this.compactStore!.hasStagedInWindow(game.key, finishAtMs - tailWindowMs, finishAtMs);
+      const stagedTailAtMs = hasRequestedWindow ? null : this.compactStore!.stagedTailAt(game.key);
+      const anchorOnStoredTail = stagedTailAtMs !== null;
+      const effectiveFinishAtMs = stagedTailAtMs ?? finishAtMs;
+      const finalized = this.compactStore!.finalize(
+        anchorOnStoredTail ? { ...game, finishAnchor: "book-tail" } : game, effectiveFinishAtMs);
       this.state.setCompactStorage(this.compactStore!.snapshot());
       signal.throwIfAborted();
+      const windowError = finalized.records === 0 ? "no compact records in final window"
+        : !finalized.windowComplete ? `incomplete final window: missing ${Math.round(finalized.missingFrontMs / 1000)}s from the front`
+        : undefined;
+      const anchorNote = anchorOnStoredTail
+        ? `finish anchor moved to the last stored frame (published clock ${new Date(finishAtMs).toISOString()}, stored tail ${new Date(effectiveFinishAtMs).toISOString()})`
+        : undefined;
+      const archiveNote = [windowError, anchorNote].filter((value): value is string => value !== undefined).join("; ");
       this.state.markArchive(game.key, { status: "complete", runId: sourceRunId, attempt,
-        outputDirectory: this.compactStore!.databasePath, finishRevision: revision, priceReadyTokens: 0, strictReadyTokens: 0 });
+        outputDirectory: this.compactStore!.databasePath, finishRevision: revision, priceReadyTokens: 0, strictReadyTokens: 0,
+        ...(archiveNote ? { error: archiveNote } : {}) });
     })().catch(error => {
       this.state.markArchive(game.key, { status: "failed", runId: sourceRunId, attempt, error: String(error), retryAtMs: this.now() + 60_000 });
       this.state.issue("compact_archive", error, this.now());
@@ -394,14 +472,55 @@ export class ContinuousCollector {
     }
     throw new Error("CAPTURE_SNAPSHOT_PATH_INVALID");
   }
+  /**
+   * Ask Gamma for the finish clock of matches whose events are already retired.
+   *
+   * A retired event is not proof of a full-match finish clock: Gamma publishes
+   * `finishedTimestamp` a few seconds after the sports feed reports the end, so
+   * the follow-up has to be retried. Retries used to run one request per pulse
+   * behind a queue of every retired game in the 72h horizon; a match that
+   * retired seconds after it ended waited behind hundreds of older ones, and by
+   * the time its turn came the tail had already been pruned, which silently
+   * lost the match. Now the newest evidence is served first, a game whose
+   * window is still salvageable is retried on a short cadence, and the batch
+   * runs concurrently so the backlog still drains. A game whose evidence is
+   * already older than the protection window is skipped: its label could no
+   * longer produce a window, so requesting it would only burn throughput.
+   */
   private async refreshMissingFinish(journal: CollectorJournal): Promise<void> {
     const now = this.now();
-    const game = this.state.snapshot().games.filter(game => game.firstBookAtMs !== null && game.finishedAtMs === null &&
+    const candidates = this.state.gamesView().filter(game => game.firstBookAtMs !== null && game.finishedAtMs === null &&
       game.eventIds.every(id => game.retiredEventIds.includes(id)) && now - game.firstSeenAtMs < 72 * 3600_000 &&
-      now - (this.finishLookups.get(game.key) ?? -Infinity) >= 60_000)
-      .sort((a, b) => (this.finishLookups.get(a.key) ?? -Infinity) - (this.finishLookups.get(b.key) ?? -Infinity))[0];
-    if (!game) return;
-    this.finishLookups.set(game.key, now);
+      this.finishLookupDue(now, game));
+    if (candidates.length === 0) return;
+    candidates.sort((left, right) => this.finishEvidenceAt(right) - this.finishEvidenceAt(left));
+    const batch = candidates.slice(0, this.config.finishFollowupBatchSize);
+    for (const game of batch) this.finishLookups.set(game.key, now);
+    await Promise.all(batch.map(game => this.followUpFinish(journal, game)));
+    if (this.finishLookups.size > 2048) this.finishLookups.delete(this.finishLookups.keys().next().value!);
+  }
+
+  /**
+   * Newest order-book evidence for the match. Gamma keeps listing finished
+   * events as open, so `lastSeenAtMs` stays fresh for games that ended hours
+   * ago; only the order book stops when the match does, which makes it the
+   * honest clock for "how long is this window still worth chasing".
+   */
+  private finishEvidenceAt(game: CapturedGame): number {
+    return game.lastBookAtMs ?? -Infinity;
+  }
+
+  private finishLookupDue(now: number, game: CapturedGame): boolean {
+    // Past the protection window the tail store has released the rows, so even
+    // a perfect label could only produce an empty archive.
+    if (now - this.finishEvidenceAt(game) > this.config.pendingFinishRetentionMs) return false;
+    const previous = this.finishLookups.get(game.key);
+    return previous === undefined || now - previous >= this.config.finishFollowupIntervalMs;
+  }
+
+  /** One identity-checked finish lookup. Failures stay scoped to their game. */
+  private async followUpFinish(journal: CollectorJournal, game: CapturedGame): Promise<void> {
+    const now = this.now();
     const slug = game.eventSlugs[0]!, url = `${this.config.gammaBaseUrl.replace(/\/+$/, "")}/events/slug/${encodeURIComponent(slug)}`;
     const request = this.dependencies.request ?? ((url, options) => fetchJson(url, { ...options,
       ...(this.config.proxyUrl === undefined ? {} : { proxyUrl: this.config.proxyUrl }) }));
@@ -417,11 +536,13 @@ export class ContinuousCollector {
       await journal.flush();
       if (!this.stopping && this.journal === journal) this.record(journal, { source: "gamma", kind: "event_metadata", data: { event: response, status: "finish-followup" } });
     } catch (error) { if (!this.stopping) this.state.issue("finish_labels", error, this.now()); }
-    if (this.finishLookups.size > 2048) this.finishLookups.delete(this.finishLookups.keys().next().value!);
   }
   private persist(): Promise<void> {
     if (!this.lock || !this.stateReady) return Promise.resolve();
-    const work = this.persistence.catch(() => {}).then(() => writeCaptureState(this.config.dataRoot, this.state.snapshot()));
+    const work = this.persistence.catch(() => {}).then(() => {
+      this.state.markUpdated(this.now());
+      return writeCaptureState(this.config.dataRoot, this.state.snapshot());
+    });
     this.persistence = work; return work;
   }
   stop(): Promise<void> {

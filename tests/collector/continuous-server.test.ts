@@ -102,7 +102,7 @@ class Element {
   }
 }
 
-async function openDashboard(server: StatusServer) {
+async function openDashboard(server: StatusServer, now = () => 20_000) {
   const result = await http(server.port, "/");
   expect(result.status).toBe(200);
   const html = result.body.toString();
@@ -115,7 +115,7 @@ async function openDashboard(server: StatusServer) {
   const requests: Array<{ path: string; init: RequestInit }> = [];
   const context: Record<string, unknown> = {
     document: { getElementById: (id: string) => nodes.get(id), createElement: (tag: string) => new Element(tag) },
-    Date: class extends Date { static override now() { return 20_000; } },
+    Date: class extends Date { static override now() { return now(); } },
     AbortSignal,
     setTimeout: (callback: () => unknown, delay: number) => { timers.push(callback); delays.push(delay); return timers.length; },
     fetch: async (path: string, init: RequestInit) => {
@@ -849,5 +849,53 @@ describe("bounded artifact byte ranges", () => {
     expect(conditional.status).toBe(200);
     expect(conditional.headers["content-range"]).toBeUndefined();
     expect(conditional.body.toString()).toBe("0123456789");
+  });
+});
+
+
+describe("collector freshness is independent of a successful HTTP response", () => {
+  test("flags stale supervisor state even when records were recently received", async () => {
+    status.updatedAtMs = 1000;
+    status.lastRecordAtMs = 49_000;
+    status.connections = [{ id: "clob-old", source: "clob", open: true, lastMessageAtMs: 49_000 }];
+    const view = await openDashboard(await start(), () => 50_000);
+    expect(view.get("health").textContent).toContain("状态陈旧");
+    expect(view.get("mode").textContent).toContain("未经确认");
+    expect(view.get("connections").textContent).toContain("陈旧");
+    expect(view.get("connection-counts").textContent).toBe("0 / 1");
+    expect(view.get("health").textContent).not.toContain("状态已刷新");
+  });
+
+  test.each([null, 1000])("flags collecting with a stale or absent receipt: %s", async lastRecordAtMs => {
+    status.updatedAtMs = 90_000;
+    status.lastRecordAtMs = lastRecordAtMs;
+    status.connections = [{ id: "clob-old", source: "clob", open: true, lastMessageAtMs: 1000 }];
+    const view = await openDashboard(await start(), () => 90_000);
+    expect(view.get("health").textContent).toContain("采集停滞");
+    expect(view.get("mode").textContent).toContain("采集停滞");
+    expect(view.get("connections").textContent).toContain("陈旧");
+    expect(view.get("connection-counts").textContent).toBe("0 / 1");
+  });
+
+  test("does not label an intentional fresh disk pause as stalled capture", async () => {
+    status.mode = "paused_disk"; status.updatedAtMs = 90_000; status.lastRecordAtMs = null;
+    const view = await openDashboard(await start(), () => 90_000);
+    expect(view.get("mode").textContent).toContain("已暂停");
+    expect(view.get("health").textContent).not.toContain("采集停滞");
+    expect(view.get("health").textContent).toContain("状态已刷新");
+  });
+
+  test("honors the supervisor's configured freshness deadline and recovers after progress", async () => {
+    let now = 90_000;
+    status.updatedAtMs = 50_000; status.lastRecordAtMs = 89_000; status.stateStaleAfterMs = 60_000;
+    const view = await openDashboard(await start(), () => now);
+    expect(view.get("health").textContent).toContain("状态已刷新");
+    now = 120_001; status.lastRecordAtMs = now;
+    await view.refresh();
+    expect(view.get("health").textContent).toContain("状态陈旧");
+    status.updatedAtMs = now;
+    await view.refresh();
+    expect(view.get("health").textContent).toContain("状态已刷新");
+    expect(view.get("mode").textContent).toContain("采集中");
   });
 });

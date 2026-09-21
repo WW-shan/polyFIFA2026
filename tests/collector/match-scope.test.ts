@@ -261,6 +261,40 @@ describe("match scope review regressions", () => {
     expect((await discover([raw])).result).toEqual([]);
   });
 
+  test.each([
+    "Nitto ATP Finals: Player to Qualify",
+    "Nitto ATP Finals: Who will qualify?",
+    "WTA Finals: Players to Qualify"
+  ])("excludes tournament qualification futures: %s", title => {
+    expect(classifyMatchScope(normalizeCollectorEvent(event("qualify-futures", { title }))!))
+      .toEqual({ kind: "non-match", reason: "tournament-outright" });
+  });
+
+  test.each([
+    "Will Carlos Alcaraz Qualify for the Nitto ATP Finals 2026?",
+    "Will Jannik Sinner qualify for the ATP Finals?"
+  ])("excludes qualification markets asked as a question: %s", title => {
+    const raw = event("qualify-question", { title: "Tennis special", markets: [market("q", { question: title })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "tournament-outright" });
+  });
+
+  test.each([
+    "M25 Sabadell, Qualifying: Ryan NDUALU vs Pau Lozano Ortega",
+    "Wimbledon Qualifying: Aziz Dougaz vs. Skander Mansouri",
+    "Wimbledon Qualifying Round 1: Aziz Dougaz vs. Skander Mansouri"
+  ])("retains an actual qualifying-round match: %s", title => {
+    const raw = event("qualifying-match", { title, markets: [market("m", { question: title })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toMatchObject({ kind: "single-match" });
+  });
+
+  test.each([
+    "Will Jannik Sinner have 15,000+ ATP Points Before 2027?",
+    "Will Carlos Alcaraz win 60 matches before 2027?"
+  ])("excludes an accumulated count measured before a year: %s", title => {
+    const raw = event("points-before", { title, markets: [market("p", { question: title })] });
+    expect(classifyMatchScope(normalizeCollectorEvent(raw)!)).toEqual({ kind: "non-match", reason: "season-or-statistic" });
+  });
+
   test("leaves generic parity outcomes explicitly ambiguous without participant identity", async () => {
     const raw = event("parity", { title: "Tennis special", markets: [
       market("parity", { outcomes: ["Odd", "Even"], sportsMarketType: "total_games_odd_even" })

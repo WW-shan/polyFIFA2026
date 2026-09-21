@@ -58,9 +58,10 @@ export async function scanJournal(
           start = newline + 1;
           const line = takeLine();
           let value: unknown;
-          try { value = JSON.parse(line) as unknown; }
-          catch { quality.malformedLines += 1; onDamage(); continue; }
-          assertJournalRecord(value);
+          try {
+            value = JSON.parse(line) as unknown;
+            assertJournalRecord(value);
+          } catch { quality.malformedLines += 1; onDamage(); continue; }
           await onRecord(value);
         }
       }

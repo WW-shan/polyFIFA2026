@@ -10,6 +10,7 @@ import { identifier, objectValue } from "./replay-values.js";
 import { gammaEventFromRecord, metadataFromRecord, observationsFromRecord, windowKeyForIdentity, windowKeyForBoundIdentity } from "./tail-context.js";
 import { TailIdentityScope } from "./tail-identity-scope.js";
 import type { JournalRecord } from "./types.js";
+import { isTailFinishSource } from "./tail-types.js";
 import type { TailClockIssue, TailClockPolicy, TailClockReceipt, TailEventIdentity, TailFinishFact, TailMetadata, TailObservation, TailOptions, TailWindow, TailWindowIdentity } from "./tail-types.js";
 
 export type EffectiveTailOptions = TailOptions & Required<Pick<TailOptions,"windowSeconds"|"maxFeedSilenceMs"|"sportsStaleAfterMs"|"maxClockDriftMs"|"shockThreshold"|"clockPolicy">>;
@@ -70,7 +71,7 @@ function finishFactsFromBytes(bytes: Buffer, runId: string): TailFinishFact[] {
     const row = objectValue(value);
     if (!row || !nullableFactId(row.eventId) || !nullableFactId(row.eventSlug) || !nullableFactId(row.gameId)
       || (row.eventSlug === null && row.gameId === null) || !factDate(row.atMs) || !factDate(row.observedAtMs)
-      || (row.source !== "gamma.finishedTimestamp" && row.source !== "sports.finishedAt") || !exactFactId(row.sourceRunId)
+      || !isTailFinishSource(row.source) || !exactFactId(row.sourceRunId)
       || !(row.sourceRunDirectory === null || (typeof row.sourceRunDirectory === "string" && row.sourceRunDirectory.trim()))
       || typeof row.sequence !== "number" || !Number.isSafeInteger(row.sequence) || row.sequence < 1
       || typeof row.frameIndex !== "number" || !Number.isSafeInteger(row.frameIndex) || row.frameIndex < 0) {

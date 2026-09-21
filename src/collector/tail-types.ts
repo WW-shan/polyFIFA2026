@@ -12,11 +12,30 @@ export interface TailClockIssue {
   previous: TailClockReceipt; current: TailClockReceipt;
 }
 
+/**
+ * Every way a tail window boundary can be established.
+ *
+ * The two published clocks are the primary evidence; the two book anchors are
+ * the collector's own fallback when neither source ever publishes a finish.
+ * They are separate labels so a reader can tell a real clock from a market
+ * tail, and they are declared once so the catalog writer and the research
+ * reader can never drift apart on what is an acceptable source.
+ */
+export const TAIL_FINISH_FACT_SOURCES = ["gamma.finishedTimestamp", "sports.finishedAt", "book-quiet", "book-tail"] as const;
+export type TailFinishSource = (typeof TAIL_FINISH_FACT_SOURCES)[number];
+/** True only for the two sources that publish an actual match clock. */
+export function isPublishedFinishSource(value: unknown): value is "gamma.finishedTimestamp" | "sports.finishedAt" {
+  return value === "gamma.finishedTimestamp" || value === "sports.finishedAt";
+}
+export function isTailFinishSource(value: unknown): value is TailFinishSource {
+  return typeof value === "string" && (TAIL_FINISH_FACT_SOURCES as readonly string[]).includes(value);
+}
+
 /** A finish observed in an original journal; its raw body remains at that run/sequence/frame. */
 export interface TailFinishFact {
   eventId: string | null; eventSlug: string | null; gameId: string | null;
   atMs: number; observedAtMs: number;
-  source: "gamma.finishedTimestamp" | "sports.finishedAt";
+  source: TailFinishSource;
   sourceRunId: string; sourceRunDirectory: string | null;
   sequence: number; frameIndex: number;
 }

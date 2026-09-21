@@ -407,6 +407,29 @@ describe("coverage, exclusions and outcome accounting", () => {
     expect(backtestTailArchives([data], options).trials[0]?.eligible).toBe(false);
   });
 
+  test("partial archive coverage is allowed only by opt-in and never weakens the holding window", () => {
+    const outside = archive(5);
+    outside.seconds = outside.seconds.filter(row => !(row.tokenId === "A" && row.secondIndex === 0));
+    outside.summary.seconds--;
+    Object.assign(outside.summary.tokens[0]!, { observedWindowComplete: false, validSeconds: 4, missingSeconds: 1 });
+    const strict = backtestTailArchives([outside], options).trials[0]!;
+    expect(strict.exclusions).toContain("token-window-incomplete");
+    const partialResult = backtestTailArchives([outside], { ...options, allowPartialArchiveWindow: true });
+    const partial = partialResult.trials[0]!;
+    expect(partial.exclusions).toEqual([]);
+    expect(partial).toMatchObject({ eligible: true, priceCoverage: { complete: true } });
+    expect(partialResult.warnings.some(warning => warning.includes("Archive-wide token coverage is allowed to be incomplete"))).toBe(true);
+    expect(backtestTailArchives([outside], options).warnings.some(warning => warning.includes("Archive-wide token coverage is allowed to be incomplete"))).toBe(false);
+
+    const inside = archive(5);
+    inside.seconds = inside.seconds.filter(row => !(row.tokenId === "A" && row.secondIndex === 2));
+    inside.summary.seconds--;
+    Object.assign(inside.summary.tokens[0]!, { observedWindowComplete: false, validSeconds: 4, missingSeconds: 1 });
+    const incomplete = backtestTailArchives([inside], { ...options, allowPartialArchiveWindow: true }).trials[0]!;
+    expect(incomplete.exclusions).toContain("holding-data-incomplete");
+    expect(incomplete.priceCoverage.complete).toBe(false);
+  });
+
   test("source-clock diagnostics and wall-clock affected bins cannot be precise holding evidence", () => {
     for (const reason of ["book-source-clock-invalid", "receipt-wall-clock-backstep"]) {
       const data = archive(); data.seconds[2]!.reasons.push(reason);
@@ -480,7 +503,7 @@ describe("strict archive and option validation", () => {
     const result = backtestTailArchives([]);
     expect(result.options).toEqual({ prices: ["0.50", "0.60", "0.70", "0.80", "0.90", "0.95", "0.97", "0.99"],
       windowsSeconds: [60, 180, 300], entryMinBid: "0.90", shares: 1, queueAheadShares: 0, makerFeeBps: 0,
-      fillModel: "quote-touch-assumed", requireFreshContext: false });
+      fillModel: "quote-touch-assumed", requireFreshContext: false, allowBookAnchorFinish: false, allowPartialArchiveWindow: false });
     expect(result.trials).toEqual([]); expect(result.summaries).toEqual([]);
   });
 
@@ -488,7 +511,7 @@ describe("strict archive and option validation", () => {
     { prices: ["0.7e0"] }, { prices: ["0." + "1".repeat(200)] }, { windowsSeconds: [] }, { windowsSeconds: [0] },
     { windowsSeconds: [1.5] }, { windowsSeconds: [86_401] }, { shares: 0 }, { shares: Infinity }, { queueAheadShares: -1 },
     { makerFeeBps: NaN }, { makerFeeBps: 10_001 }, { entryMinBid: "1.01" }, { entryMinBid: 0.9 },
-    { fillModel: "executed" }, { requireFreshContext: "true" }])("rejects invalid options %j", bad => {
+    { fillModel: "executed" }, { requireFreshContext: "true" }, { allowPartialArchiveWindow: "true" }])("rejects invalid options %j", bad => {
     expect(() => backtestTailArchives([archive()], { ...options, ...bad } as TailBacktestOptions)).toThrow("TAIL_BACKTEST_OPTIONS_INVALID");
   });
 
@@ -504,11 +527,14 @@ describe("strict archive and option validation", () => {
       windowsSeconds: Array.from({ length: 32 }, (_, i) => i + 1) })).toThrow("TAIL_BACKTEST_OPTIONS_INVALID");
   });
 
-  test("bounds repeated provenance as well as the number of trials", () => {
+  test("bounds repeated provenance while allowing realistic corpus expansion", () => {
     const data = archive(), fact = data.summary.windows[0]!.finishEvidence![0]!;
+    const grid = { prices: Array.from({ length: 32 }, (_, i) => `0.${String(i + 1).padStart(3, "0")}`),
+      windowsSeconds: Array.from({ length: 32 }, (_, i) => i + 1) };
     data.summary.windows[0]!.finishEvidence = Array.from({ length: 256 }, (_, i) => ({ ...fact, sequence: i + 1 }));
-    expect(() => backtestTailArchives([data], { prices: Array.from({ length: 32 }, (_, i) => `0.${String(i + 1).padStart(3, "0")}`),
-      windowsSeconds: Array.from({ length: 32 }, (_, i) => i + 1) })).toThrow(/TAIL_BACKTEST_OPTIONS_INVALID.*evidence/);
+    expect(() => backtestTailArchives([data], grid)).not.toThrow();
+    data.summary.windows[0]!.finishEvidence = Array.from({ length: 1_024 }, (_, i) => ({ ...fact, sequence: i + 1 }));
+    expect(() => backtestTailArchives([data], grid)).toThrow(/TAIL_BACKTEST_OPTIONS_INVALID.*evidence/);
   });
 
   test.each<(data: TailBacktestInput) => void>([
@@ -735,5 +761,48 @@ describe("collector compatibility and boundary regressions", () => {
   });
   test("sparse input arrays are invalid", () => {
     expect(() => backtestTailArchives(new Array<TailBacktestInput>(1), options)).toThrow("TAIL_BACKTEST_INPUT_INVALID");
+  });
+});
+
+describe("book-anchor finish sources", () => {
+  function anchoredArchive(source: "book-quiet" | "book-tail"): TailBacktestInput {
+    const data = archive();
+    const window = data.summary.windows[0]!;
+    window.finishSources = [source];
+    window.finishEvidence = [{ atMs: finish, observedAtMs: finish, source, eventSlug: "a-b" }];
+    return data;
+  }
+
+  test("a book-anchored archive loads instead of failing input validation", () => {
+    for (const source of ["book-quiet", "book-tail"] as const) {
+      // Refusing these made every compact archive the collector produces
+      // unreadable, because tennis and table tennis rarely publish a clock.
+      expect(() => backtestTailArchives([anchoredArchive(source)], options)).not.toThrow();
+    }
+  });
+
+  test("a book anchor is excluded by default and priced only on explicit opt-in", () => {
+    const data = anchoredArchive("book-quiet");
+    const strict = backtestTailArchives([data], options).trials[0]!;
+    expect(strict).toMatchObject({ entryAtMs: null, expiryAtMs: null, eligible: false });
+    expect(strict.exclusions).toContain("missing-actual-finish");
+
+    const optedIn = backtestTailArchives([data], { ...options, allowBookAnchorFinish: true }).trials[0]!;
+    expect(optedIn).toMatchObject({ entryAtMs: entry, expiryAtMs: finish, eligible: true, finishSources: ["book-quiet"] });
+    expect(optedIn.exclusions).toEqual([]);
+    expect(optedIn.finishEvidence).toEqual([expect.objectContaining({ source: "book-quiet" })]);
+  });
+
+  test("the opt-in is recorded as an explicit assumption", () => {
+    const data = anchoredArchive("book-tail");
+    const withFlag = backtestTailArchives([data], { ...options, allowBookAnchorFinish: true });
+    expect(withFlag.warnings.some(warning => warning.includes("Book-anchor finishes are priced by explicit opt-in"))).toBe(true);
+    const without = backtestTailArchives([data], options);
+    expect(without.warnings.some(warning => warning.includes("Book-anchor finishes are priced by explicit opt-in"))).toBe(false);
+  });
+
+  test("rejects a non-boolean opt-in", () => {
+    expect(() => backtestTailArchives([archive()], { allowBookAnchorFinish: "yes" as unknown as boolean }))
+      .toThrowError(/allowBookAnchorFinish/);
   });
 });

@@ -2,6 +2,8 @@ import { mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { randomBytes } from "node:crypto";
+import { readJournalSegmentPrefix } from "../../src/collector/journal-segments.js";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createJournal, listJournalSegments } from "../../src/collector/journal.js";
 import { scanJournal } from "../../src/collector/journal-reader.js";
@@ -43,6 +45,16 @@ async function compressTestFile(path: string, removePlain = true): Promise<void>
 }
 
 describe("lossless compressed journal reads", () => {
+  test("repeated early gzip prefix reads settle even when the source is still reading", async () => {
+    const root = await directory();
+    const path = join(root, "2026-09-16-000000.ndjson");
+    const bytes = Buffer.concat([randomBytes(110_000), Buffer.alloc(1_000_000, 65)]);
+    await writeFile(path + ".gz", gzipSync(bytes));
+    for (let index = 0; index < 100; index++) {
+      expect((await readJournalSegmentPrefix(path, 65_536)).equals(bytes.subarray(0, 65_536))).toBe(true);
+    }
+  });
+
   test("reads a gzip-only segment using its original logical name and exact records", async () => {
     const run = await closedRun();
     const expected = await records(run.path);

@@ -60,6 +60,13 @@ export interface CollectorOptions {
   backgroundInitialSnapshots?: boolean;
   /** Keep raw market frames out of the NDJSON journal; the continuous wrapper owns compact storage. */
   compactStorageEnabled?: boolean;
+  /**
+   * In compact mode, periodically fetch one full HTTP book per token to anchor
+   * the incremental `price_change` stream. Without an anchor the SELL-side
+   * depth deltas cannot be replayed into an ask ladder, and WebSocket does not
+   * reliably push a full book for every subscribed token.
+   */
+  compactAnchorSnapshots?: boolean;
   httpTimeoutMs?: number;
   durationSeconds?: number;
   maxTokensPerSocket?: number;
@@ -67,6 +74,15 @@ export interface CollectorOptions {
   maxBufferBytes?: number;
   postFinishRetentionMs?: number;
   reconciliationConcurrency?: number;
+  /**
+   * The public `/books` endpoint omits tokens whose market no longer has an
+   * orderbook (resolved sub-markets such as set winners, totals and handicaps
+   * that Gamma still reports as open). Re-requesting those tokens every pass
+   * produces an `identity mismatch` record per pass and burns upstream quota
+   * for a book that does not exist. Remember an absent token for this long
+   * before asking for it again.
+   */
+  absentBookCooldownMs?: number;
 }
 
 export interface CollectorDependencies {
@@ -158,11 +174,13 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     snapshotBatchSize: positiveInterval(options.snapshotBatchSize, 1, "snapshotBatchSize"),
     backgroundInitialSnapshots: options.backgroundInitialSnapshots ?? false,
     compactStorageEnabled: options.compactStorageEnabled ?? false,
+    compactAnchorSnapshots: options.compactAnchorSnapshots ?? false,
     httpTimeoutMs: positiveInterval(options.httpTimeoutMs, 10_000, "httpTimeoutMs"),
     maxTokensPerSocket: positiveInterval(options.maxTokensPerSocket, 200, "maxTokensPerSocket"),
     maxSegmentBytes: positiveInterval(options.maxSegmentBytes, 64 * 1024 * 1024, "maxSegmentBytes"),
     maxBufferBytes: positiveInterval(options.maxBufferBytes, 32 * 1024 * 1024, "maxBufferBytes"),
-    reconciliationConcurrency: positiveInterval(options.reconciliationConcurrency, 1, "reconciliationConcurrency")
+    reconciliationConcurrency: positiveInterval(options.reconciliationConcurrency, 1, "reconciliationConcurrency"),
+    absentBookCooldownMs: positiveInterval(options.absentBookCooldownMs, 300_000, "absentBookCooldownMs")
   };
   nonnegativeDuration(effective.durationSeconds);
   // Collector resource bound, not a claim about the server's maximum batch size.
@@ -195,6 +213,10 @@ export class CollectorRuntime {
   private snapshotTokens: string[] = [];
   private snapshotTokenSet = new Set<string>();
   private snapshotBatchSequence = 0;
+  /** Tokens whose last `/books` reply proved there is no orderbook, with the time we may retry. */
+  private readonly absentBookRetryAtMs = new Map<string, number>();
+  /** Absent tokens already reported once in this run, so one absence is not re-logged per pass. */
+  private readonly reportedAbsentBookTokens = new Set<string>();
   private readonly lifecycle: EventLifecycle | undefined;
   private journal: CollectorJournalLike | undefined;
   private streams: CollectorStreamLike | undefined;
@@ -376,6 +398,14 @@ export class CollectorRuntime {
       this.snapshotTimer = this.timers.setInterval(() => {
         void this.snapshotOnce();
       }, this.options.snapshotIntervalMs);
+    } else if (this.options.compactAnchorSnapshots) {
+      // Anchor cadence only: these full books let the SELL-side deltas be
+      // replayed into an ask ladder. They are far cheaper than the legacy
+      // every-token-every-minute sweep, and the rolling window keeps only the
+      // last one before the tail.
+      this.snapshotTimer = this.timers.setInterval(() => {
+        void this.snapshotOnce();
+      }, this.options.snapshotIntervalMs);
     }
   }
 
@@ -513,6 +543,13 @@ export class CollectorRuntime {
     this.desiredTokens = selection.tokenIds;
     this.snapshotTokens = selection.snapshotTokenIds;
     this.snapshotTokenSet = new Set(this.snapshotTokens);
+    // Absence bookkeeping only matters for tokens still in the anchor rotation;
+    // retired tokens would otherwise accumulate for the life of the process.
+    for (const tokenId of this.absentBookRetryAtMs.keys()) {
+      if (this.snapshotTokenSet.has(tokenId)) continue;
+      this.absentBookRetryAtMs.delete(tokenId);
+      this.reportedAbsentBookTokens.delete(tokenId);
+    }
     for (const state of selection.retired) await this.recordControlled({ source: "collector", kind: "event_retired", data: state });
     if (this.streams && (changed || forceSubscriptionUpdate)) {
       const update = this.subscriptionWrites.then(async () => {
@@ -640,7 +677,8 @@ export class CollectorRuntime {
   }
 
   private async performSnapshots(): Promise<void> {
-    const tokens = [...this.snapshotTokens];
+    const nowMs = dateValue(this.now()).getTime();
+    const tokens = this.snapshotTokens.filter(tokenId => !this.absentBookSuppressed(tokenId, nowMs));
     const batchSize = this.options.snapshotBatchSize;
     let nextToken = 0;
     await Promise.all(Array.from({ length: Math.min(Math.ceil(tokens.length / batchSize), this.options.snapshotConcurrency) }, async () => {
@@ -697,10 +735,26 @@ export class CollectorRuntime {
     const missingTokenIds = tokenIds.filter(tokenId => !returned.has(tokenId));
     const duplicateTokenIds = [...returned].filter(([, values]) => values.length > 1).map(([tokenId]) => tokenId);
     const unrequestedTokenIds = [...returned.keys()].filter(tokenId => !requested.has(tokenId));
-    if (!Array.isArray(response) || missingTokenIds.length || duplicateTokenIds.length || unrequestedTokenIds.length || invalidResponseIndices.length) {
+    // An omitted token means the market has no orderbook, not that the reply is
+    // corrupt: the single-token `/book` endpoint answers those with
+    // 404 "No orderbook exists". Only duplicates, unrequested or malformed
+    // entries are real contract violations, so report one absence episode once
+    // and back off before asking again.
+    const nowMs = dateValue(this.now()).getTime();
+    const newlyMissingTokenIds = missingTokenIds.filter(tokenId => !this.reportedAbsentBookTokens.has(tokenId));
+    for (const tokenId of missingTokenIds) {
+      this.reportedAbsentBookTokens.add(tokenId);
+      this.absentBookRetryAtMs.set(tokenId, nowMs + this.options.absentBookCooldownMs);
+    }
+    for (const tokenId of returned.keys()) {
+      // A book that came back clears the earlier absence.
+      this.absentBookRetryAtMs.delete(tokenId);
+      this.reportedAbsentBookTokens.delete(tokenId);
+    }
+    if (!Array.isArray(response) || newlyMissingTokenIds.length || duplicateTokenIds.length || unrequestedTokenIds.length || invalidResponseIndices.length) {
       await this.recordControlled({ source: "clob", kind: "book_snapshot_batch_error", data: {
         ...audit, code: Array.isArray(response) ? "CLOB_BOOK_BATCH_IDENTITY_MISMATCH" : "CLOB_BOOK_BATCH_INVALID_RESPONSE",
-        missingTokenIds, duplicateTokenIds, unrequestedTokenIds, invalidResponseIndices
+        missingTokenIds: newlyMissingTokenIds, duplicateTokenIds, unrequestedTokenIds, invalidResponseIndices
       } }, true);
     }
     for (const tokenId of tokenIds) {
@@ -714,6 +768,15 @@ export class CollectorRuntime {
         provenance: { batchId, responseIndex: match.responseIndex }
       } }, true);
     }
+  }
+
+  /** True while a proven-absent token is inside its backoff window. */
+  private absentBookSuppressed(tokenId: string, nowMs: number): boolean {
+    const retryAtMs = this.absentBookRetryAtMs.get(tokenId);
+    if (retryAtMs === undefined) return false;
+    if (nowMs < retryAtMs) return true;
+    this.absentBookRetryAtMs.delete(tokenId);
+    return false;
   }
 
   private async snapshotToken(tokenId: string): Promise<void> {

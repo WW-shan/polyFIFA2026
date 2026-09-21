@@ -35,6 +35,12 @@ Usage: tsx src/research/tail-backtest-cli.ts --archive-dir PATH [--archive-dir P
   --maker-fee-bps NUMBER                Default: 0
   --fill-model quote-touch-assumed|sell-through-volume
   --require-fresh-context              Gate on recorded context freshness
+  --allow-book-anchor-finish           Price windows ended by the collector's own
+                                       last order-book frame (book-quiet/book-tail)
+                                       when no published match clock exists
+  --allow-partial-archive-window       Allow missing archive-wide token coverage
+                                       outside the holding window; the holding
+                                       window itself must still be complete
   --fetch-settlements                   Opt in to public Gamma/CLOB settlement requests
   --proxy-url URL                       Optional HTTP(S) proxy for those requests
   --help, -h                           Read-only help
@@ -86,6 +92,8 @@ function parseArgs(args: readonly string[]): ParsedArgs {
         parsed.options.fillModel = model; break;
       }
       case "--require-fresh-context": parsed.options.requireFreshContext = true; break;
+      case "--allow-book-anchor-finish": parsed.options.allowBookAnchorFinish = true; break;
+      case "--allow-partial-archive-window": parsed.options.allowPartialArchiveWindow = true; break;
       case "--fetch-settlements": parsed.fetchSettlements = true; break;
       case "--proxy-url": {
         const proxy = value(args, index++);

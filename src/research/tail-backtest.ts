@@ -1,5 +1,6 @@
 import { decimal, objectValue } from "../collector/replay-values.js";
 import type { ReplayLevel } from "../collector/replay-types.js";
+import { isPublishedFinishSource, isTailFinishSource } from "../collector/tail-types.js";
 import type { TailBookChange, TailClockIssue, TailMarket, TailSecond, TailTokenQuality, TailWindow } from "../collector/tail-types.js";
 import type {
   EffectiveTailBacktestOptions, TailBacktestExclusion, TailBacktestInput, TailBacktestOptions, TailBacktestResult,
@@ -9,7 +10,7 @@ import type {
 export type * from "./tail-backtest-types.js";
 
 /** Hard bounds are checked before expanding any scenario grid. */
-export const TAIL_BACKTEST_LIMITS = Object.freeze({ prices: 64, windows: 64, combinations: 1_024, trials: 100_000, evidenceItems: 250_000,
+export const TAIL_BACKTEST_LIMITS = Object.freeze({ prices: 64, windows: 64, combinations: 1_024, trials: 100_000, evidenceItems: 1_000_000,
   windowSeconds: 86_400, decimalCharacters: 128, shares: 1_000_000_000, queueAheadShares: 1_000_000_000_000 });
 
 function inputError(message: string): never { throw new Error(`TAIL_BACKTEST_INPUT_INVALID: ${message}`); }
@@ -78,7 +79,8 @@ function effectiveOptions(input: TailBacktestOptions = {}): EffectiveTailBacktes
   if (!objectValue(input)) optionsError("options must be an object");
   const defaults: EffectiveTailBacktestOptions = {
     prices: ["0.50", "0.60", "0.70", "0.80", "0.90", "0.95", "0.97", "0.99"], windowsSeconds: [60, 180, 300],
-    entryMinBid: "0.90", shares: 1, queueAheadShares: 0, makerFeeBps: 0, fillModel: "quote-touch-assumed", requireFreshContext: false
+    entryMinBid: "0.90", shares: 1, queueAheadShares: 0, makerFeeBps: 0, fillModel: "quote-touch-assumed",
+    requireFreshContext: false, allowBookAnchorFinish: false, allowPartialArchiveWindow: false
   };
   if (Object.keys(input).some(name => !Object.hasOwn(defaults, name))) optionsError("unknown option");
   const result = { ...defaults, ...input };
@@ -99,6 +101,8 @@ function effectiveOptions(input: TailBacktestOptions = {}): EffectiveTailBacktes
   if (!Number.isFinite(result.makerFeeBps) || result.makerFeeBps < 0 || result.makerFeeBps > 10_000) optionsError("makerFeeBps must be in [0,10000]");
   if (result.fillModel !== "quote-touch-assumed" && result.fillModel !== "sell-through-volume") optionsError("unknown fillModel");
   if (typeof result.requireFreshContext !== "boolean") optionsError("requireFreshContext must be boolean");
+  if (typeof result.allowBookAnchorFinish !== "boolean") optionsError("allowBookAnchorFinish must be boolean");
+  if (typeof result.allowPartialArchiveWindow !== "boolean") optionsError("allowPartialArchiveWindow must be boolean");
   const seenPrices = new Set<string>();
   result.prices = result.prices.filter(price => { const parsed = priceKey(price)!; if (seenPrices.has(parsed)) return false; seenPrices.add(parsed); return true; });
   result.windowsSeconds = [...new Set(result.windowsSeconds)];
@@ -160,8 +164,12 @@ function validateFinish(window: TailWindow): void {
   if (window.finishEvidence === undefined) return;
   check(Array.isArray(window.finishEvidence), "invalid finish evidence");
   for (const fact of window.finishEvidence) {
+    // Every declared source must load, including the collector's own
+    // book-quiet/book-tail fallbacks: refusing them made every compact archive
+    // unreadable. Whether a fallback anchor may price a trial is a separate
+    // decision made in `trialFor`, never a parse failure.
     check(objectValue(fact) && time(fact.atMs) && time(fact.observedAtMs) && nullableId(fact.eventSlug) &&
-      (fact.source === "gamma.finishedTimestamp" || fact.source === "sports.finishedAt"), "invalid actual finish evidence");
+      isTailFinishSource(fact.source), "invalid actual finish evidence");
     check(fact.eventId === undefined || nullableId(fact.eventId), "invalid finish event ID");
     check(fact.gameId === undefined || nullableId(fact.gameId), "invalid finish game ID");
     check(fact.sourceRunId === undefined || id(fact.sourceRunId), "invalid finish source run");
@@ -538,8 +546,13 @@ function trialFor(source: IndexedSource, indexed: IndexedWindow, outcomes: Index
   options: EffectiveTailBacktestOptions, accounting: Map<TailBacktestTrial, ExactAmounts>): TailBacktestTrial {
   const { window } = indexed, market = outcomes[0]!.market;
   // Older TailSummary archives carry explicit source labels without optional compact witnesses.
+  // A published match clock always prices a trial. A book anchor is the
+  // market's own last frame: a documented subset of the final minutes when the
+  // book stopped with the match, but silently earlier when it did not. It is
+  // therefore only accepted when the caller explicitly opted in, and the
+  // anchor source stays on the trial so the caveat travels with the result.
   const finishKnown = window.endAtMs !== null && window.finishSources.length > 0 &&
-    window.finishSources.every(label => label === "gamma.finishedTimestamp" || label === "sports.finishedAt");
+    window.finishSources.every(label => options.allowBookAnchorFinish ? isTailFinishSource(label) : isPublishedFinishSource(label));
   const finishAtMs = finishKnown ? window.endAtMs : null;
   const finishConflict = window.finishConflict || (window.endAtMs !== null && (window.finishEvidence ?? []).some(fact => fact.atMs !== window.endAtMs));
   const entryAtMs = finishAtMs === null ? null : finishAtMs - windowSeconds * 1_000;
@@ -582,9 +595,12 @@ function trialFor(source: IndexedSource, indexed: IndexedWindow, outcomes: Index
   // All outcome references are supported by their archive quality; holding coverage below concerns the selected token.
   for (const outcome of outcomes) {
     const quality = outcome.quality, observed = observedQuality(outcome, indexed, source);
-    if (!quality?.observedWindowComplete || outcome.rows.size !== quality.expectedSeconds ||
-      quality.validSeconds !== observed.validSeconds || quality.closedSeconds !== observed.closedSeconds ||
-      observed.validSeconds + observed.closedSeconds !== quality.expectedSeconds) addExclusion(trial, "token-window-incomplete");
+    const countsMatch = quality !== null && quality.validSeconds === observed.validSeconds && quality.closedSeconds === observed.closedSeconds;
+    const archiveWindowComplete = quality?.observedWindowComplete === true && outcome.rows.size === quality.expectedSeconds &&
+      observed.validSeconds + observed.closedSeconds === quality.expectedSeconds;
+    // A partial archive is only allowed outside the selected holding window;
+    // coverageFor() below still requires every second of that holding window.
+    if (!countsMatch || (!options.allowPartialArchiveWindow && !archiveWindowComplete)) addExclusion(trial, "token-window-incomplete");
     if (!quality?.snapshotAuditPassed || quality.snapshotMismatches > 0 || (quality.snapshotMatches === 0 && quality.closedSeconds !== quality.expectedSeconds) ||
         quality.reasons.some(reason => reason === "pending-snapshot-audit" || reason === "unresolved-snapshot-audit")) addExclusion(trial, "snapshot-audit-not-passed");
     if (!quality || quality.validSeconds === 0 || observed.validSeconds === 0) addExclusion(trial, "no-active-book-seconds");
@@ -757,6 +773,12 @@ export function backtestTailArchives(inputs: readonly TailBacktestInput[], input
       archiveWindowSeconds: input.summary.windowSeconds, firstReceivedAtMs: input.summary.firstReceivedAtMs, lastReceivedAtMs: input.summary.lastReceivedAtMs,
       windowKeys: input.summary.windows.map(window => window.key), warnings: [...input.summary.warnings] })),
     trials, summaries: summarize(trials, accounting), warnings: [
+      ...(options.allowBookAnchorFinish ? [
+        "Book-anchor finishes are priced by explicit opt-in: the window ends on the collector's last order-book frame, not a published match clock. That frame is inside the match, so the holding window is a subset of the real final minutes, but it can sit earlier than the true finish. Every trial records its finishSources."
+      ] : []),
+      ...(options.allowPartialArchiveWindow ? [
+        "Archive-wide token coverage is allowed to be incomplete outside the selected holding window by explicit opt-in. Each priced trial still requires complete second-by-second coverage across its entire holding window, and aggregate token counters must agree with the recorded rows."
+      ] : []),
       "All fills are hypothetical. Quote-touch-assumed assigns the full requested size to a valid ask or direct SELL touch; it assumes execution without proof of queue position, available depth or latency. Fixed queue-ahead applies only to sell-through-volume.",
       "Sell-through-volume uses direct SELL prints strictly below the limit, subtracts fixed queue-ahead once and caps at requested shares. BUY and equal-price prints supply no strict-through volume; this is not proof of execution.",
       "Entries use retrospective actual match finish and a complete book second known before entry. Match finish is not an observed per-set finish or a live prediction of when the match ends.",

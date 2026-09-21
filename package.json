@@ -26,7 +26,8 @@
     "paper:fixture": "tsx src/cli.ts --mode paper --match-file tests/fixtures/matches/spain-5-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json --stake 97",
     "live:status": "tsx src/cli.ts --mode status",
     "live:watch:worldcup": "tsx src/cli.ts --mode live --watch true --worldcup true --order-type FAK",
-    "live:smoke": "BOT_MODE=live tsx src/cli.ts --mode live --match-file tests/fixtures/matches/spain-5-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json --stake 5 --order-type FOK"
+    "live:smoke": "BOT_MODE=live tsx src/cli.ts --mode live --match-file tests/fixtures/matches/spain-5-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json --stake 5 --order-type FOK",
+    "collect:export-tail": "tsx src/collector/storage-cli.ts export-tail"
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.6",

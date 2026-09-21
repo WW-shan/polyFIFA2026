@@ -23,9 +23,15 @@
   "singleMatchOnly": true,
   "port": 8765,
   "compactStorageEnabled": true,
+  "compactAnchorSnapshots": true,
   "tailWindowSeconds": 180,
   "tailBufferSeconds": 30,
-  "tailRetentionDays": 30,
-  "maxTailStoreBytes": 8589934592,
-  "maintenanceIntervalMs": 60000
+  "tailRetentionDays": 90,
+  "maxTailStoreBytes": 34359738368,
+  "rawRunRetentionHours": 24,
+  "maintenanceIntervalMs": 60000,
+  "pendingFinishRetentionMs": 900000,
+  "finishFollowupIntervalMs": 15000,
+  "finishFollowupBatchSize": 8,
+  "finishAnchorGraceMs": 300000
 }

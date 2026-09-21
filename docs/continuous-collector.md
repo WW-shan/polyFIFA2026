@@ -28,11 +28,24 @@ npm run collect:stop
 
 生产配置已启用 `compactStorageEnabled=true`。这不是减少比赛范围，而是减少无用落盘：所有配置 profile 发现的比赛仍参与身份、比分和生命周期处理，但完整 CLOB/Sports 原始帧不再永久写进 NDJSON。
 
-- 订单簿、成交和状态帧先进入有界的 SQLite staging 区，只保留最近 `tailWindowSeconds + tailBufferSeconds`（当前 180+30 秒）；连续重复 payload 按 hash 合并。
+- 订单簿、成交和状态帧先进入有界的 SQLite staging 区，正常情况只保留最近 `tailWindowSeconds + tailBufferSeconds`（当前 180+30 秒）；连续重复 payload 按 hash 合并，但同一场比赛最多只合并 60 秒：全天合并会让静止不动的盘口在自己窗口里一行都不剩，finalize 拿到空窗口反而无法归档（`redundantKeepAliveMs`）。仍未拿到终场标签的比赛会豁免这条墙钟规则：只保留该场自己最后 `tailWindowSeconds` 的滚动片段，`pendingFinishRetentionMs`（当前 15 分钟）后释放。理由见下面“终场标签补查”。这个豁免在 finalize 写入 `matches` 后立即失效，所以不会让已归档的场次继续占空间。
+- 已知终场但尚未 finalize 的比赛会把自己的窗口钉住：维护任务按墙钟时间裁剪，若不等归档完成就删，尾窗最前面的秒数会被静默吃掉。finalize 返回窗口覆盖情况，前段缺失时写入 `error`，不再当成干净成功。
+- CLOB WebSocket 一条消息会批量携带多场比赛的帧。落库前按 token 归属逐帧拆分，只写给拥有该 token 的比赛；无归属或跨比赛的帧丢弃，避免把别场的盘口混进本场 tail。
+- `/books` 批量锚点一次请求 50 个 token，上游可能只答其中一部分：状态机只把**响应里真正返回**的 token 记为收到盘口（`book_snapshot_batch` 的 `response`，不是请求列表 `tokenIds`）。把请求列表当证据会把 `lastBookAtMs` 推到该场真实最后一帧之后，静默锚点落在空窗口上，整场归档成 `no compact records in final window`。
+- 归档前先看请求窗口 `[终点-180s, 终点]` 里到底有没有帧。没有帧时说明发布的终点时钟和库里的帧不重叠，两个方向都会发生：时钟晚于最后一帧（`/books` 批量只答了别的 token、或时钟本身迟到），或者时钟早于最后一帧（网球盘口在比赛结束后仍继续交易、终场标签晚十几分钟才到，此时比赛末尾那 180s 已被墙钟规则释放）。两种情况下都改用**库里真实持有的最后一帧**当窗口终点，`finish_anchor` 记为 `book-tail`，并在归档 `error` 里写清发布时钟与所用尾帧（`finish anchor moved to the last stored frame (...)`）。这样发布的是真实市场尾段，而不是一个空窗口；原始终点时钟仍然保留在错误说明里。
+- 因为拆分后同一 `(game, run, sequence)` 会对应多条帧，`staging_records` / `tail_records` 的主键包含 `frame_index`（schema v2）。旧库启动时自动原地迁移，已有行以 `frame_index=0` 保留；`compact_meta.schema_version` 记录版本。
+- `matches` 另存窗口覆盖（`window_start_ms` / `window_complete` / `missing_front_ms`，schema v3）与窗口终点来源 `finish_anchor`（schema v4）。回测筛选样本时以 `window_complete` 为准，不要假定每场都是完整 180 秒；需要只用官方终场钟的样本时按 `finish_anchor` 过滤。
+- 逐帧归属修复前写入的 tail 含别场帧。用 `npm run collect:compact -- repair-tail --data-root <PATH>` 先做 dry-run，确认后加 `--apply` 就地重写：只保留本场帧、丢弃只剩别场帧的记录，并按保留帧回填真实窗口覆盖。命令不做锁，执行前必须先 `collect:stop`。
 - 比赛确认结束后，只把终场前 180 秒复制到最终结果表；成功写入后删除该比赛的 staging 记录。
-- compact 模式关闭每分钟逐 token HTTP book 快照和初始快照；WebSocket 的市场帧是主要价格来源，发现 metadata、身份冲突和终场证据仍保留。
+- compact 模式默认不再做每分钟逐 token HTTP book 快照；WebSocket 的市场帧是主要价格来源，发现 metadata、身份冲突和终场证据仍保留。
+- `compactAnchorSnapshots=true`（当前生产配置）时保留低频 HTTP book 快照作为**锚点**：`price_change` 只是增量，没有全量 book 锚点就无法把 SELL 档位变化重建成 ask ladder，而 WebSocket 并不保证对每个 token 都推全量 book。实测开启后 91% 的订阅 token 在窗口内拿到锚点。HTTP 锚点同样计入 `firstBookAtMs`，否则只靠锚点拿到全量 book 的比赛会被误判为 `missed` 而永不归档。
+- 已解析子盘口（每盘胜者、大小分、让盘等）会在 Gamma 翻转 `closed` **之前**先从 CLOB 撤掉订单簿。旧实现把它们当成“批量响应身份不匹配”，每个快照周期都对同一批 token 重新请求、重新记一条 `book_snapshot_batch_error`：实测 4 个 raw run 里有 876 条这类记录、1150 个 token。逐 token 复核证明这些 token 调单 token `/book` 一律返回 404 `No orderbook exists`，且 151 个“既拿到过锚点又被报缺失”的 token 中，**没有一个**是在报缺失之后才拿到锚点的——缺失始终是真实无盘口，不是上游偶发漏发，所以不能加 GET 兜底。现在 `absentBookCooldownMs`（默认 5 分钟）记住这类 token 并暂时移出锚点轮换，同一段缺失期只报告一次；token 重新拿到 book 后立即清除记录，之后的再次缺失会重新报告。这既省掉无意义的上游配额，也不再往 raw run 里写重复诊断。
+- 超上限时的裁剪按**每场实际占用**估算要释放的字节，再删最旧的场次，最后 `PRAGMA incremental_vacuum` 真正把页还给系统。旧实现把 `databaseBytes()` 放在删除循环里当停止条件：`auto_vacuum=INCREMENTAL` 下删行只把页放进 freelist，文件大小在提交和回收前根本不降，于是条件永远不成立，**一次超限就把整库删空**（实测 5 场全删）。现在按 `databaseBytes()/存活行数` 摊到每场，删够就停，最多 4 轮收敛。
+- `window_complete` / `missing_front_ms` 衡量的是**有没有证据**，不是"有没有行"。连续相同的 payload 会被 keep-alive 合并成每 60 秒一条，于是窗口开头常常没有行——但那条被合并的帧与它之前存下的帧逐字节相同，说明盘口在这段时间根本没动，ask ladder 照样能从窗口起点重建。现在 store 记录每条合并链覆盖的区间 `[上一个已存帧, 最后一条被合并帧]`，只要这个区间跨过窗口起点就判定窗口完整。实测 71 场里有 62 场被标成 `window_complete=0`，其中 **54 场属于这种误判**（行密度 ≤1.5 行/秒，是合并造成的），只有 8 场是真的缺数据（6 场还是修复前的 `finish_anchor=NULL` 旧行）。按 `window_complete` 过滤样本会白白扔掉约四分之三的可用比赛。
 - `maxTailStoreBytes=8 GiB` 是 SQLite 上限，`tailRetentionDays=30` 是最终结果保留期；超过上限先删除最旧结果并增量回收空间。
+- `rawRunRetentionHours`（当前 6 小时）只约束 compact 模式下的 raw run：帧证据在 SQLite 里，raw run 只是发现／审计上下文，按小时清理而不是按 `tailRetentionDays` 的 30 天清理，否则每天几十 GB 的 metadata 会把磁盘吃满。关闭 compact 模式时该值不生效，raw run 仍需保留 `tailRetentionDays`，因为旧的导出路径直接读它。
 - 维护任务还会删除超过保留期、且不是当前 run 的旧 raw run。系统剩余空间低于 `minFreeBytes` 时仍会暂停，清理失败不会静默丢数据。
+- `collect:stop` 会在 `dataRoot/.collector-stopped` 留下标记，`collect:start` 清除它。健康守护据此区分"人为停"和"自己挂了"：有标记时不重启、也不再刷 `mode_not_collecting` / `status_stale`。旧守护分不清两者，`collect:stop` 之后 300 秒就被自动拉起来，而且在等待期间每 5 秒写一条告警——`repair-tail` 的文档恰恰要求先 `collect:stop`，会被这个自动重启打断。
 
 因此当前模式的可查询结果在 `tail.sqlite`，不是 `runs/` 中的全量市场 raw。需要旧的逐帧 NDJSON 回放时，必须显式关闭 compact 模式；不要把两种存储的覆盖语义混在一起。
 
@@ -43,9 +56,13 @@ npm run collect:stop
 3. compact 模式不做周期性逐 token HTTP book 快照；发现 metadata、身份冲突和必要的 HTTP 摘要仍留证。旧模式仍可使用公共 `/books` 批量审计，每批 50 个 token，按 asset ID 关联响应。
 4. 对明确的结束信息执行短暂保留期，当前生产配置为 30 秒；终场前 180 秒由 SQLite 结果层固定保存。结束信号的重复出现不重置计时；子盘口早关闭不等于全场结束。
 5. 对达到条件的场次把滚动帧事务性写入 `tail.sqlite`，不为每场再复制一份全量 raw checkpoint；回放导出放到单独进程执行，不占用接收行情的事件循环。
-6. 结束标签晚到时继续补查，记录原始响应；不把后来比分倒灌到此前的每秒数据。重启后的待导出场次仍关联原来的 raw run，不拿一个新空运行冒充旧数据。
+6. 结束标签晚到时继续补查，记录原始响应；不把后来比分倒灌到此前的每秒数据。终场钟始终缺失时按 `finishAnchorGraceMs` 回落到该场最后一帧盘口时间，并把来源写进 `finish_anchor`，不把回落终点伪装成官方终场时间。重启后的待导出场次仍关联原来的 raw run，不拿一个新空运行冒充旧数据。
 
-补查按上次尝试时间轮转，避免前面一批缺终场标签的场次反复占用队列、后面的比赛永远查不到。跨运行的终场事实保存源 run、原始序号、帧下标和观察时间，只用于补充边界；不会改写旧盘口、旧比分或关闭状态。终场证据变化会让旧归档重新核验，不能继续复用过时结论。
+终场标签补查（2026-09-20 修正）：Gamma 的 `finishedTimestamp` 通常在 Sports 状态流报结束后才写入，所以事件退役不等于拿到终场钟，必须重试。旧实现每 5 秒只发一个请求，并在“所有已退役但未拿到标签的场次”里按上次尝试时间排队；线上该队列有 400+ 场，新结束的比赛第一次补查（那时 Gamma 往往还没有标签）之后就被排到队尾，等轮到它时终场前 180 秒早已被裁剪，`matches` 里什么也不剩。实测 13 场终场标签的到达延迟中位数 445 秒、p90 3126 秒，远超 210 秒的 staging 保留期。
+
+现在的规则：证据最新的场次优先（陈旧场次不能挤掉刚结束的比赛），证据仍在 `pendingFinishRetentionMs` 内的场次按 `finishFollowupIntervalMs`（当前 15 秒）重试，每轮 `finishFollowupBatchSize` 个请求并发执行；证据已经过期、标签再查也拼不出窗口的场次只做一次尝试后停止，避免继续消耗配额。跨运行的终场事实保存源 run、原始序号、帧下标和观察时间，只用于补充边界；不会改写旧盘口、旧比分或关闭状态。终场证据变化会让旧归档重新核验，不能继续复用过时结论。
+
+窗口终点来源（2026-09-20 修正）：Gamma 只在少数事件上写 `finishedTimestamp`。实测抽样 30 场已收盘、确实收到过盘口的网球／乒乓球比赛，`closed=true` 且 `finishedTimestamp=null`（多数事件永远不写这个字段）；Sports 状态流也只为部分比赛推送终场帧。因此“等官方终场钟”本身就会丢样本。现在按 `finishAnchorGraceMs`（当前 5 分钟）给官方时钟留出补发时间，之后用该场自己**最后一帧盘口时间**作为窗口终点，记为 `finish_anchor='book-quiet'`。这个终点按定义落在比赛之内，窗口是真实末尾 180 秒的子集，不是猜测；已经用 `book-quiet` 发布的窗口不会被后来才出现的时钟改写（差别只有秒级，重写只会让已发布样本不可复现）。`finish_anchor` 取值：`gamma.finishedTimestamp` / `sports.finishedAt`（官方钟）、`book-quiet`（来源从未发布时钟时的盘口静默回落）或 `book-tail`（发布时钟与库内帧不重叠时改用真实最后一帧），旧行升级后为 NULL 表示来源未知，不假定。
 
 当前捕获的“结束”是源报告，不是视频核准的场上结束毫秒。默认尾窗跟随全场实际结束标签；每一盘、每一局等自己的尾窗仍需要独立且可信的阶段终点。原始阶段信息会保留，不用全场终点冒充盘末终点。
 
@@ -121,6 +138,7 @@ npm run research:books -- \
   --output-dir data/research/my-new-book-report \
   --sport tennis --prices 0.50,0.60,0.70,0.80,0.90,0.95,0.97,0.99 \
   --windows-seconds 60,180,300 --entry-min-bid 0.90 \
+  --allow-book-anchor-finish --allow-partial-archive-window \
   --fetch-settlements --proxy-url http://127.0.0.1:10808
 ```
 
@@ -259,3 +277,210 @@ npm run research:books -- \
 | 旧归档容量触发保护，释放空间后自动恢复 | 09:22:13.013 | 09:55:26.129 | 1,993.116 秒 |
 
 最后一次暂停约 33 分钟。恢复后的采集已经验证，但这段历史没有补成“完整”；例如暂停期间完赛的场次仍可能得到 0 个价格就绪方向。
+
+## 2026-09-21：compact 归档可回测、种子锚点、WAL
+
+这一轮是系统审计，不是又一处补丁。以下四点一起决定“compact 模式收集到的数据到底能不能用来回测”。
+
+### 1. compact 数据以前根本导不出来（已修）
+
+`beginCompactArchive` 只把帧写进 `tail.sqlite`，而 `beginArchive` → `runTailExport` → `tail-cli export` → `tail-replay` 这条链路扫的是**原始 run 的 NDJSON**；compact 模式故意不往 NDJSON 写盘口帧，所以那条链路在线上是死代码。同时 `readFinalized` 没有任何调用方，`tail-backtest-cli` 只接受 `--archive-dir`（导出产物），于是收集到的盘口无法回测。
+
+新增：
+
+```sh
+npm run collect:export-tail -- --data-root data/collector/continuous --output-dir data/collector/continuous/exports
+npm run collect:export-tail -- --data-root data/collector/continuous --output-dir OUT --game-key game:123 --game-key event:456
+npm run collect:export-tail -- --data-root data/collector/continuous --output-dir OUT --limit 20 --window-seconds 180
+```
+
+每场输出标准归档目录（`manifest.json` / `quality.json` / `seconds.ndjson` / `changes.ndjson` / `raw-events.ndjson.gz` / `viewer.html`），可直接：
+
+```sh
+npm run research:books -- --archive-dir <该目录> --output-dir <新目录>
+```
+
+### 2. 回放引擎只认 WebSocket `book` 帧，compact 里它早就被裁掉了（已修）
+
+`replay.ts` 只用 WS `book` 帧建立盘口，`clob/book_snapshot`（HTTP 锚点）只当审计证据。compact 只保留最近几分钟，订阅时那一帧全量 `book` 早已被裁掉，于是任何一场 compact 回放都是 `validSeconds=0`。
+
+导出时会把每个锚点**同时**写两条记录：原样的 `book_snapshot`（保留审计）和一条等价的 WS `book` 帧（用同一 connectionId，用来播种）。因此重建的盘口仍然被后续锚点独立校验（`snapshotMatches`），不是自证。
+
+### 3. finalize 以前只拷 `[终点-180s, 终点]`，把种子锚点丢在外面（已修）
+
+窗口地板是边界，不是起始状态。要能从地板重建 ask 阶梯，必须保留**地板之前最后一个全量锚点**以及它到地板之间的所有增量。以前这些行留在 staging 里随后被裁掉，导出的窗口前段只能是空的。
+
+现在：
+
+- `finalize` 的拷贝区间从“地板前最后一个 `book_snapshot` 锚点”开始；找不到锚点时才退回原来的 `[地板, 终点]`。
+- `missing_front_ms` 按“盘口何时已知”计算：地板之前有锚点 → `0`，否则按第一个已知状态到地板的距离计。以前它只按“窗口内第一帧”算，导致 87% 的场次被误判为不完整。
+- 保护窗口相应多留一个窗口（未决比赛 `2 × tailWindowSeconds`），否则种子锚点会在归档前先被裁掉。
+
+### 4. `journal_mode=DELETE` 会让一次长查询冻住采集（已改 WAL）
+
+2026-09-21 02:37–03:16 采集器**静默停摆 38 分钟**：状态 API 无响应、心跳停止、健康守护只记 `watch_cycle_failed` 不重启。原因是一次长时间只读事务（对 `payloads` 的全表扫描）持有读锁，回滚日志模式下写事务无法提交，而采集器的 SQLite 调用是同步的，整个事件循环被阻塞。
+
+- 存储改为 `PRAGMA journal_mode=WAL`：读者走快照，不再阻塞写入；`maintain` 每 10 分钟 `wal_checkpoint(TRUNCATE)` 控制 `-wal` 大小；超出字节上限且增量回收不够时用 `VACUUM` 收尾。
+- `tools/collector-health-watch.py` 改为按“连续失败次数”触发重启，不再要求守护进程自己先看到过一次健康周期——守护进程自身重启后，原本 `started=False` 会让它永远不重启已经卡死的采集器。
+
+实测：持有一个 25 秒的只读事务期间，采集器心跳保持在 5 秒内、`receivedRecords` 持续增长。
+
+### 顺带修正
+
+- `matches.metadata_json`（schema v5）保存裁剪后的 Gamma 事件（只留 `normalizeCollectorEvent`/`metadataFromRecord` 需要的字段，约 1 KB，而不是原始事件平均 52 KB）。没有它，compact 归档无法重建市场身份（conditionId、outcome、marketType）。导出时若该列为空，会从仍在保留期内的 raw run 里回捞。
+- 终场事实来源新增 `book-quiet` / `book-tail`：`book-quiet` 是采集器在两边都不发布终场时钟时的兜底，必须如实标注，不能伪装成 `gamma.finishedTimestamp`。回测里这类窗口 `finishKnown=false`，是保守判断，不是失败。
+- 导出的 compact 归档默认 `--max-feed-silence-ms 90000`：compact 的周期性全量证据只有每分钟一次的 HTTP 锚点，沿用 WS 的 30 秒阈值会把一半安静窗口误判为 stale。
+
+## 2026-09-21 第二次全链路审计（回测读不进去的根因）
+
+前一轮修的是"采不到/存不下"，这一轮把**采集 → 导出 → 回测**整条链一次性跑通，发现 6 个真实缺陷。最关键的一条此前一直没暴露：**采集器导出的归档，回测一份都读不进去。**
+
+### 1. 回测输入校验拒绝 `book-quiet` / `book-tail`，导致 100% 归档不可读（已修，致命）
+
+`TailFinishFact.source` 扩成 4 个取值后，`src/research/tail-backtest.ts` 的 `validateFinish` 仍在硬编码只接受两个"真实时钟"：
+
+```ts
+(fact.source === "gamma.finishedTimestamp" || fact.source === "sports.finishedAt")
+```
+
+于是**每一份** compact 归档（网球/乒乓几乎全是 `book-quiet`）都在解析阶段直接抛 `TAIL_BACKTEST_INPUT_INVALID: invalid actual finish evidence`。不是被排除，是根本读不进来。
+
+- 修法：把来源集合收敛到 `tail-types.ts` 的 `TAIL_FINISH_FACT_SOURCES` / `isTailFinishSource`，catalog 写入端和 research 读取端共用同一个判定，避免再次漂移。
+- **能否用兜底锚点定价是策略问题，不是解析问题**：解析一律通过，是否排除交给 `trialFor` 的 `finishKnown`。
+- 验证：120 份归档全部可解析（修前 0 份）。
+
+### 2. 兜底锚点让全部场次被 `missing-actual-finish` 排除（已加显式开关）
+
+网球/乒乓的 Gamma 源基本不发布 `finishedTimestamp`，采集器的结束点几乎全部落在"最后一帧盘口"（`book-quiet`）。而回测要求结束时间必须来自真实时钟，于是 3356 个场景全部排除、可成交场景 0——采集器存了数据，回测一个都不用。
+
+- 新增 `--allow-book-anchor-finish`（默认**关闭**）。开启后 `book-quiet` / `book-tail` 窗口可以定价，且每条 trial 仍记录 `finishSources`，报告顶部追加一条假设说明。
+- 默认行为不变：不显式开启时仍然按 `missing-actual-finish` 排除，不会悄悄放松研究口径。
+- 验证：`--allow-book-anchor-finish` 下同一批归档出现可成交场景（6 份高质量归档 648 个场景中 56 个 eligible）。
+
+### 3. `loadRawEventIndex` 用"最后一条"事件元数据覆盖交易中的那条（已修，致命）
+
+schema v5 之前 finalize 的场次没有 `metadata_json`，导出时从 raw run 回捞市场身份。旧实现是 `index.set(...)` 逐条覆盖，**最后一条通常就是 Gamma 收盘后的 `reconciled` 文档（每个 market 都 `closed:true`）**。用这种元数据播种，回放把每一秒都判成"已结算"，`validSeconds=0`，导出"成功"但整场作废。
+
+线上实测：130 场里 20 场命中（如 `event:1049707` 的 179/180 秒全部 `closed`）。
+
+- 修法：按 `(是否全 closed, market 数量, 接收时间)` 择优——**全 closed 的文档永远不能覆盖交易中的文档**，其次保留 market 更多的一份，再次取最早的一份（与实时路径 `game.eventMetadata ??=` 的"保留首次观测"一致）。
+- 同时让单条损坏/身份冲突的记录不再中断整个 run 的回捞（以前一条坏记录会让该 run 之后的元数据全部丢失）。
+- 验证：130 场中"全 closed"从 20 场降到 1 场（该场保留期内只剩收盘文档，无法恢复）；可导出且至少有一个有效 token 的归档从 92/114 提升到 116/119。
+
+### 4. 导出会伪造 `gamma.finishedTimestamp`（已修）
+
+`eventDocument()` 无条件把窗口终点写成 `finishedTimestamp`。对兜底锚点来说，这等于宣称"Gamma 发布过这个结束时钟"，而实际上它只是采集器自己的最后一帧盘口。
+
+- 修法：只有 `gamma.finishedTimestamp` / `sports.finishedAt` 才写该字段；兜底锚点只由 finish-facts sidecar 提供边界，并保留真实来源标签。
+- 验证：归档 `finishSources` 从 `["book-quiet","gamma.finishedTimestamp"]` 变为 `["book-quiet"]`（115 场）/`["book-tail"]`（1 场）/真实时钟（4 场）。
+
+### 5. `book-tail` 被压成 `book-quiet`（已修）
+
+`finishFact()` 把非时钟来源一律标成 `book-quiet`，`matches.finish_anchor` 里的 `book-tail` 在归档里消失，两个兜底路径无法区分。改为原样保留。
+
+### 6. `repairAttribution` 会把空窗口标成完整（已修）
+
+`windowStartMs` 在"窗口内没有任何行"时回退到"窗口之前的最早一行"，于是 `missing_front_ms` 算成 0、`window_complete=1`——一个窗口里一行都没有的尾巴会被报成完整。改为只认窗口内的行（与 `windowCoverage` 一致），并把种子锚点搜索限制在一个额外窗口内，过老的锚点不能证明地板状态。
+
+### 7. 归档窗口完整性与持有窗口完整性被错误绑定（已修）
+
+`token-window-incomplete` 原来要求每个 token 的**整段归档窗口**（通常 180 秒）都完整，即使某个 trial 实际只持有最后 60 秒。多数场次的盘口在归档前段尚未建立，导致完整持有窗口仍被整段归档门槛全部排除。
+
+- 新增 `--allow-partial-archive-window`（默认**关闭**）。开启后只允许归档窗口在**所选持有窗口之外**存在缺口；`coverageFor()` 仍强制持有窗口逐秒完整，`holding-data-incomplete` 不受影响。
+- 聚合 token 计数与实际行不一致时仍然排除，不会用开关掩盖损坏或缺失的归档。
+- 报告 options 和 warnings 都记录该研究口径，不能静默放松。
+- 实测 120 份归档、默认 8 价格 × 3 窗口：严格口径 20,136 个场景中 56 个 eligible；开启该开关后 632 个 eligible。`holding-data-incomplete` 数量保持 336，证明持有窗口校验没有被放宽。
+
+### 8. 全量默认参数网格被证据上限提前拒绝（已修）
+
+原来的 `evidenceItems: 250_000` 是未区分实际对象结构的保守上限。当前 120 份归档、839 个市场、20,136 个默认场景的投影为 272,472 项，旧上限直接拒绝，和内存风险不成比例。
+
+- 上限提高到 `1_000_000`，同时保留 `trials: 100_000` 和其他网格硬上限。
+- 回归测试覆盖 270,336 项可运行、1,048,576 项仍被拒绝的边界。
+- 全量默认网格现在能在约 5 秒内完成，报告约 160 MB；更大样本仍应分批或缩小网格，不能把上限当成无界承诺。
+
+### 这一轮之后的实测结论
+
+- 全量导出 120/134 场成功（14 场 `COMPACT_NO_METADATA`：raw run 已过 24h 保留期且 `metadata_json` 为空，身份已不可恢复）。
+- 120 份归档全部能被回测解析；`--allow-book-anchor-finish` 下出现可成交场景。
+- 多数场次的盘口在归档前段尚未建立（`validSeconds` 中位数约 136/180），这是市场数据事实，不是采集缺陷；`missing_front_ms`、`window_complete`、`quality.json` 都已如实标注。需要利用最后几分钟的完整持有窗口时，显式开启 `--allow-partial-archive-window`，不要伪造归档完整性。
+- 参数网格过大仍会触发明确的 `expanded trial count` 或 `expanded evidence items` 错误；全量 120 场默认网格已可直接运行，更大样本请分批或缩小网格。
+
+
+## 2026-09-21 第三次全链路审计：证据、终场与重连
+
+这次没有只修一个报错点，而是按“原始记录 → staging → finalize → compact 导出 → 回放/回测”逐层核对，并把确认的问题一起收口。以下修复都要求可回放、可审计，不能用插值、空窗口或伪造终场来让报告看起来完整。
+
+### 1. 连接生命周期证据不再丢失（已修，致命）
+
+`CaptureConnection` 新增 `gameKeys`，连接打开、关闭、缺口、超时和心跳超时都按该连接实际承载过的比赛归属写入 compact 存储。连接断开/重连会切断同 payload 去重链，避免跨断线把两段不连续的盘口误判成连续。
+
+验证：新增断线端到端回归；断线后的秒必须是 `invalid`，且 `connectionInvalidations > 0`。compact 导出会原样恢复连接生命周期记录。
+
+### 2. coverage 不再被 Sports/生命周期行伪证（已修）
+
+`hasStagedInWindow()`、`stagedTailAt()`、`finalize()` 和 `windowCoverage()` 现在只把 CLOB `ws_message` / `book_snapshot` 当作盘口证据。窗口里只剩比分或连接记录时，不会创建空 match，也不会宣称窗口完整。
+
+### 3. 单条坏 journal envelope 不再拖掉后续记录（已修）
+
+`journal-reader.ts` 将 `assertJournalRecord()` 失败计入 `malformedLines` 并触发 damage 回调。同一 run 中遇到一条坏 envelope 后，后续合法 `event_metadata` 仍可由 `raw-event-index` 回捞，不再整段丢失。
+
+### 4. compact 归档保存完整终场 provenance（schema v6）
+
+`matches` 新增：
+
+- `finish_conflict INTEGER NOT NULL DEFAULT 0`
+- `finish_facts_json TEXT`
+
+`finalize()` 保存完整 `finishFacts`，compact 导出优先导出全部 witness，不再伪造单条 finish fact。新增 `refreshFinishEvidence()`，允许已 finalize 但已无剩余 depth 的 match 刷新 provenance。
+
+真实库 `game:6286534` 已从 `finish_conflict=0 / facts=NULL` 修正为 `finish_conflict=1 / 1093 bytes`。
+
+### 5. 重启后重新 pin 未完成归档（已修）
+
+`ContinuousCollector.initialize()` 恢复状态后会遍历 `state.gamesView()`；对已经完成终场、但 archive 未 complete 的比赛重新 `markPendingFinalize`，同时回填已有 `finishFacts`。重启不再让待归档比赛掉出维护队列。
+
+### 6. 迟到的真实终场时钟不再被静默丢弃（已修）
+
+删除“`finishAnchor === "book-quiet"` 就直接 return”的旧逻辑。语义现在是：
+
+- book-quiet 且 archive 尚未 complete：真实 clock 到达后改用真实 clock。
+- archive 已 complete：保留已发布 artifact 的边界，但记录新的 witness、标记 `finishConflict=true`，并使归档失效后重跑。
+- 即使新 witness 边界相同，也会触发 provenance revision，避免归档后的终场来源永久缺失。
+
+### 7. compact 导出正确归因重连后的 HTTP anchor（已修）
+
+导出不再固定使用“找到的第一个 WS connection”。现在跟踪活跃的 `connection_open/close/gap`、每个 token 最近的 WS connection 以及最近 CLOB connection；HTTP anchor 会归到当时的活跃连接。重连后的 anchor 不会再被挂到旧连接上。
+
+### 8. 健康守护自动重启路径修复（已修）
+
+`tools/collector-health-watch.py` 的自动重启路径把 `LogFile` 实例当成函数调用，真正触发重启时会抛 `TypeError: 'LogFile' object is not callable`，导致守护进程无法拉起卡死的采集器。现已改为 `self.log.write(...)`。
+
+同时增加 SQLite 读取的有限重试：采集器重启的短暂窗口里，单次 `unable to open database file` 不再立刻记为 `watch_cycle_failed`；连续失败仍会按原策略升级并触发重启。
+
+验证：Python 语法编译通过；用回归脚本验证自动重启日志路径会依次写入 `restart_collector` / `restart_collector_done`，并验证数据库前两次打开失败、第三次成功时不会误报。
+
+### 9. 本轮核查后确认不是问题的点
+
+- `continuous-server.ts /api/status`：实测 973 个 games、约 4.93 MB，连续 5 次请求耗时 15–33 ms，当前不是性能故障。
+- `finishEvidence === undefined`：旧归档兼容字段，未贸然改写。
+- `tail-backtest-io` 固定四文件输入：manifest 负责完整性和哈希校验，当前输入契约正确。
+
+### 本轮验证证据
+
+- 全量测试：**93 个测试文件 / 2,620 项测试通过，0 失败**。
+- TypeScript：`npx tsc --noEmit` 通过。
+- 采集器范围测试：**61 个测试文件 / 2,090 项测试通过**。
+- 从正式 SQLite 只读副本导出 **30 份归档**：`exported 30 / failed 0`；30 场 match-level `window_complete` 全部为 true，每场 `anchorFrames` 为 6–16。归档内仍有 13 场存在至少一个 token 的 `observedWindowComplete=false`（多为 1 秒缺口或未活跃的子盘口），所以回测只有在实际持有窗口完整时才会纳入，不能被 match-level 标志替代。
+- 对上述 30 份归档运行真实回测：**2,208 个 scenario、64 个参数组、152 个 eligible**；未出现解析或执行异常。
+- 正式采集器连续采样：`mode=collecting`、`errors=[]`、`lastRecordAtMs` 持续推进、`dataAgeMs` 保持在约 1–2 秒；正式库为 schema v6，当前 `matches=153`、`tail.sqlite` 约 245.7 MB，磁盘空闲约 85 GiB。
+- 健康守护：`python3 -m py_compile` 通过；自动重启日志路径和 SQLite 短暂打开失败重试均有直接回归验证。
+
+### 仍需保留的边界
+
+当前不能声称“零 bug”。以下属于数据源和证据边界，不能通过代码静默补齐：
+
+- 部分比赛没有匹配到精确比分或独立终场来源，只能明确标为 `book-tail` / `book-quiet`，回测必须显式开启 `--allow-book-anchor-finish`。
+- compact 归档依赖 `metadata_json`；raw run 超过保留期且 metadata 为空时，市场身份不可恢复，导出会失败而不是猜测。
+- 真实成交仍使用 `quote-touch-assumed` 等假设模型，不能把回测 PnL 当作已成交实盘收益。
+- 盘口前段可能尚未建立，持有窗口的逐秒完整性仍必须单独校验；`--allow-partial-archive-window` 只放宽归档窗口之外的前段，不放宽实际持有窗口。

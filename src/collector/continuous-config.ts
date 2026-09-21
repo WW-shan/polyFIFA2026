@@ -32,11 +32,44 @@ export interface ContinuousConfig {
   compressionTimeoutMs: number;
   singleMatchOnly: boolean;
   compactStorageEnabled: boolean;
+  compactAnchorSnapshots: boolean;
   tailWindowSeconds: number;
   tailBufferSeconds: number;
   tailRetentionDays: number;
   maxTailStoreBytes: number;
+  /**
+   * How long a sealed raw run directory is kept once compact storage owns the
+   * order-book evidence. Raw runs in compact mode hold discovery/audit records
+   * only (the frames live in the SQLite tail), so they are pruned by the hour
+   * instead of by `tailRetentionDays`, which is what filled the disk.
+   * Ignored when `compactStorageEnabled` is off: the legacy export path reads
+   * the raw run and keeps it for `tailRetentionDays`.
+   */
+  rawRunRetentionHours: number;
   maintenanceIntervalMs: number;
+  /**
+   * How long an unfinished match's rolling tail stays protected from
+   * wall-clock pruning while its finish label is still missing, and how long
+   * the collector keeps asking Gamma for that label.
+   */
+  pendingFinishRetentionMs: number;
+  /** Retry cadence for a finish-label follow-up whose evidence is still salvageable. */
+  finishFollowupIntervalMs: number;
+  /** Follow-up requests issued per pulse. */
+  finishFollowupBatchSize: number;
+  /**
+   * How long a token whose `/books` reply proved it has no orderbook stays out
+   * of the anchor rotation. Resolved sub-markets (set winners, totals,
+   * handicaps) lose their book before Gamma flips `closed`, so without a
+   * backoff every snapshot pass re-requests and re-reports the same absence.
+   */
+  absentBookCooldownMs: number;
+  /**
+   * How long a retired match waits for a published finish clock before its own
+   * last order-book frame becomes the window end. Gamma closes most events
+   * without ever publishing a clock, so this cannot wait indefinitely.
+   */
+  finishAnchorGraceMs: number;
 }
 
 function invalid(message: string): never {
@@ -103,11 +136,18 @@ export function continuousConfig(
     compressionTimeoutMs: 120_000,
     singleMatchOnly: true,
     compactStorageEnabled: false,
+    compactAnchorSnapshots: false,
     tailWindowSeconds: 180,
     tailBufferSeconds: 30,
     tailRetentionDays: 30,
     maxTailStoreBytes: 8 * 1024 ** 3,
-    maintenanceIntervalMs: 60_000
+    rawRunRetentionHours: 6,
+    maintenanceIntervalMs: 60_000,
+    pendingFinishRetentionMs: 900_000,
+    finishFollowupIntervalMs: 15_000,
+    finishFollowupBatchSize: 8,
+    finishAnchorGraceMs: 300_000,
+    absentBookCooldownMs: 300_000
   };
   const overrides = Object.fromEntries(Object.entries(input).filter(([key, value]) =>
     value !== undefined && (Object.hasOwn(defaults, key) || key === "proxyUrl")
@@ -118,7 +158,8 @@ export function continuousConfig(
     "discoveryIntervalMs", "snapshotIntervalMs", "httpTimeoutMs", "pulseIntervalMs",
     "retryDelayMs", "exportTimeoutMs", "minFreeBytes", "port",
     "compressionIntervalMs", "compressionMaxSegments", "compressionTimeoutMs",
-    "tailWindowSeconds", "tailBufferSeconds", "maxTailStoreBytes", "maintenanceIntervalMs"
+    "tailWindowSeconds", "tailBufferSeconds", "maxTailStoreBytes", "maintenanceIntervalMs",
+    "finishFollowupIntervalMs", "finishFollowupBatchSize", "finishAnchorGraceMs", "absentBookCooldownMs"
   ] as const) {
     if (!Number.isSafeInteger(config[field]) || config[field] < 1) invalid(`${field} must be a positive safe integer`);
   }
@@ -126,9 +167,22 @@ export function continuousConfig(
   if (typeof config.compressionEnabled !== "boolean") invalid("compressionEnabled must be boolean");
   if (typeof config.singleMatchOnly !== "boolean") invalid("singleMatchOnly must be boolean");
   if (typeof config.compactStorageEnabled !== "boolean") invalid("compactStorageEnabled must be boolean");
+  if (typeof config.compactAnchorSnapshots !== "boolean") invalid("compactAnchorSnapshots must be boolean");
   if (config.compressionMaxSegments > 1024) invalid("compressionMaxSegments must be at most 1024");
   if (config.compressionTimeoutMs > 2_147_483_647) invalid("compressionTimeoutMs exceeds Node's timer limit");
   if (!Number.isSafeInteger(config.tailRetentionDays) || config.tailRetentionDays < 0) invalid("tailRetentionDays must be a nonnegative safe integer");
+  if (!Number.isSafeInteger(config.rawRunRetentionHours) || config.rawRunRetentionHours < 0) {
+    invalid("rawRunRetentionHours must be a nonnegative safe integer");
+  }
+  if (!Number.isSafeInteger(config.pendingFinishRetentionMs) || config.pendingFinishRetentionMs < 0) {
+    invalid("pendingFinishRetentionMs must be a nonnegative safe integer");
+  }
+  if (config.pendingFinishRetentionMs < config.finishFollowupIntervalMs) {
+    invalid("pendingFinishRetentionMs must be at least finishFollowupIntervalMs or no retry can ever be due");
+  }
+  if (config.finishAnchorGraceMs > config.pendingFinishRetentionMs) {
+    invalid("finishAnchorGraceMs must not exceed pendingFinishRetentionMs or the fallback window is already released");
+  }
   if (!Number.isSafeInteger(config.postFinishRetentionMs) || config.postFinishRetentionMs < 0) {
     invalid("postFinishRetentionMs must be a nonnegative safe integer");
   }

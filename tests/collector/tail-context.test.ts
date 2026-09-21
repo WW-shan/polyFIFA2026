@@ -538,12 +538,21 @@ describe("tail observations", () => {
   });
 
   test.each([undefined, null, "2026-09-11", "2026-09-11T11:26:03", "2026-02-30T11:26:03Z", 1789125963639])(
-    "Sports finish requires its own valid finishedAt field, received %j", finishedAt => {
-      const raw = { gameId: 123, ended: true, finishedAt, finishedTimestamp,
-        endDate: finishedTimestamp, closedTime: finishedTimestamp, startDate: finishedTimestamp };
+    "Sports finish ignores unrelated date fields, received %j", finishedAt => {
+      const raw = { gameId: 123, ended: true, finishedAt,
+        endDate: finishedTimestamp, closedTime: finishedTimestamp, startDate: finishedTimestamp, receivedAt: finishedTimestamp };
       expect(observationsFromRecord(sports(raw))[0]).toMatchObject({ ended: true, finishAtMs: null, finishSource: null });
     }
   );
+
+  test("Sports accepts the finishedTimestamp clock its terminal frame carries", () => {
+    // Captured live: the terminal frame names the same clock Gamma republishes
+    // later, so a Gamma round trip is not required to anchor the final window.
+    const raw = { gameId: 90116334, homeTeam: "A", awayTeam: "B", status: "Final", score: "1-0",
+      period: "FT", live: false, ended: true, finishedTimestamp: "2026-09-20T13:00:48.897485Z" };
+    expect(observationsFromRecord(sports(raw))[0]).toMatchObject({ gameId: "90116334", ended: true, live: false,
+      finishAtMs: Date.parse("2026-09-20T13:00:48.897Z"), finishSource: "sports.finishedAt" });
+  });
 
   test("Gamma finish-only observations use finishedTimestamp and leave unknown ended state alone", () => {
     const raw = event();

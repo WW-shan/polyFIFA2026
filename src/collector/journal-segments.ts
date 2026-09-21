@@ -40,19 +40,27 @@ async function openSegment(segment: ResolvedJournalSegment): Promise<FileHandle>
 export async function* readJournalSegment(input: string | ResolvedJournalSegment): AsyncGenerator<Buffer> {
   const segment = typeof input === "string" ? await resolveJournalSegment(input) : input;
   const file = await openSegment(segment);
-  const source = file.createReadStream({ autoClose: false, highWaterMark: 64 * 1024 });
+  // An early prefix read must cancel the decompression pipeline. Merely
+  // destroying the streams leaves pipeline waiting for the source close event.
+  const source = file.createReadStream({ autoClose: true, highWaterMark: 64 * 1024 });
   const gunzip = segment.compressed ? createGunzip({ chunkSize: 64 * 1024 }) : undefined;
   const output = gunzip ?? source;
-  const completed = gunzip ? pipeline(source, gunzip) : undefined;
+  const cancellation = gunzip ? new AbortController() : undefined;
+  const completed = gunzip ? pipeline(source, gunzip, { signal: cancellation!.signal }) : undefined;
+  let exhausted = false;
   // Own the rejection even when a bounded header reader deliberately returns early.
   void completed?.catch(() => {});
   try {
-    for await (const chunk of output) yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    // Own cancellation here instead of allowing iterator.return() to destroy
+    // the readable and wait for pipeline teardown before finally can run.
+    for await (const chunk of output.iterator({ destroyOnReturn: false })) yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    exhausted = true;
     await completed;
   } catch (error) {
     if (segment.compressed) throw new Error("JOURNAL_GZIP_ERROR: invalid or incomplete compressed segment", { cause: error });
     throw error;
   } finally {
+    if (!exhausted) cancellation?.abort();
     output.destroy(); source.destroy();
     await completed?.catch(() => {});
     await file.close();

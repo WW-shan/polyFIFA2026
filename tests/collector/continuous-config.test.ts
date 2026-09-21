@@ -41,11 +41,18 @@ describe("continuous configuration", () => {
       compressionTimeoutMs: 120_000,
       singleMatchOnly: true,
       compactStorageEnabled: false,
+      compactAnchorSnapshots: false,
       tailWindowSeconds: 180,
       tailBufferSeconds: 30,
       tailRetentionDays: 30,
       maxTailStoreBytes: 8 * 1024 ** 3,
-      maintenanceIntervalMs: 60_000
+      rawRunRetentionHours: 6,
+      maintenanceIntervalMs: 60_000,
+      pendingFinishRetentionMs: 900_000,
+      finishFollowupIntervalMs: 15_000,
+      finishFollowupBatchSize: 8,
+      finishAnchorGraceMs: 300_000,
+      absentBookCooldownMs: 300_000
     } satisfies ContinuousConfig);
     expect(readFile).not.toHaveBeenCalled();
   });
@@ -73,8 +80,10 @@ describe("continuous configuration", () => {
       lookbackHours: 0.25, aheadHours: 0, retryDelayMs: 5, exportTimeoutMs: 6,
       compressionEnabled: true, compressionIntervalMs: 7, compressionMaxSegments: 3, compressionTimeoutMs: 8,
       singleMatchOnly: false,
-      compactStorageEnabled: true, tailWindowSeconds: 181, tailBufferSeconds: 31, tailRetentionDays: 7,
-      maxTailStoreBytes: 123456, maintenanceIntervalMs: 8,
+      compactStorageEnabled: true, compactAnchorSnapshots: false, tailWindowSeconds: 181, tailBufferSeconds: 31, tailRetentionDays: 7,
+      maxTailStoreBytes: 123456, rawRunRetentionHours: 3, maintenanceIntervalMs: 8,
+      pendingFinishRetentionMs: 900_000, finishFollowupIntervalMs: 15_000, finishFollowupBatchSize: 8, finishAnchorGraceMs: 300_000,
+      absentBookCooldownMs: 300_000,
       proxyUrl: "http://proxy-user:proxy-secret@127.0.0.1:8080",
       gammaBaseUrl: "http://gamma.fixture.test/api/",
       clobBaseUrl: "https://clob.fixture.test/api",

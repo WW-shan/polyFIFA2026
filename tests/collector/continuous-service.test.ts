@@ -297,6 +297,22 @@ describe("continuous user service", () => {
     expect(input.calls.map(call => call.args)).toEqual([["print", target]]);
   });
 
+  test("records an intentional stop and clears it on the next start", async () => {
+    const input = await fixture();
+    const marker = join(input.dataRoot, ".collector-stopped");
+    await startCollectorService(input.options, input.deps);
+    // A start clears any earlier marker so the watchdog resumes supervising.
+    await expect(lstat(marker)).rejects.toThrow();
+    expect(await stopCollectorService(input.options, input.deps)).toMatchObject({ status: "stopped" });
+    const stopped = JSON.parse(await readFile(marker, "utf8")) as { stoppedAtMs: number };
+    expect(stopped.stoppedAtMs).toBe(50_000);
+    // Stopping again keeps the marker, and starting removes it.
+    expect(await stopCollectorService(input.options, input.deps)).toMatchObject({ status: "not_running" });
+    expect((await lstat(marker)).isFile()).toBe(true);
+    await startCollectorService(input.options, input.deps);
+    await expect(lstat(marker)).rejects.toThrow();
+  });
+
   test.each(["malformed", "missing"])("stops an owned active job with a %s config", async kind => {
     const input = await fixture();
     await startCollectorService(input.options, input.deps);
@@ -548,5 +564,27 @@ describe("read-only continuous service status", () => {
     expect(result.errors.join(" ")).toContain("COMMAND_FAILED");
     expect(result.errors.join(" ")).not.toContain("proxy-secret");
     expect(input.calls.map(call => call.args)).toEqual([["print", target]]);
+  });
+});
+
+
+describe("receipt freshness is distinct from service process identity", () => {
+  test.each([null, 40_000])("marks a matching live PID stale without recent receipts: %s", async lastRecordAtMs => {
+    const input = await fixture();
+    input.deps.now = () => 150_000;
+    await startCollectorService(input.options, input.deps);
+    await saveState(input, { updatedAtMs: 145_000, lastRecordAtMs });
+    const result = await collectorServiceStatus(input.options, input.deps);
+    expect(result).toMatchObject({ running: true, stateIdentity: "job", stale: true });
+    expect(result.errors.some(error => error.startsWith("CONTINUOUS_SERVICE_DATA_STALE:"))).toBe(true);
+  });
+
+  test("keeps fresh paused-disk state distinct from missing capture data", async () => {
+    const input = await fixture();
+    await startCollectorService(input.options, input.deps);
+    await saveState(input, { mode: "paused_disk", lastRecordAtMs: null });
+    const result = await collectorServiceStatus(input.options, input.deps);
+    expect(result).toMatchObject({ mode: "paused_disk", stateIdentity: "job", stale: false });
+    expect(result.errors.some(error => error.startsWith("CONTINUOUS_SERVICE_DATA_STALE:"))).toBe(false);
   });
 });

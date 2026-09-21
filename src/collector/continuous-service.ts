@@ -61,6 +61,15 @@ export interface CollectorServiceStatus {
 }
 
 const LABEL = "com.polyfifa.public-collector";
+/**
+ * Marker that records an *intentional* stop.
+ *
+ * The health watchdog restarts a publisher that stopped on its own, but an
+ * operator who runs `collect:stop` - and the documented `repair-tail` workflow
+ * that requires a stopped collector - must stay stopped. The marker is what
+ * separates "died" from "asked to stop"; `start` clears it again.
+ */
+export const STOP_MARKER_NAME = ".collector-stopped";
 const OWNER_KEY = "PolyFifaPublicCollector";
 const execFileAsync = promisify(nodeExecFile);
 const CURRENT_MODES = new Set(["starting", "collecting", "restarting", "paused_disk"]);
@@ -293,6 +302,8 @@ export async function startCollectorService(
   if (job) return startResult(ctx, owned!.definition, "already_running", job.pid);
 
   await mkdir(join(ctx.definition.dataRoot, "logs"), { recursive: true, mode: 0o700 });
+  // An explicit start is the operator taking the collector back off the shelf.
+  await clearStopMarker(ctx.definition.dataRoot);
   if (options.configPath === undefined) {
     const content = JSON.stringify(ctx.config, null, 2) + "\n";
     try { await writeFile(ctx.definition.configPath, content, { flag: "wx", mode: 0o600 }); }
@@ -317,10 +328,25 @@ export async function stopCollectorService(
 ): Promise<CollectorServiceStopResult> {
   const ctx = await context(options, deps), owned = await ownedPlist(ctx.plistPath), job = await inspectJob(ctx);
   requireOwnedJob(ctx, job, owned);
+  // Record the intent before the job disappears, so a watchdog cycle that runs
+  // between the bootout and the next poll cannot mistake it for a crash.
+  const dataRoot = owned?.definition.dataRoot
+    ?? (await loadContinuousConfig(options.configPath, ctx.projectDirectory)).dataRoot;
+  await writeStopMarker(dataRoot, deps.now ?? Date.now);
   if (!job) return { status: "not_running", label: LABEL, plistPath: ctx.plistPath };
   try { await ctx.execFile("/bin/launchctl", ["bootout", ctx.target]); }
   catch (error) { if (!absentJob(error)) commandFailed("bootout"); }
   return { status: "stopped", label: LABEL, plistPath: ctx.plistPath };
+}
+
+async function writeStopMarker(dataRoot: string, now: () => number): Promise<void> {
+  await mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  await writeFile(join(dataRoot, STOP_MARKER_NAME), JSON.stringify({ stoppedAtMs: now(), pid: process.pid }) + "\n", { mode: 0o600 });
+}
+
+async function clearStopMarker(dataRoot: string): Promise<void> {
+  try { await unlink(join(dataRoot, STOP_MARKER_NAME)); }
+  catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
 }
 
 export async function collectorServiceStatus(
@@ -382,7 +408,10 @@ export async function collectorServiceStatus(
       else if (definition.keepAwake && await isDescendant(ctx, state.pid, result.pid)) result.stateIdentity = "descendant";
       else errors.push("CONTINUOUS_SERVICE_STATE_IDENTITY_UNVERIFIED: saved collector PID is not verified under the current job");
     }
-    result.stale = result.stateIdentity === "unverified";
+    // A verified process and current state file do not prove capture is advancing.
+    const dataStale = state.mode === "collecting" && (result.dataAgeMs === null || result.dataAgeMs > 60_000);
+    if (dataStale) errors.push("CONTINUOUS_SERVICE_DATA_STALE: collecting without a recent journal record");
+    result.stale = result.stateIdentity === "unverified" || dataStale;
     for (const error of state.errors.slice(-50)) {
       if (typeof error?.scope !== "string" || typeof error.message !== "string") throw new Error();
       errors.push(safeText(`${error.scope}: ${error.message}`).slice(0, 2000));

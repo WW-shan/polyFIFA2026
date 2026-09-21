@@ -82,6 +82,10 @@ function singleContestReference(label: string, matchIdentity = false): boolean {
 
 function longTermStatistic(label: string, matchup: boolean, matchIdentity: boolean): boolean {
   if (/\b(?:season(?:al)?|career) (?:statistics|stats|totals?|records?)\b/.test(label)) return true;
+  // A running count measured "before/by <year>" spans a season or a career. The
+  // target is an accumulation, never the result of one contest.
+  if (/\b(?:before|by|prior to|ahead of)\s+(?:the\s+(?:end\s+of\s+)?)?20\d{2}\b/.test(label)
+    && /\b(?:points?|rankings?|titles?|trophies|aces?|matches?|wins?|prize money)\b/.test(label)) return true;
   if (!matchup && /\b(?:season(?:al)?|career)\b/.test(label) && !singleContestReference(label, matchIdentity)) return true;
   // A match heading cannot override the period of a later statistics question.
   return label.split(":").some(clause => {
@@ -100,6 +104,10 @@ function nonMatchReason(value: string, matchup = matchupTitle(value), matchIdent
     .replace(/[-_–—]+/g, " ").replace(/\s+/g, " ");
   const contest = /\b(?:match|game|round|quarterfinal|semifinal|final|set)\b/.test(label);
   if (/\b(?:coupons?|parlay|accumulator)\b/.test(label)) return "coupon";
+  // "Player to Qualify" / "Will X qualify for the Finals" asks who reaches a
+  // season-ending event. A qualifying *match* always carries a versus title,
+  // so require the absence of a matchup before excluding the event.
+  if (!matchup && /\bqualify\b/.test(label)) return "tournament-outright";
   // "Year-End Finals" names a competition; participant seed/rank labels there
   // are not a prediction. Other year-end targets in the same title still count.
   const rankingLabel = label.replace(/\byear end(?=\s+(?:(?:atp|wta|tour)\s+)?(?:finals?|championships?)\b)/g, "");
