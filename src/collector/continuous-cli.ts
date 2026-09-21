@@ -104,7 +104,21 @@ async function runManager(manager: ContinuousCliManager, write: (text: string) =
   process.on("SIGTERM", onSignal);
   try {
     await Promise.race([Promise.resolve().then(() => manager.start()), stopFailure]);
-    write(json(manager.state.snapshot()));
+    // A startup summary, not the whole snapshot. The full status carries every
+    // tracked game, token and market id, and the LaunchAgent appends stdout to a
+    // file: one ~6 MB dump per start grew that log without bound and buried the
+    // lines that actually matter. The complete document is still served by the
+    // status API, which is where a caller can page it on demand.
+    const status = manager.state.snapshot() as Record<string, unknown>;
+    const games = Array.isArray(status.games) ? status.games : [];
+    const errors = Array.isArray(status.errors) ? status.errors : [];
+    write(json({
+      schemaVersion: status.schemaVersion, instanceId: status.instanceId, pid: status.pid,
+      mode: status.mode, runId: status.runId, runDirectory: status.runDirectory,
+      dataRoot: status.dataRoot, port: status.port, desiredTokens: status.desiredTokens,
+      receivedRecords: status.receivedRecords, lastRecordAtMs: status.lastRecordAtMs,
+      games: games.length, errors: errors.length
+    }));
     await completion;
   } finally {
     process.removeListener("SIGINT", onSignal);

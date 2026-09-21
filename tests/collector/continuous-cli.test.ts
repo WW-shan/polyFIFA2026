@@ -176,7 +176,12 @@ describe("continuous CLI", () => {
     expect(await running).toBe(0);
     expect(controlled.runtime.stop).toHaveBeenCalledOnce();
     expect(controlled.runtime.state.snapshot).toHaveBeenCalled();
-    expect(JSON.parse(input.output[0]!)).toMatchObject({ pid: 4321 });
+    // The startup line is a summary: the full snapshot is megabytes of game,
+    // token and market ids, and the LaunchAgent appends stdout to a log file.
+    const startup = JSON.parse(input.output[0]!);
+    expect(startup).toMatchObject({ pid: 4321, games: expect.any(Number) });
+    expect(startup.games).not.toBeInstanceOf(Array);
+    expect(input.output[0]!.length).toBeLessThan(2000);
     expect(signals()).toEqual(before);
   });
 
