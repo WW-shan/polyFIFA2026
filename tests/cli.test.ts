@@ -312,6 +312,105 @@ describe("CLI", () => {
     ]);
   });
 
+  test("live passes record a filled resting order instead of leaving a stale reservation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-reconcile-fill-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([{
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "fifwc-esp-ksa-2026-06-21",
+      marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-2pt5",
+      tokenId: "token-spain-2p5",
+      conditionId: "cond-spain-2p5",
+      outcome: "Spain",
+      orderId: "filled-resting",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    }]));
+
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ], {}, {
+      getLiveOrder: async (_config, orderId) => ({
+        id: orderId,
+        status: "matched",
+        price: "0.7",
+        original_size: "138.571428",
+        size_matched: "138.571428"
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    // The fill is now an owned position, so the reservation is gone and the run
+    // is no longer blocked by an unresolved submission.
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+      expect.objectContaining({
+        orderId: "filled-resting",
+        status: "filled",
+        shares: 138.571428,
+        notional: 96.9999996,
+        reservedNotional: 0
+      })
+    ]);
+  });
+
+  test("live passes keep the remainder reserved when a resting order only partly filled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-reconcile-partial-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([{
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "fifwc-esp-ksa-2026-06-21",
+      marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-2pt5",
+      tokenId: "token-spain-2p5",
+      conditionId: "cond-spain-2p5",
+      outcome: "Spain",
+      orderId: "partial-resting",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    }]));
+
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ], {}, {
+      getLiveOrder: async (_config, orderId) => ({
+        id: orderId,
+        status: "live",
+        price: "0.7",
+        original_size: "138.571428",
+        size_matched: "20"
+      })
+    });
+
+    expect(result.exitCode).toBe(0);
+    const entries = JSON.parse(await readFile(ledgerFile, "utf8"));
+    expect(entries).toEqual([
+      expect.objectContaining({
+        orderId: "partial-resting",
+        status: "partial",
+        shares: 20,
+        notional: 14,
+        reservedNotional: 82.9999996
+      })
+    ]);
+  });
+
   test("--rest-price caps the live refresh so a taker leg cannot be repriced above the bid", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-rest-cap-"));
     let capturedMaxEntryPrice: number | undefined;
@@ -3552,6 +3651,73 @@ describe("CLI", () => {
     expect(ledger).toEqual([
       expect.objectContaining({ eventSlug, tokenId: overToken, status: "filled", price: 0.91 }),
       expect.objectContaining({ eventSlug, tokenId: overToken, status: "filled", price: 0.92 })
+    ]);
+  });
+
+  test("worldcup live watch does not refill while a resting bid still reserves notional", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-resting-refill-"));
+    const marketsFile = join(dir, "markets.json");
+    const ledgerFile = join(dir, "ledger.json");
+    const eventSlug = "fifwc-resting-refill-2026-06-27";
+    await writeFile(marketsFile, JSON.stringify([
+      totalMarket(eventSlug, "Resting", "Refill", 0.5, "resting-refill-under")
+    ]));
+    const executed: number[] = [];
+    clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
+      tokenId,
+      bids: [],
+      asks: [{ price: 0.91, size: 10 }]
+    }));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield tailMatch(eventSlug, "Resting", "Refill", 1, 0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--stake", "30",
+      "--ledger-file", ledgerFile,
+      "--interval-ms", "0",
+      "--max-iterations", "3"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug, homeTeam: "Resting", awayTeam: "Refill" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async (match) => ({ homeGoals: match.homeGoals, awayGoals: match.awayGoals }),
+      readPusdBalance: async () => 100,
+      // The venue still has the remainder of the maker bid on the book.
+      getLiveOrder: async (_config, orderId) => ({ id: orderId, status: "live", price: "0.91", original_size: "10", size_matched: "0" }),
+      executeLive: async (decision) => {
+        executed.push(decision.notional);
+        return {
+          mode: "live",
+          status: "partial",
+          orderId: "resting-partial-1",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: 3,
+          notional: 2.73,
+          fee: 0,
+          estimatedPayout: 3,
+          estimatedProfit: 0.27,
+          reservedNotional: 6.37
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(executed).toEqual([9.1]);
+    const output = JSON.parse(result.stdout);
+    expect(output).toMatchObject({
+      status: "watch_complete",
+      last: { status: "no_trade", reason: "DUPLICATE_TRADE" }
+    });
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+      expect.objectContaining({ eventSlug, status: "partial", reservedNotional: 6.37 })
     ]);
   });
 

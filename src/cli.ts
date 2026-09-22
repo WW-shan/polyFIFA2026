@@ -239,9 +239,13 @@ export async function runCli(
 const TERMINAL_ORDER_SNAPSHOT_STATUSES = new Set(["canceled", "cancelled", "expired", "invalid", "rejected", "unmatched"]);
 
 /**
- * Releases ledger reservations for resting orders the venue has already closed
- * (GTD expiry, manual cancel elsewhere). Read-only against the venue: it only
- * queries order snapshots and never submits or cancels anything itself.
+ * Reconciles resting maker bids against the venue. Read-only: it only queries
+ * order snapshots and never submits or cancels anything itself.
+ *
+ * Two things can have happened since the order was posted. It may have traded
+ * (the shares are now an owned position, so the ledger must stop reporting an
+ * unresolved submission) and it may have closed (GTD expiry, manual cancel
+ * elsewhere), which releases whatever never filled.
  */
 async function reconcileRestingOrders(
   args: ParsedArgs,
@@ -251,7 +255,10 @@ async function reconcileRestingOrders(
 ): Promise<void> {
   if (args.mode !== "live") return;
   const active = await ledger.readActiveEntries();
-  const resting = active.filter((entry) => entry.status === "posted" && entry.orderId);
+  // A posted bid is unresolved; a partially filled one stays tracked while it
+  // still reserves notional. Taker leftovers never reserve, so they are excluded.
+  const resting = active.filter((entry) =>
+    Boolean(entry.orderId) && (entry.status === "posted" || (entry.reservedNotional ?? 0) > 0));
   if (resting.length === 0) return;
   const liveConfig = liveConfigFromEnv(env);
   const readOrder = deps.getLiveOrder ?? getLiveOrder;
@@ -261,6 +268,8 @@ async function reconcileRestingOrders(
       const status = typeof snapshot === "object" && snapshot !== null && "status" in snapshot
         ? String((snapshot as { status: unknown }).status).toLowerCase().replace(/[\s_-]+/g, "")
         : undefined;
+      const fill = restingFillFromSnapshot(entry, snapshot);
+      if (fill) await ledger.recordRestingOrderFill(entry.orderId, fill);
       if (status && TERMINAL_ORDER_SNAPSHOT_STATUSES.has(status)) {
         await ledger.markCanceledByOrderId(entry.orderId);
       }
@@ -268,6 +277,35 @@ async function reconcileRestingOrders(
       // Unknown venue state keeps the reservation: never release on a read error.
     }
   }
+}
+
+/**
+ * Reads how much of a resting bid actually traded. `size_matched` is the
+ * authoritative fill size, so a maker bid that got hit is never left behind as a
+ * phantom `posted` reservation that also blocks the next pass as a duplicate.
+ */
+function restingFillFromSnapshot(
+  entry: { price: number; reservedNotional?: number },
+  snapshot: unknown
+): { shares: number; price: number; remainingShares?: number } | undefined {
+  if (!isRecord(snapshot)) return undefined;
+  const matched = numericField(snapshot, "size_matched") ?? numericField(snapshot, "sizeMatched");
+  if (matched === undefined || matched <= 0) return undefined;
+  const price = numericField(snapshot, "price") ?? entry.price;
+  if (!(price > 0)) return undefined;
+  const original = numericField(snapshot, "original_size") ?? numericField(snapshot, "originalSize");
+  const requested = original
+    ?? (entry.reservedNotional !== undefined && entry.price > 0 ? entry.reservedNotional / entry.price : undefined);
+  if (requested === undefined) return { shares: matched, price };
+  return { shares: matched, price, remainingShares: Math.max(0, requested - matched) };
+}
+
+function numericField(record: Record<string, unknown>, field: string): number | undefined {
+  const value = record[field];
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || value.trim().length === 0) return undefined;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 async function runCancelOrder(
@@ -367,8 +405,9 @@ async function runSinglePass(
       const activePositions = (await ledger.readActiveEntries()).filter((entry) => entry.eventSlug === buyDecision.eventSlug);
       if (activePositions.length === 0) return undefined;
       // A basket's aggregate "partial" status can include a zero-notional
-      // posted leg. Its unresolved commitment cannot fund another refill.
-      if (activePositions.some((entry) => entry.status === "posted")) {
+      // posted leg, and a resting bid that already traded part of its size still
+      // holds a reservation. Neither unresolved commitment can fund a refill.
+      if (activePositions.some((entry) => entry.status === "posted" || (entry.reservedNotional ?? 0) > 0)) {
         return {
           action: "NO_TRADE",
           reason: "DUPLICATE_TRADE",

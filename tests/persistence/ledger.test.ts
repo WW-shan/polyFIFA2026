@@ -359,6 +359,134 @@ describe("LiveLedger", () => {
     ]);
   });
 
+  test("records a fully filled resting order as an owned position", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-rest-fill-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-fill",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    });
+
+    // The venue reports a maker bid that traded to completion.
+    expect(await ledger.recordRestingOrderFill("resting-fill", { shares: 138.57, price: 0.7, remainingShares: 0 })).toBe(true);
+    expect(await ledger.hasActiveTrade("event-1", "token-1")).toBe(true);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({
+        orderId: "resting-fill",
+        status: "filled",
+        shares: 138.57,
+        notional: 96.999,
+        reservedNotional: 0
+      })
+    ]);
+  });
+
+  test("keeps the unfilled remainder reserved while a resting order still trades", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-rest-partial-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-partial-live",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    });
+
+    expect(await ledger.recordRestingOrderFill("resting-partial-live", { shares: 20, price: 0.7, remainingShares: 118.57 })).toBe(true);
+    // Re-reading the same venue snapshot must not rewrite the ledger.
+    expect(await ledger.recordRestingOrderFill("resting-partial-live", { shares: 20, price: 0.7, remainingShares: 118.57 })).toBe(false);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({
+        orderId: "resting-partial-live",
+        status: "partial",
+        shares: 20,
+        notional: 14,
+        reservedNotional: 82.999
+      })
+    ]);
+  });
+
+  test("applies a later cumulative fill to an already partially filled resting order", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-rest-partial-twice-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-two-fills",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    });
+
+    await ledger.recordRestingOrderFill("resting-two-fills", { shares: 20, price: 0.7, remainingShares: 118.57 });
+    expect(await ledger.recordRestingOrderFill("resting-two-fills", { shares: 50, price: 0.7, remainingShares: 88.57 })).toBe(true);
+
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ status: "partial", shares: 50, notional: 35, reservedNotional: expect.closeTo(61.999, 6) })
+    ]);
+  });
+
+  test("does not downgrade a filled resting order when the venue later closes it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-rest-filled-closed-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-filled-closed",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    });
+
+    await ledger.recordRestingOrderFill("resting-filled-closed", { shares: 138.57, price: 0.7, remainingShares: 0 });
+    await ledger.markCanceledByOrderId("resting-filled-closed");
+
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ status: "filled", shares: 138.57, reservedNotional: 0 })
+    ]);
+  });
+
   test("marks lost condition ids inactive after resolution", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-ledger-lost-"));
     const file = join(dir, "ledger.json");

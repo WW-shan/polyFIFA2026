@@ -218,7 +218,7 @@ Semantics:
 - When nothing is takable at or below the bid price, the planner builds a maker bid at exactly `--rest-price` and the executor signs a **size-based limit order** (not an amount-based market order).
 - Resting legs are maker-only by default (`--post-only false` to allow taking), which guarantees maker status and no taker fee; the venue charges makers nothing, so the recorded fee is `0`.
 - `--order-type` defaults to `GTD` whenever `--rest-price` is set. `GTD` signs `expiration = now + 60 + max(rest-seconds, 120)`, and the venue expires the order roughly a minute early, so an abandoned run cannot leave an order on the book. `--order-type GTC` has no venue expiry and must be removed with `--cancel-order <orderId>`.
-- Every live pass first reconciles `posted` ledger entries against the venue order snapshot. Once an order reads back as canceled/expired/rejected, its reservation is released automatically, so a GTD expiry does not block the event forever. A resting order that traded before it closed keeps its filled shares as an active `partial` position for settlement.
+- Every live pass first reconciles ledger entries that still hold a reservation against the venue order snapshot. A bid that traded is recorded from the venue's cumulative `size_matched` as an owned position (`filled`, or `partial` when only part of the size matched), so a hit bid stops being an unresolved submission that blocks the event. Once an order reads back as canceled/expired/rejected, whatever never filled is released, so a GTD expiry does not block the event forever.
 - The venue minimum order size (`min_order_size`, currently 5 shares) and the market tick size are read from `GET /book`; a bid that would be below the minimum or off the price grid is refused before signing instead of being sent.
 - Paper mode reports a resting bid as `posted` with `reservedNotional` rather than as a fill, because resting does not trade.
 
@@ -261,6 +261,8 @@ Optional live env vars:
 - `POLY_RPC_URL` for viem wallet transport
 - `POLY_CHAIN_ID` defaults to `137`
 - `POLY_CLOB_HOST` defaults to `https://clob.polymarket.com`
+
+The order endpoints are region-restricted. `POST /order` answers `403 {"error":"Trading restricted in your region..."}` when the egress IP is not in a permitted region, even for an unauthenticated request, so a live run must reach the venue through a permitted region. That response is a definite rejection: it is recorded as `rejected` with no reserved notional. `GET https://polymarket.com/api/geoblock` reports the current decision for the machine's egress IP.
 
 Polymarket CLOB v2 may reject older proxy/profile makers with `maker address not allowed, please use the deposit wallet flow`. In that case, use the deposit wallet that holds pUSD as `POLY_DEPOSIT_WALLET_ADDRESS`; do not use `RELAYER_API_KEY_ADDRESS` as the funder. The private key must recover the owner/session signer for that same Polymarket account, and the CLOB API key must be derived from that signer.
 

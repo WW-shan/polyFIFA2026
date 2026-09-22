@@ -103,7 +103,7 @@ export class LiveLedger {
       const updated = entries.map((entry) => {
         const legs = entry.legs?.length
           ? entry.legs.map((leg) => (leg.orderId === target && isActiveLedgerStatus(leg.status)
-            ? { ...leg, status: canceledStatusFor(leg), reservedNotional: 0 }
+            ? { ...leg, status: leg.status === "filled" ? "filled" : canceledStatusFor(leg), reservedNotional: 0 }
             : leg))
           : undefined;
         const legChanged = legs !== undefined && legs.some((leg, index) => leg !== entry.legs![index]);
@@ -113,7 +113,7 @@ export class LiveLedger {
         if (selfMatch) canceled = true;
         const next = legChanged ? normalizeLedgerEntry({ ...entry, legs }) : { ...entry };
         if (selfMatch) {
-          next.status = canceledStatusFor(entry);
+          next.status = entry.status === "filled" ? "filled" : canceledStatusFor(entry);
           next.reservedNotional = 0;
         }
         return next;
@@ -121,6 +121,48 @@ export class LiveLedger {
       return changed ? updated : undefined;
     });
     return canceled;
+  }
+
+  /**
+   * Records the shares a resting maker bid actually traded, taken from the
+   * venue's cumulative `size_matched`. A fill is an owned position, not an
+   * unresolved submission, so the entry stops being reported as `posted`;
+   * whatever can still trade keeps its reservation.
+   */
+  async recordRestingOrderFill(
+    orderId: string,
+    fill: { shares: number; price: number; remainingShares?: number }
+  ): Promise<boolean> {
+    const target = orderId.trim();
+    const { shares, price, remainingShares } = fill;
+    if (!target || !Number.isFinite(shares) || shares <= 0 || !Number.isFinite(price) || price <= 0) return false;
+    const notional = shares * price;
+    const status: LedgerStatus = remainingShares !== undefined && remainingShares <= 0 ? "filled" : "partial";
+    const reservation = remainingShares === undefined ? undefined : Math.max(0, remainingShares) * price;
+    const applied = { status, price, shares, notional, ...(reservation === undefined ? {} : { reservation }) };
+    let changed = false;
+    await this.updateEntries((entries) => {
+      const updated = entries.map((entry) => {
+        // `shares` is the venue's cumulative matched size, so a partially filled
+        // bid that trades again must stay eligible for the next snapshot.
+        const isTarget = (position: { orderId?: string; status: LedgerStatus; reservedNotional?: number }): boolean =>
+          position.orderId === target
+          && (position.status === "posted" || (position.status === "partial" && (position.reservedNotional ?? 0) > 0));
+        if (entry.legs?.length) {
+          const legs = entry.legs.map((leg) => (isTarget(leg) ? filledLedgerLeg(leg, applied) : leg));
+          if (!legs.some((leg, index) => leg !== entry.legs![index])) return entry;
+          changed = true;
+          return normalizeLedgerEntry({ ...entry, legs });
+        }
+        if (!isTarget(entry)) return entry;
+        const filled = filledLedgerEntry(entry, applied);
+        if (filled === entry) return entry;
+        changed = true;
+        return normalizeLedgerEntry(filled);
+      });
+      return changed ? updated : undefined;
+    });
+    return changed;
   }
 
   private async markConditionIds(conditionIds: readonly string[], status: "redeemed" | "lost"): Promise<void> {
@@ -343,6 +385,55 @@ export function isActiveLedgerStatus(status: LedgerStatus): boolean {
  */
 function canceledStatusFor(position: { shares: number; notional: number }): LedgerStatus {
   return position.shares > 0 || position.notional > 0 ? "partial" : "canceled";
+}
+
+interface RestingFillApplication {
+  status: LedgerStatus;
+  price: number;
+  shares: number;
+  notional: number;
+  reservation?: number;
+}
+
+function filledLedgerLeg(leg: LedgerTradeLeg, fill: RestingFillApplication): LedgerTradeLeg {
+  const next: LedgerTradeLeg = {
+    ...leg,
+    status: fill.status,
+    price: fill.price,
+    shares: fill.shares,
+    notional: fill.notional,
+    fee: 0,
+    estimatedPayout: fill.shares,
+    estimatedProfit: fill.shares - fill.notional
+  };
+  if (fill.reservation !== undefined) next.reservedNotional = fill.reservation;
+  // An unchanged snapshot must not rewrite the ledger on every live pass.
+  return next.status === leg.status
+    && next.price === leg.price
+    && next.shares === leg.shares
+    && next.notional === leg.notional
+    && next.reservedNotional === leg.reservedNotional
+    && next.fee === leg.fee
+    ? leg
+    : next;
+}
+
+function filledLedgerEntry(entry: LedgerTradeEntry, fill: RestingFillApplication): LedgerTradeEntry {
+  const next: LedgerTradeEntry = {
+    ...entry,
+    status: fill.status,
+    price: fill.price,
+    shares: fill.shares,
+    notional: fill.notional
+  };
+  if (fill.reservation !== undefined) next.reservedNotional = fill.reservation;
+  return next.status === entry.status
+    && next.price === entry.price
+    && next.shares === entry.shares
+    && next.notional === entry.notional
+    && next.reservedNotional === entry.reservedNotional
+    ? entry
+    : next;
 }
 
 function isEstablishedPosition(status: LedgerStatus): boolean {
