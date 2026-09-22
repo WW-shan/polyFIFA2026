@@ -90,8 +90,17 @@ function anchorBookFrame(record: CompactStoredRecord): Record<string, unknown> |
     : typeof data.tokenId === "string" ? data.tokenId : undefined;
   if (!assetId || !Array.isArray(response.bids) || !Array.isArray(response.asks)) return undefined;
   const frame: Record<string, unknown> = { event_type: "book", asset_id: assetId, bids: response.bids, asks: response.asks };
-  for (const [from, to] of [["market", "market"], ["timestamp", "timestamp"], ["hash", "hash"]] as const) {
-    if (response[from] !== undefined) frame[to] = response[from];
+  // `market` and `hash` identify the depth this snapshot carries. The REST
+  // `timestamp` is deliberately dropped: it is the exchange's REST clock,
+  // measured ~1s ahead of our receipt while live WebSocket event times ran
+  // ~3s behind it. Copying it into the synthetic frame put the replay's
+  // per-token ordering watermark into a foreign clock domain, so the next
+  // live delta looked stale (`out_of_order_delta`) and the token stayed
+  // invalid (`snapshot_required` for every following delta) until a full
+  // WebSocket book happened to arrive - tens of seconds of lost coverage per
+  // anchor. The anchor's own time stays on the `book_snapshot` evidence row.
+  for (const from of ["market", "hash"] as const) {
+    if (response[from] !== undefined) frame[from] = response[from];
   }
   return frame;
 }

@@ -573,7 +573,7 @@ export class CompactTailStore {
     // ask ladder from it needs the last full-depth anchor at or before it plus
     // every delta since; copying only `[start, finish]` left the exported
     // window with no seed, so the depth could not be rebuilt from the floor.
-    const seed = this.seedStart(game.key, start, finishAtMs);
+    const seed = this.seedStart(game.key, start);
     const available = this.db.prepare(`SELECT COUNT(*) AS count FROM staging_records
       WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?`).get(game.key, seed.copyStart, finishAtMs) as { count?: number } | undefined;
     const availableCount = available?.count ?? 0;
@@ -647,7 +647,7 @@ export class CompactTailStore {
    * floor, so a window whose evidence genuinely starts late is still reported
    * as short.
    */
-  private seedStart(gameKey: string, start: number, finishAtMs: number): { copyStart: number; anchorAtMs: number | null } {
+  private seedStart(gameKey: string, start: number): { copyStart: number; anchorAtMs: number | null } {
     const anchor = this.db.prepare(`SELECT MAX(received_at_ms) AS at FROM staging_records
       WHERE game_key = ? AND kind = 'book_snapshot' AND received_at_ms <= ? AND received_at_ms >= ?`)
       .get(gameKey, start, start - this.tailWindowMs) as { at?: number | null } | undefined;

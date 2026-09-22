@@ -365,6 +365,20 @@ describe("public collector streams", () => {
     });
   });
 
+  test("records an actionable diagnostic for an empty WebSocket error", async () => {
+    const sink = new MemorySink();
+    const socket = new ControlledSocket();
+    const streams = createPublicStreams({ journal: sink, connectSports: false, autoReconnect: false, socketFactory: () => socket });
+    await streams.start(["token"]);
+    socket.open();
+    socket.error(new TypeError(""));
+    await streams.stop();
+
+    expect(sink.records.find(record => record.kind === "socket_error")?.data).toEqual({
+      name: "TypeError", message: "WebSocket closed without a close frame"
+    });
+  });
+
   test.each(["clob", "sports"] as const)("resets the %s silence deadline only when an inbound frame arrives", async (source) => {
     vi.useFakeTimers();
     const socket = new ControlledSocket();

@@ -43,12 +43,14 @@ function dependencies(runtime = manager().runtime) {
   const createCollector = vi.fn((_config: ContinuousConfig) => runtime);
   const start = vi.fn(async (_options?: CollectorServiceOptions) => started);
   const stop = vi.fn(async (_options?: CollectorServiceOptions) => ({ status: "stopped" as const, label: started.label, plistPath: started.plistPath }));
+  const restart = vi.fn(async (_options?: CollectorServiceOptions) => ({ ...started, status: "restarted" as const }));
   const inspect = vi.fn(async (_options?: CollectorServiceOptions) => status);
   const deps: ContinuousCliDependencies = {
     createCollector, startCollectorService: start, stopCollectorService: stop, collectorServiceStatus: inspect,
+    restartCollectorService: restart,
     write: text => output.push(text), error: text => errors.push(text)
   };
-  return { deps, output, errors, createCollector, start, stop, inspect, status };
+  return { deps, output, errors, createCollector, start, stop, restart, inspect, status };
 }
 
 async function configFile(overrides: Record<string, unknown> = {}) {
@@ -93,13 +95,13 @@ describe("continuous CLI", () => {
     expect(signals()).toEqual(before);
   });
 
-  test.each(["start", "stop", "status"])("dispatches %s with config paths resolved after the project argument", async command => {
+  test.each(["start", "stop", "restart", "status"])("dispatches %s with config paths resolved after the project argument", async command => {
     const config = await configFile(), input = dependencies();
     expect(await runContinuousCli([command, ...config.args], input.deps)).toBe(0);
-    const selected = command === "start" ? input.start : command === "stop" ? input.stop : input.inspect;
+    const selected = command === "start" ? input.start : command === "stop" ? input.stop : command === "restart" ? input.restart : input.inspect;
     expect(selected).toHaveBeenCalledExactlyOnceWith({ configPath: config.path, projectDirectory: config.project });
     expect(input.createCollector).not.toHaveBeenCalled();
-    expect([input.start, input.stop, input.inspect].filter(operation => operation.mock.calls.length)).toHaveLength(1);
+    expect([input.start, input.stop, input.restart, input.inspect].filter(operation => operation.mock.calls.length)).toHaveLength(1);
     expect(JSON.parse(input.output[0]!)).toMatchObject({ label: "com.polyfifa.public-collector" });
   });
 

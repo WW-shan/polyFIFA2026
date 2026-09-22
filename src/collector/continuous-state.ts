@@ -246,8 +246,11 @@ function recordIssueMessage(record: JournalRecord): string {
       typeof error?.message === "string" ? error.message : "request failed"}`;
   }
   if (record.kind === "socket_error") {
+    const message = typeof data?.message === "string" && data.message.trim().length > 0
+      ? data.message
+      : data?.name === "TypeError" ? "WebSocket closed without a close frame" : "socket failure without a message";
     return `${typeof data?.name === "string" ? data.name : "Error"}: ${
-      typeof data?.message === "string" ? data.message : "socket failure"}${
+      message}${
       typeof data?.code === "string" ? ` (${data.code})` : ""}`;
   }
   if (record.kind === "book_snapshot_batch_error") {

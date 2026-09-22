@@ -120,14 +120,17 @@ export interface CaptureHeartbeat {
   instanceId: string;
   pid: number;
   updatedAtMs: number;
+  lastRecordAtMs?: number | null;
 }
 
 export async function writeCaptureHeartbeat(
   dataRoot: string,
-  heartbeat: Pick<ContinuousStatus, "instanceId" | "pid" | "updatedAtMs">
+  heartbeat: Pick<ContinuousStatus, "instanceId" | "pid" | "updatedAtMs"> & { lastRecordAtMs?: number | null }
 ): Promise<void> {
-  const content = JSON.stringify({ schemaVersion: 1, instanceId: heartbeat.instanceId,
-    pid: heartbeat.pid, updatedAtMs: heartbeat.updatedAtMs }) + "\n";
+  const value: CaptureHeartbeat = { schemaVersion: 1, instanceId: heartbeat.instanceId,
+    pid: heartbeat.pid, updatedAtMs: heartbeat.updatedAtMs };
+  if (heartbeat.lastRecordAtMs !== undefined) value.lastRecordAtMs = heartbeat.lastRecordAtMs;
+  const content = JSON.stringify(value) + "\n";
   const directory = resolve(dataRoot);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const pending = join(directory, `.state-heartbeat.json.${randomUUID()}.tmp`);
@@ -148,7 +151,9 @@ export async function readCaptureHeartbeat(dataRoot: string): Promise<CaptureHea
   const heartbeat = value as Partial<CaptureHeartbeat>;
   if (heartbeat.schemaVersion !== 1 || typeof heartbeat.instanceId !== "string"
     || !Number.isSafeInteger(heartbeat.pid) || (heartbeat.pid ?? 0) <= 0
-    || !Number.isSafeInteger(heartbeat.updatedAtMs) || (heartbeat.updatedAtMs ?? -1) < 0) {
+    || !Number.isSafeInteger(heartbeat.updatedAtMs) || (heartbeat.updatedAtMs ?? -1) < 0
+    || (heartbeat.lastRecordAtMs !== undefined && heartbeat.lastRecordAtMs !== null
+      && (!Number.isSafeInteger(heartbeat.lastRecordAtMs) || heartbeat.lastRecordAtMs < 0))) {
     throw new Error("CAPTURE_HEARTBEAT_INVALID");
   }
   return heartbeat as CaptureHeartbeat;

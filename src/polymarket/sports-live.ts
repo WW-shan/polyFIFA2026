@@ -105,7 +105,7 @@ export class SportsLiveProvider {
 
   connect(onUpdate: SportsUpdateHandler): WebSocket {
     const url = this.options.url ?? "wss://sports-api.polymarket.com/ws";
-    const dispatcher = this.options.proxyUrl ? new ProxyAgent(this.options.proxyUrl) : undefined;
+    const dispatcher = this.options.proxyUrl ? new ProxyAgent({ uri: this.options.proxyUrl, proxyTunnel: true }) : undefined;
     const socket = new WebSocket(url, dispatcher ? { dispatcher } : undefined);
 
     socket.addEventListener("message", (event) => {

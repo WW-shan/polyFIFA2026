@@ -13,10 +13,13 @@
 ```sh
 npm run collect:start
 npm run collect:status
+npm run collect:restart
 npm run collect:stop
 ```
 
 `start` 安装并启动本用户的 `com.polyfifa.public-collector` LaunchAgent，异常退出由系统重新拉起；已经运行则不重复启动。`stop` 只停止本采集器，保留配置和全部数据。`status` 同时显示服务、保存状态和最后数据时间，不能仅凭 PID 存在认定数据健康。
+
+`restart` 走 `launchctl kickstart -k gui/<uid>/com.polyfifa.public-collector`：launchd 会先终止当前实例再按 plist 拉起，因此对"进程还在、心跳还在推进、但采集已经卡死"的实例也有效；服务未加载时它退化为 `start`。它同时清除 `collect:stop` 留下的 `.collector-stopped` 标记，所以健康守护在人为停机期间仍然不会把它拉起来。
 
 前台调试用 `npm run collect:continuous`，退出该终端会停止前台实例。不要与后台实例重复运行；数据目录的独占锁会拒绝重复写入。
 
@@ -72,7 +75,7 @@ npm run collect:stop
 
 ```text
 state.json                 当前运行及热缓存内的比赛状态，不是完整历史归档目录
-state-heartbeat.json       112 B 左右的进程心跳；只含 instanceId/pid/updatedAtMs
+state-heartbeat.json       进程心跳（约 140 B）；含 instanceId/pid/updatedAtMs/lastRecordAtMs
 tail.sqlite                去重后的滚动窗口与终场前 180 秒 + 1 秒参考结果库
 collector.lock             当前写入实例的独占锁
 runs/<runId>/*.ndjson[.gz]  compact 模式下主要是控制/metadata；旧模式才是全量原始记录
@@ -471,7 +474,7 @@ schema v5 之前 finalize 的场次没有 `metadata_json`，导出时从 raw run
 
 ### 10. 状态写放大与 dashboard 响应瘦身（2026-09-22 修复）
 
-`ContinuousCollector.persist()` 不再每个 pulse 都把完整热状态写入 `state.json`。写盘改为“恢复所需结构指纹变化”或“距上次全量写盘 60 秒”触发；高频变化的 `receivedRecords`、`lastRecordAtMs`、盘口计数和最后盘口时间只由心跳承载。`state-heartbeat.json` 固定只写 `instanceId` / `pid` / `updatedAtMs`，`collect:status` 会在身份匹配后用它判断进程新鲜度。
+`ContinuousCollector.persist()` 不再每个 pulse 都把完整热状态写入 `state.json`。写盘改为“恢复所需结构指纹变化”或“距上次全量写盘 60 秒”触发；高频变化的 `receivedRecords`、`lastRecordAtMs`、盘口计数和最后盘口时间只由心跳承载。`state-heartbeat.json` 固定只写 `instanceId` / `pid` / `updatedAtMs` / `lastRecordAtMs`，`collect:status` 和守护进程都会在身份匹配后用它判断进程与数据新鲜度；`state.json` 里的 `lastRecordAtMs` 最长滞后一次全量写盘间隔，因此心跳里的那个值才是当前值。
 
 `/api/status?view=compact` 新增为 dashboard、健康守护、live watcher 和 `/api/archives` 使用的精简视图，只保留这些调用方需要的字段；原 `/api/status` 全量契约保留。2026-09-22 线上重启后实测 91 场比赛时，compact 响应 **140,557 B**，全量响应 **714,259 B**；`state.json` 约 698 KB，连续 30 秒保持同一 inode，而 112 B 心跳每 5 秒更新，并观测到 60 秒全量刷新。结构性状态变化仍会立即写完整快照。
 
@@ -481,11 +484,67 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 
 连续采集器现在把 discovery 拆成两条有界查询：`start_time_min/max` 的计划赛程窗口（保留 1 小时 catch-up）和 Gamma `live=true` 的进行中赛事；分页从 100 降到 10，连续配置默认 HTTP 超时提高到 30 秒。相关赛事扩展由串行改为最多 8 路并发，但最终仍按 game key 的稳定顺序合并，保持去重与冲突诊断语义不变。pulse 入口也会更新 supervisor 时间，避免一次合法但较长的 discovery 被健康守护误判为 `status_stale`。
 
+### 12. 健康守护只能“重复启动”而不能真正重启（2026-09-22 修复）
+
+守护进程发现采集器卡死时执行的是 `npm run collect:start`，而 `start` 对已经加载的 LaunchAgent 是幂等的：它检测到服务在运行就直接返回 `already_running`，一个"进程还在、心跳还在、但再也不采集"的实例永远不会被换掉。真正的止损动作是重启，而当时没有这个入口。
+
+现在新增 `npm run collect:restart`（`continuous-cli restart`），行为是：
+
+- 已加载：`launchctl kickstart -k gui/<uid>/com.polyfifa.public-collector`，由 launchd 终止旧实例并按 plist 重新拉起（`KeepAlive` + `ThrottleInterval 30` 仍然生效）。
+- 未加载：退化为 `start` 的原有安装/启动路径。
+- 两种情况都会清除 `.collector-stopped`，因此人为停机期间守护进程依旧不会自动拉起；只有它自己判定卡死时才会走这条路。
+
+边界：`kickstart` 重新执行的是**已加载**的 plist 定义，所以 `restart` 会重新读取 `collector.config.json`（采集器每次启动都读它），但不会改写 plist 本身。改变 plist 级别的选项（`--keep-awake`、`--project-dir`、`--config`）仍然要先 `collect:stop` 再 `collect:start`，与 `start` 对已加载服务保持幂等不改写的行为一致。
+
+守护的卡死判定同时看两路时间：`state.json`/HTTP 的 `updatedAtMs`（进程还活着吗）和 `lastRecordAtMs`（还有没有数据进来）。任一超过 300 秒、或 `starting` 停留超过 900 秒，就触发一次重启；`restart_collector` 自带 300 秒冷却，避免刷屏式重启。
+
+同时补上此前"看得见却不说"的静默故障：
+
+- 新增 `data_stale` 告警：`mode=collecting` 但 60 秒没有新记录（与状态页 `dataStale` 同一阈值）。线上实测连续 55 分钟采集里相邻记录最大间隔 29.4 秒（discovery 每 30 秒一轮也会写入记录），所以这个阈值不会在正常安静期误报。
+- 新增 `collector_error` 告警：`status.errors` 里 15 分钟内、此前没报过的错误按 `(scope, atMs, message)` 去重后逐条写日志。以前发现请求的 `AbortError` 只停留在 `state.json` 里，没人会去看。
+- 状态 API 不可用时守护回退读 `state.json`，但该文件最多滞后一个全量写盘周期；现在会再用 `state-heartbeat.json`（身份匹配后）覆盖 `updatedAtMs` 和 `lastRecordAtMs`，否则回退路径会把"一切正常"误判成停滞。
+- 错误去重集合只保留告警窗口内的条目，不会随进程寿命无限增长。
+
+验证：`tests/tools/collector-health-watch.test.ts` 直接以子进程加载真实脚本，断言心跳合并（含身份不匹配时不合并）、`data_stale` / `collector_error` 会写日志、去重集合有界，以及自动重启路径执行的命令是 `npm run collect:restart`。
+
+### 13. 网络层诊断与依赖安全（2026-09-22 修复）
+
+- **发现请求的错误被截断成 `fetch failed`**：`issueMessage()` 只取最外层 `Error.message`，而 undici 的失败原因（`other side closed`、`UND_ERR_SOCKET`、`ECONNREFUSED`…）挂在 `cause` 上。线上诊断里只有 `tennis: fetch failed`，无法判断是代理、超时还是目标站拒绝。现在递归展开 `cause` 链（最多 4 层、带环检测）并拼上 `code`，同时保留 URL 脱敏和 2000 字符上限。
+- **WebSocket 空消息**：undici 的 WebSocket 在异常关闭时会抛 `TypeError` 且 `message` 为空串，`state.json` 里就会留下 `TypeError: `。现在空消息按 `WebSocket closed without a close frame`（`continuous-state.ts` 侧为同一语义的兜底）记录，不再产生无法检索的空错误。
+- **`undici` 升到精确版本 `8.9.0`**：`8.5.0` 命中的 high severity 公告范围为 `>=8.0.0 <8.9.0`。升级到 8.11.0 后代理隧道的集成测试回归失败，所以固定在 `8.9.0`（公告范围之外、且保留原有代理行为）。`npm audit --omit=dev` 现在只剩 `@polymarket/clob-client-v2 -> ethers/elliptic` 的 12 个 low（上游无可用修复版本）。
+- **代理默认改回 CONNECT 隧道**：`undici 8.9` 起 `proxyTunnel` 缺省时对 HTTP 转发走绝对 URI 而不是 CONNECT，与项目此前的行为不一致。`createOwnedTransport()` 现在显式默认 `proxyTunnel: true`，`sports-live.ts` 也显式传入同一个值；调用方仍可用 `proxyTunnel: false` opt out。
+
+### 14. 导出把 REST 时钟当成 WebSocket 排序水位，锚点之后整段自我失效（2026-09-22 修复）
+
+`compact-export.ts` 把每个 HTTP 锚点转成一条等价的 WS `book` 帧用于播种，转换时**连 `response.timestamp` 一起复制**了。回放引擎会用每条帧的来源时间维护“每 token 排序水位”，于是这个 REST 时钟被当成了 WS 事件时钟：
+
+- 实测（`game:6298447`，moneyline 一侧）：REST `timestamp` 1790088957422，而该记录**收到**的时间是 22:55:56.301——交易所 REST 时钟比本机回执快约 1.1 秒；同一时刻 WS `price_change` 的消息级时间戳是 1790088953465（22:55:53.465），比它慢约 4 秒。
+- 注射后的 80 毫秒，`price_change` 就被判成 `out_of_order_delta` → 该 token 置为 invalid；此后**每一个** delta 都走 `snapshot_required` 拒绝分支，直到下一次真正的 WS 全量 `book` 帧才恢复。
+
+这不是上游丢包，而是自伤：同一窗口内该 token 的 `snapshot_required` 失效事件有 **2632 条**，覆盖缺口 51 秒。修复就是转换时**不再复制 REST `timestamp`**（只保留 `market` / `hash` 与档位），让排序水位留在 WS 事件时钟域；锚点自己的时间仍原样保存在 `book_snapshot` 证据行里，深度审计也不受影响（`snapshotMatches>0`、`snapshotMismatches=0`）。
+
+修复后同一场同一 token：`validSeconds` 127 → **157**，`missingSeconds` 51 → 22，`snapshot_required` **2632 → 0**；剩下的失效都是真实的源侧不一致（`best_bid_mismatch`、`best_ask_mismatch`、`crossed_book`），属于设计上拒绝掩盖的边界。8 场线上归档重导出后逐场核对：`snapshotMatches` 4–34、`snapshotMismatches` 全 0。
+
+回归测试：`tests/collector/compact-export.test.ts` 新增用例，构造“REST 时钟领先、随后到达的 delta 事件时间更早”的生产同形输入，断言归档里不再出现 `out_of_order_delta` / `snapshot_required`，且该 token `validSeconds > 170`（修复前必失败）。
+
 ### 本轮验证证据
 
-- 全量测试：**94 个测试文件 / 2,647 项测试通过，0 失败**。
-- TypeScript：`npx tsc --noEmit` 通过。
-- 采集器范围测试：**61 个测试文件 / 2,090 项测试通过**。
+**2026-09-22 修复后（当前运行态）**
+
+- 全量测试：**95 个测试文件 / 2,659 项测试通过，0 失败**，连续两次全量运行均通过；`tsc --noEmit` 通过；三个 Python 守护脚本 `py_compile` 通过。
+- 生产重启：`npm run collect:restart` 用 `launchctl kickstart -k` 换掉旧实例（PID 81896 → 89693），健康守护同步重启（PID 89708）。重启后 `collect:status` 为 `mode=collecting`、`errors=[]`、`dataAgeMs` 稳定在数百毫秒到数秒，`state-heartbeat.json` 143 B 且每 5 秒带着 `lastRecordAtMs` 更新；`/`、`/api/status?view=compact`（约 364 KB）、`/api/archives` 全部 200，`PRAGMA quick_check=ok`、`journal_mode=wal`。
+- 守护实测：新守护把 `discovery:profile`、`http_error`（`books` 批量锚点被上游中止）等真实错误逐条写成 `collector_error` 告警，并在同一时段没有产生任何误报的 `data_stale`（相邻记录实测间隔仍 < 1 秒）。
+- 全链路实测（重启后）：paper fixture 成交 100 股 @0.97（盈利 2.91）；`live:status` 只读返回 22 条账本 / 1 条 active；compact 导出 **8/8 成功**（`exported 8 / failed 0`）；对这批归档跑真实回测，**默认 60/180 秒持有窗口仍为 0 eligible**，把持有窗口收到 30 秒时为 **87/1048 eligible**。
+- 覆盖率对比（同一场 `game:6298447`，moneyline 一侧）：`validSeconds` 127 → 157、`missingSeconds` 51 → 22、`snapshot_required` 失效 2632 → 0；8 场归档深度审计 `snapshotMatches` 4–34、`snapshotMismatches` 0。
+- 采集器自身的上游压力：同一时段有逐分钟的 `books` 批量锚点超时（`AbortError` / `fetch failed`，`snapshotBatchSize=50`、并发 8、30 秒超时），由守护记为 `collector_error`；下一轮 60 秒锚点会重试，窗口内仍有 11,332 个 `book_snapshot` 落盘。
+
+**2026-09-21 上一轮（旧数据集，已按操作要求清理）**
+
+- 从当时正式 SQLite 只读副本导出 30 份归档：`exported 30 / failed 0`；30 场 match-level `window_complete` 全部为 true，每场 `anchorFrames` 为 6–16。归档内仍有 13 场存在至少一个 token 的 `observedWindowComplete=false`（多为 1 秒缺口或未活跃的子盘口），所以回测只有在实际持有窗口完整时才会纳入，不能被 match-level 标志替代。
+- 对上述 30 份归档运行真实回测：**2,208 个 scenario、64 个参数组、152 个 eligible**；未出现解析或执行异常。
+- 正式采集器连续采样：`mode=collecting`、`errors=[]`、`lastRecordAtMs` 持续推进；重置后的实例启动约 25 秒，当时 146 场、约 2,478 个 desired token，compact status 约 287 KB，`tail.sqlite quick_check=ok`。
+- 状态写入：在非结构性变化期间 `state.json` 保持同一 inode，112 B 心跳每 5 秒更新，约 60 秒做一次全量刷新。
+- 健康守护：`python3 -m py_compile` 通过；自动重启日志路径、launchd PATH 下的 npm 解析、SQLite 短暂打开失败重试均有直接回归验证。
 - 从正式 SQLite 只读副本导出 **30 份归档**：`exported 30 / failed 0`；30 场 match-level `window_complete` 全部为 true，每场 `anchorFrames` 为 6–16。归档内仍有 13 场存在至少一个 token 的 `observedWindowComplete=false`（多为 1 秒缺口或未活跃的子盘口），所以回测只有在实际持有窗口完整时才会纳入，不能被 match-level 标志替代。
 - 对上述 30 份归档运行真实回测：**2,208 个 scenario、64 个参数组、152 个 eligible**；未出现解析或执行异常。
 - 正式采集器连续采样：`mode=collecting`、`errors=[]`、`lastRecordAtMs` 持续推进；重置后的实例启动约 25 秒，当前 146 场、约 2,478 个 desired token，compact status 约 287 KB，`tail.sqlite quick_check=ok`。
@@ -500,3 +559,4 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 - compact 归档依赖 `metadata_json`；raw run 超过保留期且 metadata 为空时，市场身份不可恢复，导出会失败而不是猜测。
 - 真实成交仍使用 `quote-touch-assumed` 等假设模型，不能把回测 PnL 当作已成交实盘收益。
 - 盘口前段可能尚未建立，持有窗口的逐秒完整性仍必须单独校验；`--allow-partial-archive-window` 只放宽归档窗口之外的前段，不放宽实际持有窗口。
+- 2026-09-22 这 8 场线上数据在**默认 60/180 秒持有窗口下 eligible=0**，主因是证据门槛而不是代码：`conflicting-finish-labels`（Gamma 与 Sports 终场钟不一致）、`snapshot-audit-not-passed`、以及源侧自身的 `best_bid_mismatch` / `crossed_book` 造成的逐 token 缺口。要把样本量做起来，需要更长的采集期、更宽的持有窗口下限，或显式接受更弱的证据（`--allow-partial-archive-window`、`--windows-seconds 30`），不能靠改判定把不可信窗口算成可用。

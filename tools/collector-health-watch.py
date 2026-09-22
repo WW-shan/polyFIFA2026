@@ -38,6 +38,34 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _valid_timestamp(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def merge_heartbeat_status(status: dict, heartbeat: object) -> dict:
+    """Overlay a matching heartbeat timestamp on a saved full status snapshot."""
+
+    if not isinstance(heartbeat, dict):
+        return status
+    if heartbeat.get("instanceId") != status.get("instanceId") or heartbeat.get("pid") != status.get("pid"):
+        return status
+    heartbeat_ms = heartbeat.get("updatedAtMs")
+    status_ms = status.get("updatedAtMs")
+    if not _valid_timestamp(heartbeat_ms) or not _valid_timestamp(status_ms):
+        return status
+    if heartbeat_ms <= status_ms:
+        return status
+    merged = dict(status)
+    merged["updatedAtMs"] = heartbeat_ms
+    last_record_ms = heartbeat.get("lastRecordAtMs")
+    current_last_record_ms = status.get("lastRecordAtMs")
+    if _valid_timestamp(last_record_ms) and (
+        not _valid_timestamp(current_last_record_ms) or last_record_ms > current_last_record_ms
+    ):
+        merged["lastRecordAtMs"] = last_record_ms
+    return merged
+
+
 def fmt_clock(ms: int | None) -> str:
     if not ms:
         return "-"
@@ -95,6 +123,8 @@ class HealthWatch:
         self.started = False
         self.stale = False
         self.last_restart_at = 0.0
+        self.seen_status_errors: set[tuple[str, int, str]] = set()
+        self.last_data_age_ms: int | None = None
         # Cycles that ended in an exception. A watcher restart resets the
         # in-process ``started`` flag, so a collector that was already stuck
         # when the watcher came up could never be restarted; count failures
@@ -113,7 +143,13 @@ class HealthWatch:
                 return json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError):
             with open(self.state_path, "r", encoding="utf-8") as handle:
-                return json.load(handle)
+                status = json.load(handle)
+            try:
+                with open(os.path.join(self.data_root, "state-heartbeat.json"), "r", encoding="utf-8") as handle:
+                    heartbeat = json.load(handle)
+            except (OSError, ValueError):
+                heartbeat = None
+            return merge_heartbeat_status(status, heartbeat)
 
     def stop_requested(self) -> bool:
         """True while the operator has stopped the collector on purpose.
@@ -183,7 +219,7 @@ class HealthWatch:
         self.last_restart_at = time.time()
         self.log.write("action", "restart_collector", reason=reason)
         try:
-            result = subprocess.run([resolve_npm(), "run", "collect:start"], cwd=self.project,
+            result = subprocess.run([resolve_npm(), "run", "collect:restart"], cwd=self.project,
                                     capture_output=True, text=True, timeout=180)
             self.log.write("action", "restart_collector_done", code=result.returncode,
                      tail=(result.stdout or result.stderr or "").strip()[-400:])
@@ -263,12 +299,41 @@ class HealthWatch:
             self.log.write("info", "stop_marker_changed", intentionallyStopped=stopped,
                            note="collect:stop records an intentional stop; the watchdog will not restart it")
         stale = state_age_ms > stale_after_ms and not stopped
-        self.stale = stale
+        mode = status.get("mode")
+        last_record_at_ms = status.get("lastRecordAtMs")
+        data_age_ms = now_ms() - last_record_at_ms if _valid_timestamp(last_record_at_ms) else None
+        self.last_data_age_ms = data_age_ms
+        data_stale = mode == "collecting" and (data_age_ms is None or data_age_ms > 60_000)
+        self.stale = stale or data_stale
         if stale:
             snapshot["stale"] = True
             snapshot["stateAgeMs"] = state_age_ms
             self.log.write("alert", "status_stale", **snapshot)
-        mode = status.get("mode")
+        if data_stale:
+            snapshot["dataAgeMs"] = data_age_ms
+            self.log.write("alert", "data_stale", **snapshot)
+        errors = status.get("errors")
+        if isinstance(errors, list):
+            cutoff_ms = now_ms() - 15 * 60_000
+            # The dedupe set only needs to remember errors that could still be
+            # reported, so drop anything older than the alert window instead of
+            # growing one entry per error for the lifetime of the watcher.
+            for key in [key for key in self.seen_status_errors if key[1] < cutoff_ms]:
+                self.seen_status_errors.discard(key)
+            for error in errors:
+                if not isinstance(error, dict):
+                    continue
+                scope = error.get("scope")
+                at_ms = error.get("atMs")
+                message = error.get("message")
+                if not isinstance(scope, str) or not _valid_timestamp(at_ms) or not isinstance(message, str):
+                    continue
+                key = (scope, at_ms, message)
+                if key in self.seen_status_errors:
+                    continue
+                self.seen_status_errors.add(key)
+                if at_ms >= cutoff_ms:
+                    self.log.write("alert", "collector_error", scope=scope[:128], atMs=at_ms, message=message[:2000])
         # A fresh process legitimately reports `starting` with no subscriptions
         # yet, so only a stuck or degraded mode is an alert. An intentional stop
         # is not an alert either.
@@ -289,8 +354,12 @@ class HealthWatch:
         # never leaves `starting`, is restarted instead of waiting for a human.
         stuck_ms = 300_000
         if self.started and self.auto_restart and not stopped and (
-                state_age_ms > stuck_ms or (mode == "starting" and state_age_ms > 900_000)):
-            self.restart_collector(f"state age {round(state_age_ms/1000)}s in mode {mode}")
+                state_age_ms > stuck_ms or (data_age_ms is not None and data_age_ms > stuck_ms)
+                or (mode == "starting" and state_age_ms > 900_000)):
+            reason = f"state age {round(state_age_ms/1000)}s in mode {mode}"
+            if data_age_ms is not None and data_age_ms > stuck_ms:
+                reason += f"; no records for {round(data_age_ms/1000)}s"
+            self.restart_collector(reason)
         new_matches = metrics["matchKeys"] - self.matches_seen
         if self.started:
             for key in sorted(new_matches):
@@ -336,6 +405,7 @@ class HealthWatch:
                     self.log.write(
                         "info", "heartbeat",
                         mode=status.get("mode"), stale=self.stale,
+                        dataAgeMs=None if self.last_data_age_ms is None else round(self.last_data_age_ms),
                         desiredTokens=status.get("desiredTokens"),
                         receivedRecords=status.get("receivedRecords"),
                         matches=metrics["matches"], tailRecords=metrics["tailRecords"],

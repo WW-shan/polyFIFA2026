@@ -60,6 +60,27 @@ describe("LiveExecutor", () => {
     });
   });
 
+  test("treats blank credential and RPC aliases as unset", () => {
+    expect(liveConfigFromEnv({
+      POLY_API_KEY: "   ",
+      CLOB_API_KEY: "key",
+      POLY_API_SECRET: "",
+      CLOB_SECRET: "secret",
+      POLY_PASSPHRASE: "  ",
+      CLOB_PASS_PHRASE: "passphrase",
+      POLY_RPC_URL: "   "
+    })).toMatchObject({
+      apiKey: "key",
+      apiSecret: "secret",
+      passphrase: "passphrase"
+    });
+  });
+
+  test("rejects invalid numeric live configuration instead of passing NaN downstream", () => {
+    expect(() => liveConfigFromEnv({ POLY_CHAIN_ID: "not-a-number" })).toThrow(/POLY_CHAIN_ID/);
+    expect(() => liveConfigFromEnv({ POLY_SIGNATURE_TYPE: "9" })).toThrow(/POLY_SIGNATURE_TYPE/);
+  });
+
   test("passes order details to injected live client", async () => {
     const placeLimitBuy = vi.fn(async (): Promise<TradeResult> => ({
       mode: "live",

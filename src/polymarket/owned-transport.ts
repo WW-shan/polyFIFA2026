@@ -6,6 +6,8 @@ import { Agent, EnvHttpProxyAgent, Pool, ProxyAgent, type Dispatcher, type build
 export interface OwnedTransportOptions {
   proxyUrl?: string | undefined;
   connectTimeoutMs?: number;
+  /** Force CONNECT tunnels, including for HTTP/WebSocket upgrade requests. */
+  proxyTunnel?: boolean;
 }
 
 export interface OwnedTransport {
@@ -62,9 +64,13 @@ export function createOwnedTransport(options: OwnedTransportOptions = {}): Owned
     // including tunnels awaiting the destination's TLS handshake.
     clientFactory: (origin: URL, settings: object) => new Pool(origin, { ...settings, connect })
   };
+  // Undici 8.9 changed HTTP forwarding to the default when proxyTunnel is
+  // omitted. Keep the historical CONNECT behavior for every proxied request,
+  // including WebSocket upgrades; callers may explicitly opt out with false.
+  const proxyTunnel = { proxyTunnel: options.proxyTunnel ?? true };
   const owner = options.proxyUrl === undefined
-    ? new EnvHttpProxyAgent({ ...agentOptions, ...environment })
-    : options.proxyUrl ? new ProxyAgent({ ...agentOptions, uri: options.proxyUrl }) : new Agent(agentOptions);
+    ? new EnvHttpProxyAgent({ ...agentOptions, ...environment, ...proxyTunnel })
+    : options.proxyUrl ? new ProxyAgent({ ...agentOptions, uri: options.proxyUrl, ...proxyTunnel }) : new Agent(agentOptions);
   // WebSocket upgrades are no longer owned by Undici's HTTP pool. Retain them
   // through the supported dispatch hook as well as tracking connecting sockets.
   const dispatcher = owner.compose((dispatch) => (request, handler) => {

@@ -47,6 +47,9 @@ For continuous collection on this Mac:
 ```sh
 npm run collect:start
 npm run collect:status
+# Restart the loaded service in place; the health watchdog uses this to
+# recover a collector that is running but no longer collecting.
+npm run collect:restart
 # Stop only this collector; keep all collected data.
 npm run collect:stop
 ```

@@ -370,4 +370,19 @@ describe("continuous discovery identity integrity", () => {
     expect(input.issues[0]?.message).not.toContain("proxy-user");
     expect(input.issues[0]?.message).not.toContain("proxy-secret");
   });
+
+  test("includes low-level network causes and error codes in discovery issues", async () => {
+    const cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+    const input = fixture({
+      "profile:864": [new TypeError("fetch failed", { cause })],
+      "profile:103767": [[]]
+    });
+
+    expect(await discoverContinuousEvents(options, input.deps, profiles, input.onIssue)).toEqual([]);
+    expect(input.issues).toEqual([{
+      scope: "profile",
+      key: "tennis",
+      message: "fetch failed: other side closed (UND_ERR_SOCKET)"
+    }]);
+  });
 });

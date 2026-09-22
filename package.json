@@ -16,6 +16,7 @@
     "collect:labels": "tsx src/collector/tail-cli.ts labels",
     "collect:continuous": "tsx src/collector/continuous-cli.ts run --config collector.config.json",
     "collect:start": "tsx src/collector/continuous-cli.ts start --config collector.config.json --keep-awake",
+    "collect:restart": "tsx src/collector/continuous-cli.ts restart --config collector.config.json --keep-awake",
     "collect:stop": "tsx src/collector/continuous-cli.ts stop --config collector.config.json",
     "collect:status": "tsx src/collector/continuous-cli.ts status --config collector.config.json",
     "collect:compact": "tsx src/collector/storage-cli.ts compact",
@@ -31,7 +32,7 @@
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.6",
-    "undici": "^8.5.0",
+    "undici": "8.9.0",
     "viem": "^2.53.1"
   },
   "devDependencies": {

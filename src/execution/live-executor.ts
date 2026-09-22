@@ -400,18 +400,19 @@ export function liveConfigFromEnv(env: Record<string, string | undefined>): Live
   const depositWalletAddress = nonEmptyEnv(env.POLY_DEPOSIT_WALLET_ADDRESS) ?? nonEmptyEnv(env.DEPOSIT_WALLET_ADDRESS);
   const config: LiveExecutorConfig = {
     host: nonEmptyEnv(env.POLY_CLOB_HOST) ?? "https://clob.polymarket.com",
-    chainId: Number(nonEmptyEnv(env.POLY_CHAIN_ID) ?? 137),
-    signatureType: depositWalletAddress ? 3 : Number(nonEmptyEnv(env.POLY_SIGNATURE_TYPE) ?? 1)
+    chainId: integerEnv(env.POLY_CHAIN_ID, 137, "POLY_CHAIN_ID"),
+    signatureType: depositWalletAddress ? 3 : integerEnv(env.POLY_SIGNATURE_TYPE, 1, "POLY_SIGNATURE_TYPE", 0, 3)
   };
 
   if (env.POLY_PRIVATE_KEY) config.privateKey = env.POLY_PRIVATE_KEY;
-  const apiKey = env.POLY_API_KEY ?? env.CLOB_API_KEY;
-  const apiSecret = env.POLY_API_SECRET ?? env.CLOB_SECRET;
-  const passphrase = env.POLY_PASSPHRASE ?? env.CLOB_PASS_PHRASE;
+  const apiKey = nonEmptyEnv(env.POLY_API_KEY) ?? nonEmptyEnv(env.CLOB_API_KEY);
+  const apiSecret = nonEmptyEnv(env.POLY_API_SECRET) ?? nonEmptyEnv(env.CLOB_SECRET);
+  const passphrase = nonEmptyEnv(env.POLY_PASSPHRASE) ?? nonEmptyEnv(env.CLOB_PASS_PHRASE);
   if (apiKey) config.apiKey = apiKey;
   if (apiSecret) config.apiSecret = apiSecret;
   if (passphrase) config.passphrase = passphrase;
-  if (env.POLY_RPC_URL) config.rpcUrl = env.POLY_RPC_URL;
+  const rpcUrl = nonEmptyEnv(env.POLY_RPC_URL);
+  if (rpcUrl) config.rpcUrl = rpcUrl;
   if (env.POLY_SYNC_BALANCE_ALLOWANCE) config.syncBalanceAllowance = parseBooleanEnv(env.POLY_SYNC_BALANCE_ALLOWANCE);
   if (depositWalletAddress) {
     config.depositWalletAddress = depositWalletAddress;
@@ -645,6 +646,17 @@ function sideField(value: unknown): "BUY" | "SELL" | 0 | 1 {
 function nonEmptyEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function integerEnv(value: string | undefined, fallback: number, name: string, minimum = 1, maximum = Number.MAX_SAFE_INTEGER): number {
+  const raw = nonEmptyEnv(value);
+  if (raw === undefined) return fallback;
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return parsed;
 }
 
 function parseBooleanEnv(value: string): boolean {

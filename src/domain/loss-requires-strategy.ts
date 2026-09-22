@@ -201,7 +201,6 @@ function isTotalMarket(market: StrategyMarket): boolean {
   const type = market.marketType;
   if (type === "team_total") return false;
   if (type === "total") return true;
-  const question = market.question.toLowerCase();
   return /\bo\/u\b/i.test(market.question) && !containsKnownTeamAfterColon(market);
 }
 

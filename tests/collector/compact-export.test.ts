@@ -88,6 +88,38 @@ describe("compact tail export", () => {
     store.close();
   });
 
+  test("an HTTP anchor whose REST clock runs ahead does not invalidate the live WebSocket stream", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    // Production measured a REST clock ~1s ahead of the local receipt while WS
+    // message timestamps ran ~3s behind it, so an anchor can carry a source
+    // time that is newer than deltas which are still arriving afterwards.
+    // Injecting that REST time as the seed's WebSocket source time would make
+    // every following live delta look stale and invalidate the whole token.
+    store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], String(START + 70_000), "h1"), ["game:42"]);
+    store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], String(START + 70_000), "h2"), ["game:42"]);
+    store.ingest(clob(3, START + 60_000, { market: CONDITION, event_type: "price_change", timestamp: String(START + 59_000),
+      price_changes: [{ asset_id: "yes", price: "0.6", size: "5", side: "SELL", hash: "h3", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    store.ingest(clob(4, START + 120_000, { market: CONDITION, event_type: "price_change", timestamp: String(START + 119_000),
+      price_changes: [{ asset_id: "no", price: "0.45", size: "5", side: "BUY", hash: "h4", best_bid: "0.45", best_ask: "0.5" }] }), ["game:42"]);
+    store.ingest(anchor(5, FINISH - 1_000, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "5" }], String(START + 120_000), "h3"), ["game:42"]);
+    store.ingest(anchor(6, FINISH - 1_000, "no", [{ price: "0.4", size: "30" }, { price: "0.45", size: "5" }], [{ price: "0.5", size: "40" }], String(START + 180_000), "h4"), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    const yes = summary.tokens.find((token: { tokenId: string }) => token.tokenId === "yes");
+    const changes = (await readFile(join(result.archive.outputDirectory, "changes.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const invalidations = changes.filter((row: { kind: string; data?: { reason?: string } }) => row.kind === "invalidation").map((row: { data?: { reason?: string } }) => row.data?.reason);
+    expect(invalidations).not.toContain("out_of_order_delta");
+    expect(invalidations).not.toContain("snapshot_required");
+    expect(yes.validSeconds).toBeGreaterThan(170);
+    store.close();
+  });
+
   test("keeps a connection gap in the compact archive and invalidates later book seconds", async () => {
     const path = await root();
     const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,

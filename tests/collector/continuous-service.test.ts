@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  collectorServiceStatus, startCollectorService, stopCollectorService,
+  collectorServiceStatus, restartCollectorService, startCollectorService, stopCollectorService,
   type CollectorServiceDependencies, type CollectorServiceOptions
 } from "../../src/collector/continuous-service.js";
 import { writeCaptureHeartbeat } from "../../src/collector/continuous-storage.js";
@@ -53,6 +53,7 @@ async function fixture(input: Record<string, unknown> = {}, projectName = "proje
       }
       if (args[0] === "bootstrap") job.path = args[2]!;
       else if (args[0] === "bootout") job.path = null;
+      else if (args[0] === "kickstart") job.pid = (job.pid ?? 0) + 1;
       else throw new Error("Unexpected launchctl command in fixture");
       return { stdout: "", stderr: "" };
     }
@@ -108,6 +109,25 @@ describe("continuous user service", () => {
     expect((await lstat(input.plistPath)).mode & 0o777).toBe(0o600);
     expect((await lstat(join(input.dataRoot, "logs"))).mode & 0o777).toBe(0o700);
     expect(plist).not.toContain("EnvironmentVariables");
+  });
+
+  test("restarts a loaded collector with kickstart -k instead of a no-op start", async () => {
+    const input = await fixture();
+    await startCollectorService(input.options, input.deps);
+    await writeFile(join(input.dataRoot, ".collector-stopped"), "{}\n");
+
+    const result = await restartCollectorService(input.options, input.deps);
+
+    expect(result).toMatchObject({ status: "restarted", label, plistPath: input.plistPath, pid: 4322 });
+    await expect(lstat(join(input.dataRoot, ".collector-stopped"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(input.calls.filter(call => call.file === "/bin/launchctl").map(call => call.args)).toEqual([
+      ["print", target],
+      ["bootstrap", "gui/501", input.plistPath],
+      ["print", target],
+      ["print", target],
+      ["kickstart", "-k", target],
+      ["print", target]
+    ]);
   });
 
   test("escapes XML while keeping paths and shell metacharacters as literal arguments", async () => {
@@ -394,11 +414,13 @@ describe("read-only continuous service status", () => {
   test("uses a matching heartbeat when the full snapshot has not changed", async () => {
     const input = await fixture({ pulseIntervalMs: 1_000 });
     await startCollectorService(input.options, input.deps);
-    const state = await saveState(input, { updatedAtMs: 10_000 });
-    await writeCaptureHeartbeat(input.dataRoot, { instanceId: state.instanceId, pid: state.pid, updatedAtMs: 49_000 });
+    const state = await saveState(input, { updatedAtMs: 10_000, lastRecordAtMs: 10_000 });
+    await writeCaptureHeartbeat(input.dataRoot, {
+      instanceId: state.instanceId, pid: state.pid, updatedAtMs: 49_000, lastRecordAtMs: 48_000
+    });
 
     expect(await collectorServiceStatus(input.options, input.deps)).toMatchObject({
-      updatedAtMs: 49_000, stateAgeMs: 1_000, stale: false
+      updatedAtMs: 49_000, stateAgeMs: 1_000, lastRecordAtMs: 48_000, dataAgeMs: 2_000, stale: false
     });
   });
 

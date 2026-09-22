@@ -105,7 +105,7 @@ describe("continuous capture state storage", () => {
     await writeCaptureHeartbeat(root, { ...initial, updatedAtMs: 300 });
 
     expect(await readCaptureHeartbeat(root)).toEqual({
-      schemaVersion: 1, instanceId: initial.instanceId, pid: initial.pid, updatedAtMs: 300
+      schemaVersion: 1, instanceId: initial.instanceId, pid: initial.pid, updatedAtMs: 300, lastRecordAtMs: 190
     });
     expect(await readCaptureState(root)).toEqual(initial);
     expect((await lstat(join(root, "state.json"))).ino).toBe(before.ino);

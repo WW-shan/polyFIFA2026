@@ -33,6 +33,10 @@ export interface CollectorServiceStartResult {
   pid: number | null;
 }
 
+export interface CollectorServiceRestartResult extends Omit<CollectorServiceStartResult, "status"> {
+  status: "started" | "restarted";
+}
+
 export interface CollectorServiceStopResult {
   status: "stopped" | "not_running";
   label: string;
@@ -288,7 +292,12 @@ async function installPlist(ctx: Awaited<ReturnType<typeof startContext>>, previ
   }
 }
 
-function startResult(ctx: Context, definition: Definition, status: CollectorServiceStartResult["status"], pid: number | null): CollectorServiceStartResult {
+function startResult<Status extends CollectorServiceStartResult["status"] | "restarted">(
+  ctx: Context,
+  definition: Definition,
+  status: Status,
+  pid: number | null
+): Omit<CollectorServiceStartResult, "status"> & { status: Status } {
   return { status, label: LABEL, plistPath: ctx.plistPath, configPath: definition.configPath,
     dataRoot: definition.dataRoot, url: `http://127.0.0.1:${definition.port}`, pid };
 }
@@ -320,6 +329,23 @@ export async function startCollectorService(
   requireOwnedJob(ctx, started, { text: renderPlist(ctx.definition), definition: ctx.definition });
   if (!started) fail("CONTINUOUS_SERVICE_START_FAILED", "the collector label was not loaded after bootstrap");
   return startResult(ctx, ctx.definition, "started", started.pid);
+}
+
+/** Restart a loaded LaunchAgent in place, or start it when it is not loaded. */
+export async function restartCollectorService(
+  options: CollectorServiceOptions = {},
+  deps: CollectorServiceDependencies = {}
+): Promise<CollectorServiceRestartResult> {
+  const ctx = await context(options, deps), owned = await ownedPlist(ctx.plistPath), job = await inspectJob(ctx);
+  requireOwnedJob(ctx, job, owned);
+  if (!job) return await startCollectorService(options, deps) as CollectorServiceRestartResult;
+
+  await clearStopMarker(owned!.definition.dataRoot);
+  try { await ctx.execFile("/bin/launchctl", ["kickstart", "-k", ctx.target]); }
+  catch { commandFailed("kickstart"); }
+  const restarted = await inspectJob(ctx);
+  requireOwnedJob(ctx, restarted, owned);
+  return startResult(ctx, owned!.definition, "restarted", restarted?.pid ?? null);
 }
 
 export async function stopCollectorService(
@@ -393,6 +419,7 @@ export async function collectorServiceStatus(
     const now = ctx.now();
     const validTime = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= now;
     let updatedAtMs = state.updatedAtMs;
+    let lastRecordAtMs = state.lastRecordAtMs;
     try {
       const heartbeat = await readCaptureHeartbeat(result.dataRoot);
       if (heartbeat) {
@@ -402,18 +429,22 @@ export async function collectorServiceStatus(
           errors.push("CONTINUOUS_SERVICE_HEARTBEAT_INVALID: saved heartbeat timestamp is invalid");
         } else {
           updatedAtMs = Math.max(updatedAtMs, heartbeat.updatedAtMs);
+          if (heartbeat.lastRecordAtMs !== undefined && heartbeat.lastRecordAtMs !== null
+            && (lastRecordAtMs === null || heartbeat.lastRecordAtMs > lastRecordAtMs)) {
+            lastRecordAtMs = heartbeat.lastRecordAtMs;
+          }
         }
       }
     } catch {
       errors.push("CONTINUOUS_SERVICE_HEARTBEAT_INVALID: unable to read a valid collector heartbeat");
     }
-    if (!validTime(updatedAtMs) || (state.lastRecordAtMs !== null && !validTime(state.lastRecordAtMs))) throw new Error();
+    if (!validTime(updatedAtMs) || (lastRecordAtMs !== null && !validTime(lastRecordAtMs))) throw new Error();
     result.statePid = state.pid;
     result.url = `http://127.0.0.1:${state.port}`;
     result.updatedAtMs = updatedAtMs;
     result.stateAgeMs = now - updatedAtMs;
-    result.lastRecordAtMs = state.lastRecordAtMs;
-    result.dataAgeMs = state.lastRecordAtMs === null ? null : now - state.lastRecordAtMs;
+    result.lastRecordAtMs = lastRecordAtMs;
+    result.dataAgeMs = lastRecordAtMs === null ? null : now - lastRecordAtMs;
     const activeMode = CURRENT_MODES.has(state.mode);
     const fresh = pulseIntervalMs !== undefined && result.stateAgeMs <= pulseIntervalMs * 3;
     if (!activeMode) errors.push("CONTINUOUS_SERVICE_STATE_INACTIVE: saved collector mode is not active");

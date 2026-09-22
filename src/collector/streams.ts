@@ -84,7 +84,8 @@ const DEFAULT_SPORTS_URL = "wss://sports-api.polymarket.com/ws";
 function serializableStreamError(error: unknown): { name: string; message: string; code?: string } {
   const name = error instanceof Error && error.name ? error.name : "Error";
   const rawMessage = error instanceof Error ? error.message : String(error);
-  const message = rawMessage.replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/]*@/gi, "$1[redacted]@").slice(0, 2000);
+  const fallback = error instanceof TypeError ? "WebSocket closed without a close frame" : "socket failure without a message";
+  const message = (rawMessage.trim() || fallback).replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/]*@/gi, "$1[redacted]@").slice(0, 2000);
   const code = error instanceof Error && typeof (error as NodeJS.ErrnoException).code === "string"
     ? (error as NodeJS.ErrnoException).code : undefined;
   return { name, message, ...(code === undefined ? {} : { code }) };

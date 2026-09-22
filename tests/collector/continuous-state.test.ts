@@ -309,6 +309,15 @@ describe("persistent continuous capture observations", () => {
     ]);
   });
 
+  test("replaces an empty socket error message with an actionable diagnostic", () => {
+    const state = new ContinuousState("/capture", 8765);
+    state.observe(journalRecord(1, 2_000, "collector", "socket_error", { name: "TypeError", message: "" }));
+
+    expect(state.snapshot().errors).toEqual([
+      { atMs: 2_000, scope: "socket_error", message: "TypeError: WebSocket closed without a close frame" }
+    ]);
+  });
+
   test("unknown and malformed frames are recorded as diagnostics, not invented match observations", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     state.observe(journalRecord(1, 1000, "clob", "ws_message", "not-json", "c"));

@@ -1438,7 +1438,6 @@ describe("CLI", () => {
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
     const eventSlug = "fifwc-locked-risk-high-2026-06-27";
-    const overToken = "locked-risk-high-total-over";
     await writeFile(marketsFile, JSON.stringify([
       totalMarket(eventSlug, "Risk", "High", 0.5, "locked-risk-high-total")
     ]));
@@ -1502,7 +1501,6 @@ describe("CLI", () => {
     const marketsFile = join(dir, "markets.json");
     const ledgerFile = join(dir, "ledger.json");
     const eventSlug = "fifwc-locked-risk-medium-2026-06-27";
-    const overToken = "locked-risk-medium-total-over";
     await writeFile(marketsFile, JSON.stringify([
       totalMarket(eventSlug, "Risk", "Medium", 0.5, "locked-risk-medium-total")
     ]));

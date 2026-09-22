@@ -818,7 +818,6 @@ async function runSportsWatch(
       signal?: Scores365GoalSignal
     ): Promise<{ action: "USE"; details: string; stakeLimit?: number; staleNotional: number; stablePostGoalNotional: number; lockedScoreGuard?: LockedScoreGuardAudit } | { action: "SKIP"; decision: NoTradeDecision; lockedScoreGuard?: LockedScoreGuardAudit }> {
       const candidates = newLockedCandidates(match, context.markets, context.thresholds.entryWindowMinutes, context.previousMatch);
-      const relatedTokens = new Set(candidates.map((candidate) => candidate.tokenId));
       const decisionTokens = lockedDecisionTokenIds(decision);
       const lockedScoreGuard = lockedScoreGuardAudit(decisionTokens, signal);
       if (decisionTokens.length === 0) {

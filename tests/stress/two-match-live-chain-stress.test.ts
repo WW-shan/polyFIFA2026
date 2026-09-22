@@ -135,7 +135,7 @@ describe("two-match full live chain stress coverage", () => {
       if (spec.assertTailCappedByBalance) {
         const tailNotional = tailOrders.reduce((total, order) => total + order.notional, 0);
         const lockedFilledNotional = lockedOrders
-          .filter((order) => !spec.postLockedFirst)
+          .filter(() => !spec.postLockedFirst)
           .reduce((total, order) => total + order.notional, 0);
         expect(tailNotional, `${spec.name} tail balance cap`).toBeLessThanOrEqual(spec.initialBalance - lockedFilledNotional - BALANCE_BUFFER + EPSILON);
       }

@@ -88,7 +88,23 @@ function profileDependencies(deps: CatalogDependencies): CatalogDependencies {
 
 function issueMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/]*@/gi, "$1[redacted]@");
+  const name = error instanceof Error ? error.name : "Error";
+  const parts = [message.trim() || (name && name !== "Error" ? name : "request failed")];
+  const seen = new Set<unknown>([error]);
+  let cause = error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
+  for (let depth = 0; cause !== undefined && depth < 4 && !seen.has(cause); depth += 1) {
+    seen.add(cause);
+    if (cause instanceof Error) {
+      const causeMessage = cause.message.trim();
+      const code = typeof (cause as NodeJS.ErrnoException).code === "string" ? (cause as NodeJS.ErrnoException).code : undefined;
+      if (causeMessage || code) parts.push(`${causeMessage || cause.name}${code ? ` (${code})` : ""}`);
+      cause = (cause as Error & { cause?: unknown }).cause;
+    } else {
+      parts.push(String(cause));
+      cause = undefined;
+    }
+  }
+  return parts.join(": ").replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/]*@/gi, "$1[redacted]@").slice(0, 2000);
 }
 
 function singleMatchEvents(events: readonly CollectorEvent[], onIssue: (issue: DiscoveryIssue) => void): CollectorEvent[] {

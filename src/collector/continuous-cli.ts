@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadContinuousConfig, type ContinuousConfig } from "./continuous-config.js";
 import {
-  collectorServiceStatus, startCollectorService, stopCollectorService, type CollectorServiceOptions
+  collectorServiceStatus, restartCollectorService, startCollectorService, stopCollectorService, type CollectorServiceOptions
 } from "./continuous-service.js";
 
 export interface ContinuousCliManager {
@@ -15,16 +15,18 @@ export interface ContinuousCliManager {
 export interface ContinuousCliDependencies {
   createCollector?: (config: ContinuousConfig) => ContinuousCliManager | Promise<ContinuousCliManager>;
   startCollectorService?: typeof startCollectorService;
+  restartCollectorService?: typeof restartCollectorService;
   stopCollectorService?: typeof stopCollectorService;
   collectorServiceStatus?: typeof collectorServiceStatus;
   write?: (text: string) => void;
   error?: (text: string) => void;
 }
 
-const HELP = `Usage: continuous-cli.ts <run|start|stop|status|help> [options]
+const HELP = `Usage: continuous-cli.ts <run|start|restart|stop|status|help> [options]
 
   run       Run the continuous public collector in the foreground
   start     Install and start this user's macOS LaunchAgent
+  restart   Restart the loaded LaunchAgent, or start it when absent
   stop      Boot out this user's collector; retain its data and plist
   status    Show service PID, saved-state/data ages, URL, and errors
   help      Show this help (also: run --help, start --help)
@@ -35,7 +37,7 @@ const HELP = `Usage: continuous-cli.ts <run|start|stop|status|help> [options]
 
 An omitted start config is saved privately under dataRoot for the LaunchAgent.`;
 
-type Command = "run" | "start" | "stop" | "status" | "help";
+type Command = "run" | "start" | "restart" | "stop" | "status" | "help";
 
 function invalid(message: string): never {
   throw new Error(`CONTINUOUS_CLI_ARGUMENTS_INVALID: ${message}`);
@@ -46,8 +48,8 @@ function parseArgs(argv: readonly string[]): { command: Command; options: Collec
     return { command: "help", options: {} };
   }
   const command = argv[0];
-  if (command !== "run" && command !== "start" && command !== "stop" && command !== "status") {
-    invalid("expected run, start, stop, status, or help");
+  if (command !== "run" && command !== "start" && command !== "restart" && command !== "stop" && command !== "status") {
+    invalid("expected run, start, restart, stop, status, or help");
   }
   let projectDirectory = process.cwd(), configPath: string | undefined, keepAwake = false;
   const seen = new Set<string>();
@@ -56,7 +58,7 @@ function parseArgs(argv: readonly string[]): { command: Command; options: Collec
     if (seen.has(flag)) invalid("options must not be repeated");
     seen.add(flag);
     if (flag === "--keep-awake") {
-      if (command !== "start") invalid("--keep-awake is only valid for start");
+      if (command !== "start" && command !== "restart") invalid("--keep-awake is only valid for start or restart");
       keepAwake = true;
       continue;
     }
@@ -142,6 +144,7 @@ export async function runContinuousCli(
         write(json(await (deps.startCollectorService ?? startCollectorService)(parsed.options)));
         break;
       }
+      case "restart": write(json(await (deps.restartCollectorService ?? restartCollectorService)(parsed.options))); break;
       case "stop": write(json(await (deps.stopCollectorService ?? stopCollectorService)(parsed.options))); break;
       case "status": write(json(await (deps.collectorServiceStatus ?? collectorServiceStatus)(parsed.options))); break;
       case "run": {
