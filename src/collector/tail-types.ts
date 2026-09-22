@@ -27,6 +27,10 @@ export type TailFinishSource = (typeof TAIL_FINISH_FACT_SOURCES)[number];
 export function isPublishedFinishSource(value: unknown): value is "gamma.finishedTimestamp" | "sports.finishedAt" {
   return value === "gamma.finishedTimestamp" || value === "sports.finishedAt";
 }
+/** True for the collector's own book fallback, never an independent match clock. */
+export function isFallbackFinishSource(value: unknown): value is "book-quiet" | "book-tail" {
+  return value === "book-quiet" || value === "book-tail";
+}
 export function isTailFinishSource(value: unknown): value is TailFinishSource {
   return typeof value === "string" && (TAIL_FINISH_FACT_SOURCES as readonly string[]).includes(value);
 }

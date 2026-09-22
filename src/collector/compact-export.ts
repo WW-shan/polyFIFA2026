@@ -5,7 +5,7 @@ import { exportTail } from "./tail-export.js";
 import type { TailExportResult } from "./tail-export.js";
 import { objectValue } from "./replay-values.js";
 import type { CompactStoredRecord, CompactTailStore } from "./continuous-tail-store.js";
-import { isTailFinishSource } from "./tail-types.js";
+import { isFallbackFinishSource, isTailFinishSource } from "./tail-types.js";
 import type { JournalRecord } from "./types.js";
 
 export interface CompactExportOptions {
@@ -230,17 +230,35 @@ export async function exportCompactMatch(store: CompactTailStore, gameKey: strin
   }
 }
 
-function finishFacts(metadata: Record<string, unknown>, coverage: { finishedAtMs: number; finishAnchor: string | null;
-  finishFacts: readonly unknown[] }, runId: string, sequence: number): unknown[] {
-  // Preserve every witness recorded before finalization. Only synthesize a
-  // fallback fact for legacy matches whose schema predates finish evidence.
-  if (coverage.finishFacts.length > 0) return coverage.finishFacts.map(fact => ({ ...(fact as Record<string, unknown>) }));
+function fallbackFinishFact(metadata: Record<string, unknown>, coverage: { finishedAtMs: number; finishAnchor: string | null },
+  runId: string, sequence: number): Record<string, unknown> {
   // Keep the recorded anchor verbatim. Collapsing `book-tail` into
   // `book-quiet` would misreport how the boundary was actually chosen.
   const anchor = isTailFinishSource(coverage.finishAnchor) ? coverage.finishAnchor : "book-quiet";
-  return [{ eventId: typeof metadata.id === "string" ? metadata.id : null,
+  return { eventId: typeof metadata.id === "string" ? metadata.id : null,
     eventSlug: typeof metadata.slug === "string" ? metadata.slug : null,
     gameId: typeof metadata.gameId === "string" ? metadata.gameId : null,
     atMs: coverage.finishedAtMs, observedAtMs: coverage.finishedAtMs, source: anchor,
-    sourceRunId: runId, sourceRunDirectory: null, sequence, frameIndex: 0 }];
+    sourceRunId: runId, sourceRunDirectory: null, sequence, frameIndex: 0 };
+}
+
+function finishFacts(metadata: Record<string, unknown>, coverage: { finishedAtMs: number; finishAnchor: string | null;
+  finishFacts: readonly unknown[] }, runId: string, sequence: number): unknown[] {
+  const recorded = coverage.finishFacts.map(fact => ({ ...(fact as Record<string, unknown>) }));
+  if (recorded.length === 0) return [fallbackFinishFact(metadata, coverage, runId, sequence)];
+
+  // The boundary itself must remain the first fact. When a match was re-anchored
+  // to `book-tail`, a later published clock may also exist; putting the fallback
+  // first preserves the real market boundary and lets the catalog mark the
+  // published-clock disagreement instead of silently moving the window to it.
+  const boundaryIndex = recorded.findIndex(fact => fact.atMs === coverage.finishedAtMs);
+  if (boundaryIndex >= 0) {
+    const boundary = recorded[boundaryIndex]!;
+    return [boundary, ...recorded.filter((_, index) => index !== boundaryIndex)];
+  }
+  if (isFallbackFinishSource(coverage.finishAnchor)) {
+    const publishedOnly = recorded.filter(fact => !isFallbackFinishSource(fact.source));
+    return [fallbackFinishFact(metadata, coverage, runId, sequence), ...publishedOnly];
+  }
+  return recorded;
 }

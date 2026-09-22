@@ -192,6 +192,23 @@ describe("persistent continuous capture observations", () => {
     expect(restored.readyToArchive("next").map(game => game.key)).toEqual(["game:123"]);
   });
 
+  test("keeps published finish provenance carried only by event_retired", () => {
+    const state = new ContinuousState("/capture", 8765);
+    state.setRun("tail-test", "/capture/runs/tail-test");
+    state.observe(journalRecord(1, 100, "gamma", "event_metadata", eventMetadata(0)));
+    state.observe(journalRecord(2, 9_000, "clob", "ws_message", book("A"), "clob"));
+    state.observe(journalRecord(3, 310_100, "collector", "event_retired", {
+      eventId: "event", eventSlug: "game", gameId: "123", finishedAtMs: 310_000, finishSource: "gamma.finishedTimestamp"
+    }));
+
+    expect(state.snapshot().games[0]).toMatchObject({
+      finishedAtMs: 310_000,
+      finishAnchor: "gamma.finishedTimestamp",
+      finishConflict: false,
+      finishFacts: [expect.objectContaining({ source: "gamma.finishedTimestamp", atMs: 310_000 })]
+    });
+  });
+
   test("a new process retries a previously failed archive without inheriting an obsolete long delay", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     fixtureRecords().forEach(record => state.observe(record));

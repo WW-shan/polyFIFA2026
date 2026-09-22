@@ -42,6 +42,12 @@ def _valid_timestamp(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def expected_shutdown_error(message: str) -> bool:
+    """True for the cancellation diagnostic emitted during an intentional stop/restart."""
+
+    return message == "Collector stopped" or message.endswith(": Collector stopped")
+
+
 def merge_heartbeat_status(status: dict, heartbeat: object) -> dict:
     """Overlay a matching heartbeat timestamp on a saved full status snapshot."""
 
@@ -332,12 +338,16 @@ class HealthWatch:
                 if key in self.seen_status_errors:
                     continue
                 self.seen_status_errors.add(key)
-                if at_ms >= cutoff_ms:
+                # A watcher restarted alongside the collector can read the old
+                # process's last snapshot. Remember those errors for dedupe but
+                # do not report them as new until a later cycle proves the
+                # condition survived the restart.
+                if self.started and at_ms >= cutoff_ms and not expected_shutdown_error(message):
                     self.log.write("alert", "collector_error", scope=scope[:128], atMs=at_ms, message=message[:2000])
         # A fresh process legitimately reports `starting` with no subscriptions
         # yet, so only a stuck or degraded mode is an alert. An intentional stop
         # is not an alert either.
-        if not stopped and mode != "collecting" and (mode != "starting" or state_age_ms > 120_000):
+        if self.started and not stopped and mode != "collecting" and (mode != "starting" or state_age_ms > 120_000):
             snapshot["mode"] = mode
             self.log.write("alert", "mode_not_collecting", **snapshot)
         if mode == "collecting" and (metrics.get("stagingRecords") or 0) == 0:
@@ -381,6 +391,18 @@ class HealthWatch:
         if isinstance(free, int) and free < 20 * 1024 ** 3:
             self.log.write("alert", "low_disk", freeBytes=free)
 
+    def prune_runtime_state(self, status: dict, metrics: dict) -> None:
+        """Forget per-game bookkeeping once the collector no longer reports it."""
+
+        status_keys = {game.get("key") for game in status.get("games", []) if isinstance(game, dict) and isinstance(game.get("key"), str)}
+        match_keys = metrics.get("matchKeys")
+        if not isinstance(match_keys, set):
+            match_keys = set(match_keys or ())
+        keep_archives = status_keys | match_keys
+        self.archives = {key: value for key, value in self.archives.items() if key in keep_archives}
+        self.history = {key: value for key, value in self.history.items() if key in status_keys}
+        self.matches_seen.intersection_update(match_keys)
+
     def run(self, interval_s: float) -> None:
         previous_metrics = None
         self.log.write("info", "watch_started", dataRoot=self.data_root, db=self.db_path,
@@ -400,6 +422,7 @@ class HealthWatch:
                 drift = self.anchor_drift(status, snapshot)
                 previous_metrics = metrics
                 self.started = True
+                self.prune_runtime_state(status, metrics)
                 if time.time() - self.last_heartbeat_at >= self.heartbeat_s:
                     self.last_heartbeat_at = time.time()
                     self.log.write(

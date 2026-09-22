@@ -10,7 +10,7 @@ import { identifier, objectValue } from "./replay-values.js";
 import { gammaEventFromRecord, metadataFromRecord, observationsFromRecord, windowKeyForIdentity, windowKeyForBoundIdentity } from "./tail-context.js";
 import { TailIdentityScope } from "./tail-identity-scope.js";
 import type { JournalRecord } from "./types.js";
-import { finishBoundaryDisputed, isPublishedFinishSource, isTailFinishSource, newestFinishFacts } from "./tail-types.js";
+import { finishBoundaryDisputed, isFallbackFinishSource, isPublishedFinishSource, isTailFinishSource, newestFinishFacts } from "./tail-types.js";
 import type { TailClockIssue, TailClockPolicy, TailClockReceipt, TailEventIdentity, TailFinishFact, TailMetadata, TailObservation, TailOptions, TailWindow, TailWindowIdentity } from "./tail-types.js";
 
 export type EffectiveTailOptions = TailOptions & Required<Pick<TailOptions,"windowSeconds"|"maxFeedSilenceMs"|"sportsStaleAfterMs"|"maxClockDriftMs"|"shockThreshold"|"clockPolicy">>;
@@ -268,12 +268,25 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
   // as disputed while nothing actually disagreed.
   for(const window of allWindows){
     const evidence=window.finishEvidence??[];
-    const published=newestFinishFacts(evidence).filter(fact=>isPublishedFinishSource(fact.source));
+    const newestWitnesses=newestFinishFacts(evidence);
+    const fallbacks=newestWitnesses.filter(fact=>isFallbackFinishSource(fact.source));
+    const published=newestWitnesses.filter(fact=>isPublishedFinishSource(fact.source));
+    // A fallback is the boundary the collector actually published. A later
+    // published clock must not silently move it; keep the fallback boundary and
+    // mark the disagreement instead. If the clocks agree, the stronger
+    // published provenance can remain conflict-free without changing the window.
+    if(fallbacks.length>0){
+      const fallback=fallbacks.reduce((best,fact)=>fact.observedAtMs>=best.observedAtMs?fact:best);
+      window.endAtMs=fallback.atMs;
+      window.startAtMs=fallback.atMs-options.windowSeconds*1000;
+      window.finishConflict=published.some(fact=>fact.atMs!==fallback.atMs);
+      continue;
+    }
     if(published.length===0)continue; // A fallback-only window keeps its own boundary.
     const newest=published.reduce((best,fact)=>fact.observedAtMs>=best.observedAtMs?fact:best);
     if(finishBoundaryDisputed(evidence,window.endAtMs)){
-      // Two clocks disagree, or a published artifact keeps the collector's own
-      // fallback boundary while a real clock exists: both stay disputed.
+      // Independent clocks disagree, or the existing boundary is not named by
+      // any published clock. Both remain disputed rather than silently moved.
       window.finishConflict=true;
       continue;
     }

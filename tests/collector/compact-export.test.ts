@@ -263,6 +263,46 @@ describe("compact tail export", () => {
     store.close();
   });
 
+  test("keeps a re-anchored book-tail boundary when a published clock also exists", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const STORED_TAIL = FINISH - 10_000;
+    const START = STORED_TAIL - 181_000;
+    store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
+    store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
+    const facts = [{ source: "sports.finishedAt" as const, atMs: FINISH, observedAtMs: FINISH, eventId: null, eventSlug: "a-vs-b",
+      gameId: "42", sourceRunId: "run-1", sourceRunDirectory: null, sequence: 7, frameIndex: 0 }];
+    store.finalize({ ...game(), finishedAtMs: STORED_TAIL, finishAnchor: "book-tail", finishFacts: facts }, STORED_TAIL);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    expect(summary.windows[0]).toMatchObject({ endAtMs: STORED_TAIL, finishConflict: true });
+    expect(summary.windows[0].finishSources).toEqual(["book-tail", "sports.finishedAt"]);
+    store.close();
+  });
+
+  test("keeps a book-tail boundary against a native journal finish clock", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const STORED_TAIL = FINISH - 10_000;
+    const START = STORED_TAIL - 181_000;
+    store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
+    store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
+    store.ingest({ ...clob(3, STORED_TAIL - 5_000, {}), source: "sports", kind: "ws_message", connectionId: "sports",
+      data: JSON.stringify({ gameId: 42, slug: "a-vs-b", sport: "tennis", ended: true,
+        finishedAt: new Date(FINISH).toISOString(), last_update: new Date(FINISH).toISOString() }) }, ["game:42"]);
+    store.flush();
+    store.finalize({ ...game(), finishedAtMs: STORED_TAIL, finishAnchor: "book-tail", finishFacts: [] }, STORED_TAIL);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    expect(summary.windows[0]).toMatchObject({ endAtMs: STORED_TAIL, finishConflict: true });
+    expect(summary.windows[0].finishSources).toEqual(["sports.finishedAt", "book-tail"]);
+    store.close();
+  });
+
   test("refuses a match that has no stored market identity", async () => {
     const path = await root();
     const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,

@@ -534,12 +534,16 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 1. `ContinuousState.finish()` 只要看到 `finishedAtMs` 发生变化就置 `finishConflict=true`。Sports 会连续发布同一场比赛的修正值（例如 `00:46:37` → `00:46:43`），这是同一来源的新值覆盖旧值，不是第二个来源在反对。
 2. `compact-export.ts` 只要 `finishAnchor` 是任一 published source，就把该边界写成 Gamma 的 `finishedTimestamp`。当真实边界来自 Sports 时，导出会凭空制造一个 Gamma 时钟；Sports 后续的每次修正就会与这个伪 Gamma 值形成“跨来源冲突”。
 3. 终场修正使已完成的 compact 比赛失效后，`finalize()` 只查 staging；此时 staging 早已被消费，于是重归档可能把一个有数据的 artifact 覆盖成 `records=0` 的“complete”空结果。修复后 `finalize(..., "finalized")` 可以从保留的 `tail_records` 重新锚定，零行尝试只标记失败，不再覆盖成功 artifact。
+4. compact 导出在 `book-quiet` / `book-tail` 兜底边界之外又有 published clock 时，只写了 published facts，回放会把窗口静默改成 published 时钟。现在导出会保留实际兜底边界并把 published clock 作为争议证据；如果两者恰好相同，则保留 published provenance，不制造冲突。
+5. `event_retired` 已带有 `finishSource`，但状态机只读取 `finishedAtMs`。只由 retirement 携带终场证据的恢复场景因此丢失 `finishAnchor` / `finishFacts`；现在会把 published source 一并写入 provenance。
 
 修复后：
 
 - 终场冲突只比较每个 published 来源的最新 witness；同一来源的旧值被自己的新值取代，`book-quiet` / `book-tail` 是采集器兜底，不作为独立时钟参与冲突。
 - 归档导出只在 `finishAnchor === "gamma.finishedTimestamp"` 时写 Gamma 的 `finishedTimestamp`。Sports 边界只通过 finish-facts sidecar 保留，不再冒充 Gamma。
 - 重启恢复和 `refreshFinishEvidence()` 会用保留的 facts 重新解析，而不是永久保留旧的冲突位；只有拿到替换 facts 时才允许清除冲突，避免空刷新误删真实争议。
+- compact 导出会把 `book-quiet` / `book-tail` 兜底边界放在 finish facts 首位；published clock 仍在同一 sidecar 中，并由 catalog 标记为争议，不再静默改写已发布窗口。
+- 健康守护不再把正常的 `Collector stopped` 关闭诊断当成新的 collector error；同时会裁剪已经离开状态/结果集的 per-game 记录，避免长期运行的无界增长。
 
 真实库只读核查（31 场带 finish facts 的比赛）：23 场是单来源且边界不是最新值，属于上述覆盖语义；6 场单来源边界已是最新值；2 场 Gamma/Sports 最新值一致。8 场线上归档重导出后 `conflicting-finish-labels` 从 6 场降到 0 场，且所有边界都落在最新 published witness 上。
 
@@ -555,6 +559,14 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 - 真实回测：43 份归档加 `--allow-book-anchor-finish` 后 **14,064 个 scenario、136 个 eligible**（60 秒 72 个、180 秒 64 个），`conflicting-finish-labels` 排除数为 **0**；31 场近期子集为 **12,360 个 scenario、56 个 eligible**（60 秒 32 个、180 秒 24 个）。默认不显式接受 `book-tail` / `book-quiet` 时，兜底窗口仍按设计排除。
 - 归档重锚定：对已被消费 staging 的旧 compact 比赛，重启后会从保留的 `tail_records` 重新落盘；本次修复把多个此前 `no compact records in final window` 的空归档恢复为有数据的 `book-tail` 窗口。
 - 上游仍会间歇性出现 `books` 批量锚点超时、`ECONNRESET` 和 `AbortError`，守护会记为 `collector_error` 并在下一轮重试；这些是上游/网络压力，不是本次终场时钟解析缺陷。
+
+**2026-09-23 收尾复验**
+
+- 全量测试：**96 个测试文件 / 2,678 项测试通过，0 失败**；`tsc --noEmit` 通过；`git diff --check` 通过。
+- 生产重启：采集器 PID **12803**、健康守护 PID **13812**；`mode=collecting`、`stale=false`、`dataAgeMs` 数秒内，`/`、`/api/status?view=compact`、`/api/archives` 全部 200，`PRAGMA quick_check=ok`。状态中可能保留上游 `books` 的 `fetch failed` 记录；它们是当前 run 的网络重试诊断，不是采集器停机或数据陈旧。
+- 真实 compact 导出：**53/53 成功、failed=0**。其中 `game:6299721` 是 `book-tail` 且同时存在更晚的 Sports 修正；导出现在保留 `book-tail` 终点 `1790099706151`，并把 Sports 时钟标为争议，而不是静默把窗口移到 `1790099740871`。
+- 真实回测：53 份归档加 `--allow-book-anchor-finish` 后 **18,048 个 scenario、165 个 eligible**；默认（不接受 book fallback）为 **85 个 eligible**。唯一 `book-tail` 争议窗口产生 408 个 `conflicting-finish-labels` trial exclusion，未污染其他归档。
+- 新增回归：`event_retired` 的 `finishSource` 会进入 `finishFacts`；catalog 在解析 finish evidence 时把 `book-quiet` / `book-tail` 当作已发布兜底边界；健康守护首个采样周期只建立 baseline，不再把重启前旧快照的 errors / stopped 状态重复告警，并裁剪已离开状态集的 per-game bookkeeping。
 
 **2026-09-22 上一轮**
 

@@ -678,7 +678,14 @@ export class ContinuousState {
       const key = this.events.get(eventId), game = key ? this.games.get(key) : undefined;
       if (game) {
         if (!game.retiredEventIds.includes(eventId)) game.retiredEventIds.push(eventId);
-        if (typeof data?.finishedAtMs === "number") this.finish(game, data.finishedAtMs, record);
+        if (typeof data?.finishedAtMs === "number") {
+          const finishSource = data.finishSource;
+          this.finish(game, data.finishedAtMs, record, isPublishedFinishSource(finishSource) ? {
+            source: finishSource, eventId,
+            eventSlug: typeof data.eventSlug === "string" ? data.eventSlug : null,
+            gameId: typeof data.gameId === "string" ? data.gameId : null, frameIndex: 0
+          } : undefined);
+        }
         if (game.eventIds.every(id => game.retiredEventIds.includes(id)) && !game.archive) game.phase = game.firstBookAtMs === null ? "missed" : game.finishedAtMs === null ? "needs_finish" : "postmatch";
       }
     }
