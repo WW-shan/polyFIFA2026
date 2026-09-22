@@ -39,6 +39,18 @@ describe("research CLI", () => {
     });
     expect(reportOptions).toMatchObject({ inputPath: expect.stringContaining("input.json"), inputSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
   });
+  test.each(["download", "backtest"])("subcommand help is read-only for %s", async command => {
+    expect(parseResearchCliArgs([command, "--help"])).toEqual({ command: "help" });
+    let called = false; const lines: string[] = [];
+    await runResearchCli([command, "--help"], {
+      download: async () => { called = true; throw new Error("unexpected"); },
+      readInput: async () => { called = true; throw new Error("unexpected"); },
+      write: text => { lines.push(text); }
+    });
+    expect(called).toBe(false);
+    expect(lines.join("\n")).toContain("--output-dir");
+  });
+
   test("help never starts requests or creates output", async () => {
     let called = false; const lines: string[] = [];
     await runResearchCli(["--help"], { download: async () => { called = true; throw new Error("unexpected"); }, write: text => { lines.push(text); } });

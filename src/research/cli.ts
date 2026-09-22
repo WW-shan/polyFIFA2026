@@ -33,6 +33,7 @@ function number(text: string, flag: string, integer = false): number {
 }
 
 function parseDownload(args: readonly string[]): ParsedResearchArgs {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) return { command: "help" };
   const options: ResearchDownloadOptions = { sport: "tennis", outputDirectory: "" };
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
@@ -60,6 +61,7 @@ function parseDownload(args: readonly string[]): ParsedResearchArgs {
 }
 
 function parseBacktest(args: readonly string[]): ParsedResearchArgs {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) return { command: "help" };
   let inputPath = "", outputDirectory = "";
   const options: BacktestOptions = {};
   for (let index = 0; index < args.length; index++) {
