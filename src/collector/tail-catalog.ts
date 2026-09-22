@@ -90,6 +90,9 @@ export function tailOptions(options: TailOptions): EffectiveTailOptions {
   if (!result.runDirectory?.trim()) throw new Error("TAIL_OPTIONS_INVALID: runDirectory");
   if(result.clockPolicy!=="strict"&&result.clockPolicy!=="flag-backsteps")throw new Error("TAIL_OPTIONS_INVALID: clockPolicy");
   if(result.finishFactsFile!==undefined&&(typeof result.finishFactsFile!=="string"||!result.finishFactsFile.trim()))throw new Error("TAIL_OPTIONS_INVALID: finishFactsFile");
+  if(result.sourceRunDirectory!==undefined&&(typeof result.sourceRunDirectory!=="string"||!result.sourceRunDirectory.trim()))throw new Error("TAIL_OPTIONS_INVALID: sourceRunDirectory");
+  if(result.archiveFinishFacts!==undefined&&typeof result.archiveFinishFacts!=="boolean")throw new Error("TAIL_OPTIONS_INVALID: archiveFinishFacts");
+  if(result.archiveFinishFacts&&!result.finishFactsFile)throw new Error("TAIL_OPTIONS_INVALID: archiveFinishFacts requires finishFactsFile");
   if(result.compressRawEvents!==undefined&&typeof result.compressRawEvents!=="boolean")throw new Error("TAIL_OPTIONS_INVALID: compressRawEvents");
   if (!Number.isSafeInteger(result.windowSeconds)||result.windowSeconds<1||result.windowSeconds>3600) throw new Error("TAIL_OPTIONS_INVALID: windowSeconds must be in 1..3600");
   for(const key of ["maxFeedSilenceMs","sportsStaleAfterMs","maxClockDriftMs"] as const) {

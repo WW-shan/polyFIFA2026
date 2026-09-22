@@ -844,8 +844,11 @@ export class ContinuousState {
         game.finishConflict = resolved.finishConflict;
       }
       if (game.finishConflict && game.archive) {
+        const preserveCompactArtifact = game.archive.status === "complete" && game.archive.snapshotDirectory === undefined;
         const { snapshotDirectory: _staleSnapshot, finishFactsFile: _staleFacts, ...archive } = game.archive;
-        game.archive = { ...archive, status: "failed", refreshSnapshot: true, retryAtMs: 0, priceReadyTokens: 0, strictReadyTokens: 0 };
+        game.archive = preserveCompactArtifact
+          ? { ...archive, error: archive.error ?? "conflicting finish evidence; artifact is available but quality is not approved" }
+          : { ...archive, status: "failed", refreshSnapshot: true, retryAtMs: 0, priceReadyTokens: 0, strictReadyTokens: 0 };
       }
       if (game.phase !== "archived" && game.phase !== "missed") game.phase = "interrupted";
       this.games.set(game.key, game);

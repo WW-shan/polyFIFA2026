@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, expect, test } from "vitest";
 import { createJournal, listJournalSegments } from "../../src/collector/journal.js";
+import { openCompactTailStore } from "../../src/collector/continuous-tail-store.js";
 import { runStorageCli } from "../../src/collector/storage-cli.js";
 import { runJournalCompression } from "../../src/collector/continuous-compression.js";
 
@@ -24,6 +25,45 @@ test("storage help does not require paths or perform migration", async () => {
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("--replace-verified");
   expect(result.stdout).toContain("--root");
+});
+
+test("compact export rejects an invalid window before creating a store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "poly-storage-invalid-window-")); roots.push(root);
+  const dataRoot = join(root, "data"), outputDirectory = join(root, "output");
+  const result = await runStorageCli(["export-tail", "--data-root", dataRoot, "--output-dir", outputDirectory, "--window-seconds", "abc"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("--window-seconds");
+  expect(await readdir(root)).toEqual([]);
+});
+
+test("compact export refuses a missing data root instead of creating an empty store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "poly-storage-missing-root-")); roots.push(root);
+  const dataRoot = join(root, "missing-data"), outputDirectory = join(root, "output");
+  const result = await runStorageCli(["export-tail", "--data-root", dataRoot, "--output-dir", outputDirectory]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toMatch(/data-root|data root/i);
+  expect(await readdir(root)).toEqual([]);
+});
+
+test("compact repair refuses a missing data root instead of creating an empty store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "poly-storage-repair-missing-root-")); roots.push(root);
+  const dataRoot = join(root, "missing-data");
+  const result = await runStorageCli(["repair-tail", "--data-root", dataRoot]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toMatch(/data-root|data root/i);
+  expect(await readdir(root)).toEqual([]);
+});
+
+test("compact repair refuses while the collector lock is present", async () => {
+  const root = await mkdtemp(join(tmpdir(), "poly-storage-repair-locked-")); roots.push(root);
+  const store = await openCompactTailStore({ dataRoot: root, tailWindowMs: 181_000, bufferMs: 30_000,
+    retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3 });
+  store.close();
+  await writeFile(join(root, "collector.lock"), JSON.stringify({ schemaVersion: 1, kind: "poly-fifa-continuous-collector",
+    hostname: "test-host", pid: process.pid, nonce: "test" }));
+  const result = await runStorageCli(["repair-tail", "--data-root", root]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("collector.lock");
 });
 
 test("storage replacement requires explicit roots and the replacement flag", async () => {

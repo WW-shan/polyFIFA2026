@@ -1,4 +1,5 @@
-import { lstat, mkdir, open, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, lstat, mkdir, open, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { replayTail } from "./tail-replay.js";
@@ -69,12 +70,19 @@ export async function exportTail(input:TailOptions):Promise<TailExportResult>{
       if(compressed){rawEventsFile+=".gz";rawEventsBytes=compressed.compressedBytes;rawEventsSha256=compressed.sha256;}
     }
     const depthFileBytes=writers.get("seconds.ndjson")!.bytes;
+    let finishFactsFile:string|null=null;
+    if(options.finishFactsFile){
+      if(options.archiveFinishFacts){
+        await copyFile(options.finishFactsFile,join(outputDirectory,"finish-facts.json"),constants.COPYFILE_EXCL);
+        finishFactsFile="finish-facts.json";
+      }else finishFactsFile=resolve(options.finishFactsFile);
+    }
     const viewerPath=join(outputDirectory,"viewer.html");
     await writeFile(viewerPath,renderTailViewer({summary,rows,stateChanges,depthFile:"seconds.ndjson",depthFileBytes}),{flag:"wx"});
     await writeFile(join(outputDirectory,"quality.json"),JSON.stringify(summary,null,2)+"\n",{flag:"wx"});
-    await writeFile(join(outputDirectory,"manifest.json"),JSON.stringify({status:"complete",sourceRunId:summary.runId,sourceRunDirectory:resolve(options.runDirectory),
+    await writeFile(join(outputDirectory,"manifest.json"),JSON.stringify({status:"complete",sourceRunId:summary.runId,sourceRunDirectory:resolve(options.sourceRunDirectory??options.runDirectory),
       finishLabelsFile:options.finishLabelsFile?resolve(options.finishLabelsFile):null,createdAt:new Date().toISOString(),depthFile:"seconds.ndjson",depthFileBytes,
-      finishFactsFile:options.finishFactsFile?resolve(options.finishFactsFile):null,
+      finishFactsFile,
       rawEventsFile,rawEventsBytes,rawEventsUncompressedBytes,rawEventsSha256,
       seconds:summary.seconds,changes:summary.changes,stateChanges:summary.stateChanges,audits:summary.audits,rawRecords:summary.rawRecords,
       readyTokens:summary.tokens.filter(t=>t.readyForReplay).length,tokenCount:summary.tokens.length})+"\n",{flag:"wx"});

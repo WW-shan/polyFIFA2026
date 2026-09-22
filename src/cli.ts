@@ -28,8 +28,24 @@ export interface CliResult {
 
 type Mode = "paper" | "live" | "status";
 
+const CLI_HELP = `Usage: npm run cli -- --mode paper|live|status [options]
+
+  --mode paper|live|status  Execution mode (default: paper)
+  --match-file PATH         Local match state JSON
+  --event-slug SLUG         Fetch match state from the public event page
+  --markets-file PATH       Local strategy markets JSON
+  --orderbook-file PATH     Local orderbook JSON
+  --stake NUMBER            Maximum stake; paper defaults to 97
+  --watch true              Watch continuously
+  --worldcup true           Discover public World Cup events
+  --order-type FOK|FAK      Live order type (default: FAK)
+  --help                    Show this help
+
+Use npm run live:status for a read-only live balance and ledger check.`;
+
 interface ParsedArgs {
   mode: Mode;
+  help?: boolean;
   matchFile?: string;
   eventSlug?: string;
   marketsFile?: string;
@@ -196,6 +212,7 @@ export async function runCli(
 ): Promise<CliResult> {
   try {
     const args = parseArgs(argv);
+    if (args.help) return { exitCode: 0, stdout: CLI_HELP, stderr: "" };
     if (args.mode === "status") return await runStatus(args, env, deps);
     if (args.watch) return args.worldcup ? await runSportsWatch(args, env, deps) : await runWatch(args, env, deps);
     return await runSinglePass(args, env, deps);
@@ -1569,7 +1586,7 @@ function cachedStrategyMarketFetcher(
 
 function sportsUpdateOptions(args: ParsedArgs, env: Record<string, string | undefined>): { auditFile?: string; proxyUrl?: string } {
   const options: { auditFile?: string; proxyUrl?: string } = {};
-  const auditFile = args.liveAuditFile ?? env.POLY_LIVE_AUDIT_FILE;
+  const auditFile = args.liveAuditFile ?? nonEmptyEnv(env.POLY_LIVE_AUDIT_FILE);
   const proxyUrl = proxyFromEnv(env);
   if (auditFile) options.auditFile = auditFile;
   if (proxyUrl) options.proxyUrl = proxyUrl;
@@ -1580,7 +1597,7 @@ function verifiedClockOptions(env: Record<string, string | undefined>): { proxyU
   const options: { proxyUrl?: string; timezoneName?: string } = {};
   const proxyUrl = proxyFromEnv(env);
   if (proxyUrl) options.proxyUrl = proxyUrl;
-  const timezoneName = env.POLY_365SCORES_TIMEZONE;
+  const timezoneName = nonEmptyEnv(env.POLY_365SCORES_TIMEZONE);
   if (timezoneName) options.timezoneName = timezoneName;
   return options;
 }
@@ -1608,14 +1625,14 @@ function autoSettlementMonitor(
     deadlineSeconds: numberEnv(env.POLY_AUTO_REDEEM_DEADLINE_SECONDS) ?? 600,
     sizeThreshold: numberEnv(env.POLY_AUTO_REDEEM_SIZE_THRESHOLD) ?? 0.000001
   };
-  const ownerAddress = env.POLY_RELAYER_API_KEY_ADDRESS ?? env.RELAYER_API_KEY_ADDRESS;
+  const ownerAddress = nonEmptyEnv(env.POLY_RELAYER_API_KEY_ADDRESS) ?? nonEmptyEnv(env.RELAYER_API_KEY_ADDRESS);
   if (ownerAddress) config.ownerAddress = ownerAddress;
-  const relayerApiKey = env.POLY_RELAYER_API_KEY ?? env.RELAYER_API_KEY;
+  const relayerApiKey = nonEmptyEnv(env.POLY_RELAYER_API_KEY) ?? nonEmptyEnv(env.RELAYER_API_KEY);
   if (relayerApiKey) config.relayerApiKey = relayerApiKey;
   if (ownerAddress) config.relayerApiKeyAddress = ownerAddress;
-  const builderApiKey = env.POLY_BUILDER_API_KEY;
-  const builderApiSecret = env.POLY_BUILDER_API_SECRET;
-  const builderPassphrase = env.POLY_BUILDER_PASSPHRASE;
+  const builderApiKey = nonEmptyEnv(env.POLY_BUILDER_API_KEY);
+  const builderApiSecret = nonEmptyEnv(env.POLY_BUILDER_API_SECRET);
+  const builderPassphrase = nonEmptyEnv(env.POLY_BUILDER_PASSPHRASE);
   if (builderApiKey) config.builderApiKey = builderApiKey;
   if (builderApiSecret) config.builderApiSecret = builderApiSecret;
   if (builderPassphrase) config.builderPassphrase = builderPassphrase;
@@ -1816,7 +1833,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function proxyFromEnv(env: Record<string, string | undefined>): string | undefined {
   for (const value of [env.HTTPS_PROXY, env.HTTP_PROXY, env.https_proxy, env.http_proxy]) {
-    if (value) return value;
+    const nonEmpty = nonEmptyEnv(value);
+    if (nonEmpty) return nonEmpty;
   }
   return undefined;
 }
@@ -1991,7 +2009,8 @@ function resolveLedgerFile(args: ParsedArgs, env: Record<string, string | undefi
 
 function resolveDepthAuditFile(args: ParsedArgs, env: Record<string, string | undefined>): string | undefined {
   if (args.depthAuditFile) return args.depthAuditFile;
-  if (env.POLY_DEPTH_AUDIT_FILE) return env.POLY_DEPTH_AUDIT_FILE;
+  const configured = nonEmptyEnv(env.POLY_DEPTH_AUDIT_FILE);
+  if (configured) return configured;
   if ((env.NODE_ENV ?? process.env.NODE_ENV) === "test") return undefined;
   if (args.mode === "live" && booleanEnv(env.POLY_DEPTH_AUDIT_ENABLED) !== false) return "data/live-depth-audit.ndjson";
   return undefined;
@@ -2112,6 +2131,9 @@ async function readJsonFile<T>(file: string): Promise<T> {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
+  if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
+    return { mode: "paper", orderType: "FAK", help: true };
+  }
   const raw: Record<string, string> = {};
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
@@ -2190,8 +2212,9 @@ function nonEmptyEnv(value: string | undefined): string | undefined {
 }
 
 function numberEnv(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const parsed = Number(value);
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 

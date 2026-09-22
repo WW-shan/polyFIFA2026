@@ -218,6 +218,16 @@ function bttsMarket(eventSlug: string, homeTeam: string, awayTeam: string, noTok
 }
 
 describe("CLI", () => {
+  test("--help is read-only and documents the supported modes", async () => {
+    const result = await runCli(["--help"], {});
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("--mode paper|live|status");
+    expect(result.stdout).toContain("--match-file");
+    expect(result.stdout).toContain("--event-slug");
+    expect(result.stdout).toContain("--stake");
+  });
+
   test("paper mode prints a filled JSON trade result", async () => {
     const result = await runCli([
       "--mode", "paper",
@@ -3844,7 +3854,8 @@ describe("CLI", () => {
     ], {
       POLY_DEPOSIT_WALLET_ADDRESS: "0x00000000000000000000000000000000000000bb",
       POLY_PRIVATE_KEY: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      POLY_RELAYER_URL: ""
+      POLY_RELAYER_URL: "",
+      POLY_AUTO_REDEEM_INTERVAL_MS: ""
     }, {
       fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-empty-relayer-2026-06-27", homeTeam: "Empty", awayTeam: "Relayer" }],
       watchSportsUpdates: async () => updates(),
@@ -3855,7 +3866,8 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
     expect(settleRedeemablePositions).toHaveBeenCalledTimes(1);
     expect(settleRedeemablePositions.mock.calls[0]?.[0]).toMatchObject({
-      relayerUrl: "https://relayer-v2.polymarket.com"
+      relayerUrl: "https://relayer-v2.polymarket.com",
+      intervalMs: 60_000
     });
   });
 

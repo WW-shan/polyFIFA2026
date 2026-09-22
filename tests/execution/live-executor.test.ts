@@ -76,6 +76,17 @@ describe("LiveExecutor", () => {
     });
   });
 
+  test("treats blank private key, funder, and boolean settings as unset", () => {
+    const config = liveConfigFromEnv({
+      POLY_PRIVATE_KEY: "   ",
+      POLY_FUNDER_ADDRESS: "   ",
+      POLY_SYNC_BALANCE_ALLOWANCE: "   "
+    });
+    expect(config).not.toHaveProperty("privateKey");
+    expect(config).not.toHaveProperty("funderAddress");
+    expect(config).not.toHaveProperty("syncBalanceAllowance");
+  });
+
   test("rejects invalid numeric live configuration instead of passing NaN downstream", () => {
     expect(() => liveConfigFromEnv({ POLY_CHAIN_ID: "not-a-number" })).toThrow(/POLY_CHAIN_ID/);
     expect(() => liveConfigFromEnv({ POLY_SIGNATURE_TYPE: "9" })).toThrow(/POLY_SIGNATURE_TYPE/);

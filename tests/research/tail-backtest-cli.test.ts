@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -126,6 +126,18 @@ test("runs a real exported archive offline and preserves exact price strings and
     expect(file.bytes).toBe(bytes.length);
     expect(file.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
   }
+});
+
+test("expands an export parent directory into its immediate child archives", async () => {
+  const run = await cli(), first = await archive(), second = await archive(true), parent = await temporary();
+  await rename(first.directory, join(parent, "game-one"));
+  await rename(second.directory, join(parent, "game-two"));
+  const result = await run(["--archive-dir", parent, "--output-dir", join(parent, "report"), "--prices", "0.70", "--windows-seconds", "60"]);
+  expect(result.exitCode, result.stderr).toBe(0);
+  const paths = JSON.parse(result.stdout);
+  const report = JSON.parse(await readFile(paths.reportPath, "utf8"));
+  expect(report.sources).toHaveLength(2);
+  expect(report.sources.map((source: { sourceRunId: string }) => source.sourceRunId).sort()).toEqual(["tail-test", "tail-test-two"]);
 });
 
 test("defaults sport to unknown and supports report capture without creating an output directory", async () => {

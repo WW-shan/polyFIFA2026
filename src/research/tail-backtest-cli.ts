@@ -1,5 +1,5 @@
-import { lstat, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { lstat, readdir, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { backtestTailArchives } from "./tail-backtest.js";
 import { collectTailSettlements, loadTailArchive } from "./tail-backtest-io.js";
@@ -26,6 +26,8 @@ interface ParsedArgs {
 
 const HELP = `Collected-orderbook research: hypothetical resting-limit scenarios, not executed trades or guaranteed profit.
 Usage: tsx src/research/tail-backtest-cli.ts --archive-dir PATH [--archive-dir PATH ...] --output-dir NEW_PATH
+  --archive-dir PATH                   A single archive, or a parent whose immediate
+                                       subdirectories are exported archives
   --sport LABEL                        Applies to all inputs (default: unknown)
   --prices DECIMAL,DECIMAL              Default: 0.50,0.60,0.70,0.80,0.90,0.95,0.97,0.99
   --windows-seconds INTEGER,INTEGER     Default: 60,180,300
@@ -63,6 +65,25 @@ function list(text: string): string[] {
 function number(text: string, flag: string): number {
   if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) || !Number.isFinite(Number(text))) invalid(`${flag} requires a finite number`);
   return Number(text);
+}
+
+async function expandArchiveDirectories(directories: readonly string[]): Promise<string[]> {
+  const expanded: string[] = [];
+  for (const directory of directories) {
+    const path = resolve(directory);
+    let entries;
+    try { entries = await readdir(path, { withFileTypes: true }); }
+    catch { expanded.push(directory); continue; }
+    if (entries.some(entry => entry.name === "manifest.json" && entry.isFile())) {
+      expanded.push(directory);
+      continue;
+    }
+    const children = entries.filter(entry => entry.isDirectory())
+      .map(entry => join(path, entry.name)).sort();
+    if (children.length) expanded.push(...children);
+    else expanded.push(directory);
+  }
+  return expanded;
 }
 
 function parseArgs(args: readonly string[]): ParsedArgs {
@@ -160,7 +181,7 @@ export async function runTailBacktestCli(args: readonly string[], deps: TailBack
     const requestedOutputDirectory = resolve(parsed.outputDirectory);
     await assertNewOutput(requestedOutputDirectory);
     const loaded: LoadedTailArchive[] = [];
-    for (const directory of parsed.archiveDirectories) {
+    for (const directory of await expandArchiveDirectories(parsed.archiveDirectories)) {
       deps.signal?.throwIfAborted();
       try { loaded.push(await loadTailArchive(directory, { sport: parsed.sport })); }
       catch (error) { throw new Error(`TAIL_BACKTEST_ARCHIVE_FAILED: ${directory}: ${String(error)}`, { cause: error }); }

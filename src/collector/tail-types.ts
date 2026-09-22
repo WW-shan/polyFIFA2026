@@ -209,6 +209,10 @@ export interface TailOptions {
   maxLineBytes?: number;
   finishLabelsFile?: string;
   finishFactsFile?: string;
+  /** Durable source identity to record when the replay journal is synthesized. */
+  sourceRunDirectory?: string;
+  /** Copy the finish-facts sidecar into the archive instead of referencing a temporary file. */
+  archiveFinishFacts?: boolean;
   /** Losslessly compact the generated raw-evidence copy after its writer is sealed. */
   compressRawEvents?: boolean;
 }

@@ -54,7 +54,7 @@ npm run collect:restart
 npm run collect:stop
 ```
 
-The status page is **http://127.0.0.1:8765/**. Configuration is in `collector.config.json`; its proxy is specific to this machine. The user LaunchAgent keeps the collector running after the terminal closes, and `collect:start` prevents idle sleep while it runs. Closing the laptop lid, shutting down, losing connectivity, or reaching the 20 GiB disk reserve can still interrupt collection. No raw data is automatically deleted. See [operation and quality rules](docs/continuous-collector.md) before changing machines or storage.
+The status page is **http://127.0.0.1:8765/**. Configuration is in `collector.config.json`; its proxy is specific to this machine. The user LaunchAgent keeps the collector running after the terminal closes, and `collect:start` prevents idle sleep while it runs. Closing the laptop lid, shutting down, losing connectivity, or reaching the 20 GiB disk reserve can still interrupt collection. Compact mode retains finalized SQLite results for 90 days, prunes non-current raw runs after 24 hours, and enforces a 32 GiB tail-store cap; see [operation and quality rules](docs/continuous-collector.md) before changing machines or storage.
 
 The older finite collection commands below remain available for diagnostics:
 
@@ -137,7 +137,7 @@ Expected top-level output includes:
   "strategy": "spread_tight_loss_ge2",
   "outcome": "Spain",
   "line": -2.5,
-  "lossRequiresGoals": 2,
+  "lossRequiresGoals": 3,
   "bestAsk": 0.97
 }
 ```
@@ -147,7 +147,7 @@ Expected top-level output includes:
 ```bash
 npm run cli -- \
   --mode paper \
-  --match-file tests/fixtures/matches/spain-4-0.json \
+  --match-file tests/fixtures/matches/spain-5-0.json \
   --markets-file tests/fixtures/markets/spain-spreads.json \
   --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json \
   --stake 97

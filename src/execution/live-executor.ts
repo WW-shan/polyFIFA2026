@@ -404,7 +404,8 @@ export function liveConfigFromEnv(env: Record<string, string | undefined>): Live
     signatureType: depositWalletAddress ? 3 : integerEnv(env.POLY_SIGNATURE_TYPE, 1, "POLY_SIGNATURE_TYPE", 0, 3)
   };
 
-  if (env.POLY_PRIVATE_KEY) config.privateKey = env.POLY_PRIVATE_KEY;
+  const privateKey = nonEmptyEnv(env.POLY_PRIVATE_KEY);
+  if (privateKey) config.privateKey = privateKey;
   const apiKey = nonEmptyEnv(env.POLY_API_KEY) ?? nonEmptyEnv(env.CLOB_API_KEY);
   const apiSecret = nonEmptyEnv(env.POLY_API_SECRET) ?? nonEmptyEnv(env.CLOB_SECRET);
   const passphrase = nonEmptyEnv(env.POLY_PASSPHRASE) ?? nonEmptyEnv(env.CLOB_PASS_PHRASE);
@@ -413,12 +414,14 @@ export function liveConfigFromEnv(env: Record<string, string | undefined>): Live
   if (passphrase) config.passphrase = passphrase;
   const rpcUrl = nonEmptyEnv(env.POLY_RPC_URL);
   if (rpcUrl) config.rpcUrl = rpcUrl;
-  if (env.POLY_SYNC_BALANCE_ALLOWANCE) config.syncBalanceAllowance = parseBooleanEnv(env.POLY_SYNC_BALANCE_ALLOWANCE);
+  const syncBalanceAllowance = nonEmptyEnv(env.POLY_SYNC_BALANCE_ALLOWANCE);
+  if (syncBalanceAllowance) config.syncBalanceAllowance = parseBooleanEnv(syncBalanceAllowance);
+  const funderAddress = nonEmptyEnv(env.POLY_FUNDER_ADDRESS);
   if (depositWalletAddress) {
     config.depositWalletAddress = depositWalletAddress;
     config.funderAddress = depositWalletAddress;
-  } else if (env.POLY_FUNDER_ADDRESS) {
-    config.funderAddress = env.POLY_FUNDER_ADDRESS;
+  } else if (funderAddress) {
+    config.funderAddress = funderAddress;
   }
 
   return config;

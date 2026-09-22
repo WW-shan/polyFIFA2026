@@ -247,6 +247,18 @@ describe("persistent continuous capture observations", () => {
       archive: { status: "failed", refreshSnapshot: true, retryAtMs: 0 } });
   });
 
+  test("restart preserves a completed conflicting archive for quality review", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    for (const record of fixtureRecords()) state.observe(record);
+    const saved = state.snapshot(), game = saved.games[0]!;
+    game.finishConflict = true; game.finishedAtMs = 310_000; game.finishAnchor = "book-tail"; game.finishFacts = [];
+    game.archive = { status: "complete", runId: "tail-test", attempt: 1, outputDirectory: "/capture/tail.sqlite",
+      priceReadyTokens: 0, strictReadyTokens: 0 };
+    const restored = new ContinuousState("/capture", 8765); restored.restore(saved);
+    expect(restored.snapshot().games[0]).toMatchObject({ finishConflict: true,
+      archive: { status: "complete", error: "conflicting finish evidence; artifact is available but quality is not approved" } });
+  });
+
   test("restart retries a completed archive that recorded no compact rows", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     for (const record of fixtureRecords()) state.observe(record);

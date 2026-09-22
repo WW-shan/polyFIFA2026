@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { exportTail } from "./tail-export.js";
 import type { TailExportResult } from "./tail-export.js";
 import { objectValue } from "./replay-values.js";
@@ -221,7 +221,8 @@ export async function exportCompactMatch(store: CompactTailStore, gameKey: strin
     await writeFile(factsFile, JSON.stringify({ schemaVersion: 1, kind: "tail-finish-facts", runId,
       facts: finishFacts(metadata, coverage, runId, records[0]!.sequence) }) + "\n");
     const archive = await exportTail({ runDirectory: journalDirectory, outputDirectory: resolve(options.outputDirectory),
-      windowSeconds, maxFeedSilenceMs, clockPolicy: "flag-backsteps", compressRawEvents: true, finishFactsFile: factsFile });
+      sourceRunDirectory: dirname(store.databasePath), windowSeconds, maxFeedSilenceMs, clockPolicy: "flag-backsteps",
+      compressRawEvents: true, finishFactsFile: factsFile, archiveFinishFacts: true });
     return { gameKey, journalDirectory, records: records.length, anchorFrames,
       windowComplete: coverage.windowComplete, missingFrontMs: coverage.missingFrontMs,
       largestGapMs: coverage.largestGapMs, finishAnchor: coverage.finishAnchor, archive };

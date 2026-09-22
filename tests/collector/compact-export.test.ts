@@ -73,6 +73,12 @@ describe("compact tail export", () => {
 
     const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
     expect(result.anchorFrames).toBe(4);
+    const manifest = JSON.parse(await readFile(join(result.archive.outputDirectory, "manifest.json"), "utf8"));
+    expect(manifest.sourceRunDirectory).toBe(path);
+    expect(manifest.finishFactsFile).toBe("finish-facts.json");
+    expect(JSON.parse(await readFile(join(result.archive.outputDirectory, "finish-facts.json"), "utf8"))).toMatchObject({
+      schemaVersion: 1, kind: "tail-finish-facts", runId: "compact-game_42"
+    });
     const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
     expect(summary.windows).toHaveLength(1);
     expect(summary.tokens).toHaveLength(2);

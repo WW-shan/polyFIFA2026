@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stat } from "node:fs/promises";
 import { compactJournalStorage } from "./journal-compression.js";
 import { openCompactTailStore } from "./continuous-tail-store.js";
 import { exportCompactMatch } from "./compact-export.js";
@@ -36,6 +37,13 @@ nothing. The collector must be stopped first; an exclusive lock is enforced by
 the collector, not by this command.
 `;
 
+async function existingCompactDataRoot(dataRoot: string): Promise<string> {
+  const resolved = resolve(dataRoot);
+  const databaseStat = await stat(join(resolved, "tail.sqlite")).catch(() => undefined);
+  if (!databaseStat?.isFile()) throw new Error("STORAGE_CLI_INVALID: --data-root has no compact tail.sqlite: " + resolved);
+  return resolved;
+}
+
 export async function runStorageCli(args: readonly string[], options: { signal?: AbortSignal; progress?: (line: string) => void } = {}): Promise<StorageCliResult> {
   if (!args.length || args.includes("--help") || args[0] === "help") return { exitCode: 0, stdout: help, stderr: "" };
   try {
@@ -55,7 +63,11 @@ export async function runStorageCli(args: readonly string[], options: { signal?:
       }
       if (!dataRoot) throw new Error("STORAGE_CLI_INVALID: --data-root is required");
       options.signal?.throwIfAborted();
-      const store = await openCompactTailStore({ dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
+      const resolvedDataRoot = await existingCompactDataRoot(dataRoot);
+      if (await stat(join(resolvedDataRoot, "collector.lock")).catch(() => undefined)) {
+        throw new Error("STORAGE_CLI_INVALID: collector.lock is present; stop the collector before repair-tail");
+      }
+      const store = await openCompactTailStore({ dataRoot: resolvedDataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
         retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3 });
       try {
         const report = store.repairAttribution({ apply });
@@ -79,11 +91,18 @@ export async function runStorageCli(args: readonly string[], options: { signal?:
       if (!dataRoot) throw new Error("STORAGE_CLI_INVALID: --data-root is required");
       if (!outputDirectory) throw new Error("STORAGE_CLI_INVALID: --output-dir is required");
       const windowSeconds = values.get("--window-seconds")?.at(-1);
+      const windowSecondsNumber = windowSeconds === undefined ? undefined : Number(windowSeconds);
+      if (windowSeconds !== undefined && (windowSecondsNumber === undefined || !/^[1-9]\d*$/.test(windowSeconds)
+        || !Number.isSafeInteger(windowSecondsNumber)
+        || windowSecondsNumber < 1 || windowSecondsNumber > 3599)) {
+        throw new Error("STORAGE_CLI_INVALID: --window-seconds must be an integer between 1 and 3599");
+      }
       const limitText = values.get("--limit")?.at(-1);
       const limit = limitText === undefined ? undefined : Number(limitText);
       if (limit !== undefined && (!/^[1-9]\d*$/.test(limitText!) || !Number.isSafeInteger(limit))) throw new Error("STORAGE_CLI_INVALID: --limit must be a positive integer");
       options.signal?.throwIfAborted();
-      const store = await openCompactTailStore({ dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
+      const resolvedDataRoot = await existingCompactDataRoot(dataRoot);
+      const store = await openCompactTailStore({ dataRoot: resolvedDataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
         retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3 });
       try {
         const requested = values.get("--game-key");
@@ -100,7 +119,7 @@ export async function runStorageCli(args: readonly string[], options: { signal?:
               ? (rawIndex ??= await loadRawEventIndex(join(dataRoot, "runs"))).get(gameKey)
               : undefined;
             const result = await exportCompactMatch(store, gameKey, {
-              outputDirectory: directory, ...(windowSeconds === undefined ? {} : { windowSeconds: Number(windowSeconds) }),
+              outputDirectory: directory, ...(windowSecondsNumber === undefined ? {} : { windowSeconds: windowSecondsNumber }),
               ...(fallback === undefined ? {} : { metadataOverride: fallback })
             });
             results.push({ gameKey, outputDirectory: result.archive.outputDirectory, records: result.records,
