@@ -45,8 +45,8 @@ npm run collect:stop
 - 已解析子盘口（每盘胜者、大小分、让盘等）会在 Gamma 翻转 `closed` **之前**先从 CLOB 撤掉订单簿。旧实现把它们当成“批量响应身份不匹配”，每个快照周期都对同一批 token 重新请求、重新记一条 `book_snapshot_batch_error`：实测 4 个 raw run 里有 876 条这类记录、1150 个 token。逐 token 复核证明这些 token 调单 token `/book` 一律返回 404 `No orderbook exists`，且 151 个“既拿到过锚点又被报缺失”的 token 中，**没有一个**是在报缺失之后才拿到锚点的——缺失始终是真实无盘口，不是上游偶发漏发，所以不能加 GET 兜底。现在 `absentBookCooldownMs`（默认 5 分钟）记住这类 token 并暂时移出锚点轮换，同一段缺失期只报告一次；token 重新拿到 book 后立即清除记录，之后的再次缺失会重新报告。这既省掉无意义的上游配额，也不再往 raw run 里写重复诊断。
 - 超上限时的裁剪按**每场实际占用**估算要释放的字节，再删最旧的场次，最后 `PRAGMA incremental_vacuum` 真正把页还给系统。旧实现把 `databaseBytes()` 放在删除循环里当停止条件：`auto_vacuum=INCREMENTAL` 下删行只把页放进 freelist，文件大小在提交和回收前根本不降，于是条件永远不成立，**一次超限就把整库删空**（实测 5 场全删）。现在按 `databaseBytes()/存活行数` 摊到每场，删够就停，最多 4 轮收敛。
 - `window_complete` / `missing_front_ms` 衡量的是**有没有证据**，不是"有没有行"。连续相同的 payload 会被 keep-alive 合并成每 60 秒一条，于是窗口开头常常没有行——但那条被合并的帧与它之前存下的帧逐字节相同，说明盘口在这段时间根本没动，ask ladder 照样能从窗口起点重建。现在 store 记录每条合并链覆盖的区间 `[上一个已存帧, 最后一条被合并帧]`，只要这个区间跨过窗口起点就判定窗口完整。实测 71 场里有 62 场被标成 `window_complete=0`，其中 **54 场属于这种误判**（行密度 ≤1.5 行/秒，是合并造成的），只有 8 场是真的缺数据（6 场还是修复前的 `finish_anchor=NULL` 旧行）。按 `window_complete` 过滤样本会白白扔掉约四分之三的可用比赛。
-- `maxTailStoreBytes=8 GiB` 是 SQLite 上限，`tailRetentionDays=30` 是最终结果保留期；超过上限先删除最旧结果并增量回收空间。
-- `rawRunRetentionHours`（当前 6 小时）只约束 compact 模式下的 raw run：帧证据在 SQLite 里，raw run 只是发现／审计上下文，按小时清理而不是按 `tailRetentionDays` 的 30 天清理，否则每天几十 GB 的 metadata 会把磁盘吃满。关闭 compact 模式时该值不生效，raw run 仍需保留 `tailRetentionDays`，因为旧的导出路径直接读它。
+- `maxTailStoreBytes=32 GiB` 是 SQLite 上限，`tailRetentionDays=90` 是最终结果保留期；超过上限先删除最旧结果并增量回收空间。
+- `rawRunRetentionHours`（当前 24 小时）只约束 compact 模式下的 raw run：帧证据在 SQLite 里，raw run 只是发现／审计上下文，按小时清理而不是按 `tailRetentionDays` 的 90 天清理，否则每天几十 GB 的 metadata 会把磁盘吃满。关闭 compact 模式时该值不生效，raw run 仍需保留 `tailRetentionDays`，因为旧的导出路径直接读它。
 - 维护任务还会删除超过保留期、且不是当前 run 的旧 raw run。系统剩余空间低于 `minFreeBytes` 时仍会暂停，清理失败不会静默丢数据。
 - `collect:stop` 会在 `dataRoot/.collector-stopped` 留下标记，`collect:start` 清除它。健康守护据此区分"人为停"和"自己挂了"：有标记时不重启、也不再刷 `mode_not_collecting` / `status_stale`。旧守护分不清两者，`collect:stop` 之后 300 秒就被自动拉起来，而且在等待期间每 5 秒写一条告警——`repair-tail` 的文档恰恰要求先 `collect:stop`，会被这个自动重启打断。
 
@@ -90,7 +90,7 @@ logs/                     后台服务标准输出与错误日志
 
 Checkpoint 记录明确的 `checkpoint_end`，它只代表一次不可变的观测截止点，**不是采集器停机或比赛结束**。旧 NDJSON 模式仍可从 checkpoint 回放；compact 模式不为市场 raw 生成全量 checkpoint，避免把同一行情复制到 runs、checkpoints 和 exports。
 
-compact 模式有自动清理策略：SQLite 默认上限 **8 GiB**，结果保留 30 天，旧 raw run 也按保留期清理；系统剩余不足 **20 GiB** 时仍停止网络采集并标为 `paused_disk`。空间恢复后用新 run 继续。清理只针对已过期且非当前 run 的数据，不删除当前滚动窗口。
+compact 模式有自动清理策略：SQLite 当前上限 **32 GiB**，结果保留 90 天，旧 raw run 也按保留期清理；系统剩余不足 **20 GiB** 时仍停止网络采集并标为 `paused_disk`。空间恢复后用新 run 继续。清理只针对已过期且非当前 run 的数据，不删除当前滚动窗口。
 
 触发暂停后，要恢复到至少 **21 GiB** 空闲空间才会自动恢复，以免在阈值附近反复启停。`checkpoints/` 与 `runs/` 中有共享同一 inode 的硬链接，`du` 会把共享字节计到先遍历的目录；不能把 checkpoint 的目录大小当作可直接清理的重复副本。
 
