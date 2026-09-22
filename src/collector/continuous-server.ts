@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { AddressInfo, Socket } from "node:net";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
-import type { ContinuousStatus } from "./continuous-state.js";
+import { compactContinuousStatus, type CompactContinuousStatus, type ContinuousStatus } from "./continuous-state.js";
 import { artifactTypes, ContinuousArchiveCatalog, openArtifact, type ArtifactName, type HistoricalArchive } from "./continuous-archive-catalog.js";
 
 // Only these constant filenames enter the script. All runtime metadata arrives as JSON
@@ -134,7 +134,7 @@ const browserScript = String.raw`
   async function refresh() {
     if (Date.now() - archiveAttemptAt >= 30000) void refreshArchives();
     try {
-      const response = await fetch("/api/status", { cache: "no-store", mode: "same-origin", credentials: "same-origin", redirect: "error", signal: AbortSignal.timeout(5000) });
+      const response = await fetch("/api/status?view=compact", { cache: "no-store", mode: "same-origin", credentials: "same-origin", redirect: "error", signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error("Status unavailable");
       const status = await response.json();
       latest = status;
@@ -266,7 +266,7 @@ function respond(request: IncomingMessage, response: ServerResponse, code: numbe
 
 /** A read-only, owned listener: no collector controls, configuration reads or network clients. */
 export async function startContinuousServer(options: {
-  port: number; dataRoot: string; getStatus: () => ContinuousStatus;
+  port: number; dataRoot: string; getStatus: (view?: "full" | "compact") => ContinuousStatus | CompactContinuousStatus;
 }): Promise<{ port: number; close(): Promise<void> }> {
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) throw new RangeError("Invalid status port");
   const exportsRoot = resolve(options.dataRoot, "exports");
@@ -299,7 +299,14 @@ export async function startContinuousServer(options: {
     }
     if (path === "/api/status") {
       try {
-        const status = options.getStatus();
+        const query = new URLSearchParams((request.url ?? "").split("?")[1]);
+        const view = query.get("view") ?? "full";
+        if ((view !== "full" && view !== "compact") || query.getAll("view").length > 1) {
+          respond(request, response, 400, "Invalid status view\n");
+          return;
+        }
+        const current = options.getStatus(view);
+        const status = view === "compact" ? compactContinuousStatus(current) : current;
         const games = status.games.map(game => {
           const rawEventsFile = game.archive?.outputDirectory && archives.cachedRawEventsFile(game.archive.outputDirectory);
           return rawEventsFile ? { ...game, archive: { ...game.archive, rawEventsFile } } : game;
@@ -317,8 +324,8 @@ export async function startContinuousServer(options: {
         respond(request, response, 400, "Invalid archive page\n"); return;
       }
       void archives.page(Number(offset), Number(limit)).then(page => {
-        let current: ContinuousStatus | undefined;
-        try { current = options.getStatus(); } catch { /* Disk history remains available. */ }
+        let current: CompactContinuousStatus | undefined;
+        try { current = compactContinuousStatus(options.getStatus("compact")); } catch { /* Disk history remains available. */ }
         const games = new Map(current?.games.map(game => [game.key, game]));
         respond(request, response, 200, JSON.stringify({ ...page, liveStatusAvailable: current !== undefined,
           entries: page.entries.map(entry => ({ ...entry, games: entry.games.map(game => {

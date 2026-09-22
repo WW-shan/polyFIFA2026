@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { promisify } from "node:util";
 import { continuousConfig, loadContinuousConfig, type ContinuousConfig } from "./continuous-config.js";
-import { readCaptureState } from "./continuous-storage.js";
+import { readCaptureHeartbeat, readCaptureState } from "./continuous-storage.js";
 
 export interface CollectorServiceOptions {
   configPath?: string;
@@ -392,11 +392,26 @@ export async function collectorServiceStatus(
       || !Number.isSafeInteger(state.port) || state.port < 1 || state.port > 65535) throw new Error();
     const now = ctx.now();
     const validTime = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= now;
-    if (!validTime(state.updatedAtMs) || (state.lastRecordAtMs !== null && !validTime(state.lastRecordAtMs))) throw new Error();
+    let updatedAtMs = state.updatedAtMs;
+    try {
+      const heartbeat = await readCaptureHeartbeat(result.dataRoot);
+      if (heartbeat) {
+        if (heartbeat.instanceId !== state.instanceId || heartbeat.pid !== state.pid) {
+          errors.push("CONTINUOUS_SERVICE_HEARTBEAT_INVALID: saved heartbeat does not match collector state");
+        } else if (!validTime(heartbeat.updatedAtMs)) {
+          errors.push("CONTINUOUS_SERVICE_HEARTBEAT_INVALID: saved heartbeat timestamp is invalid");
+        } else {
+          updatedAtMs = Math.max(updatedAtMs, heartbeat.updatedAtMs);
+        }
+      }
+    } catch {
+      errors.push("CONTINUOUS_SERVICE_HEARTBEAT_INVALID: unable to read a valid collector heartbeat");
+    }
+    if (!validTime(updatedAtMs) || (state.lastRecordAtMs !== null && !validTime(state.lastRecordAtMs))) throw new Error();
     result.statePid = state.pid;
     result.url = `http://127.0.0.1:${state.port}`;
-    result.updatedAtMs = state.updatedAtMs;
-    result.stateAgeMs = now - state.updatedAtMs;
+    result.updatedAtMs = updatedAtMs;
+    result.stateAgeMs = now - updatedAtMs;
     result.lastRecordAtMs = state.lastRecordAtMs;
     result.dataAgeMs = state.lastRecordAtMs === null ? null : now - state.lastRecordAtMs;
     const activeMode = CURRENT_MODES.has(state.mode);

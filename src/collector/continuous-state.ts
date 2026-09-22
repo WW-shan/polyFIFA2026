@@ -150,6 +150,53 @@ export interface ContinuousStatus {
   compression?: CompressionState;
 }
 
+export type CompactArchiveState = Pick<ArchiveState,
+  "status" | "attempt" | "outputDirectory" | "error" | "priceReadyTokens" | "strictReadyTokens">;
+export interface CompactCapturedGame {
+  key: string; title: string; sport: string | null; phase: CapturedGame["phase"]; finishConflict: boolean;
+  tokenIds: string[]; bookUpdates: number; trades: number; stateObservations: number; lastBookAtMs: number | null;
+  finishedAtMs: number | null; finishAnchor?: FinishAnchor | null;
+  archive?: CompactArchiveState;
+}
+export interface CompactContinuousStatus extends Omit<ContinuousStatus, "games"> {
+  games: CompactCapturedGame[];
+}
+
+function compactArchive(archive: ArchiveState | CompactArchiveState): CompactArchiveState {
+  return {
+    status: archive.status, attempt: archive.attempt,
+    ...(archive.outputDirectory === undefined ? {} : { outputDirectory: archive.outputDirectory }),
+    ...(archive.error === undefined ? {} : { error: archive.error }),
+    ...(archive.priceReadyTokens === undefined ? {} : { priceReadyTokens: archive.priceReadyTokens }),
+    ...(archive.strictReadyTokens === undefined ? {} : { strictReadyTokens: archive.strictReadyTokens })
+  };
+}
+
+function compactGame(game: CapturedGame | CompactCapturedGame): CompactCapturedGame {
+  return {
+    key: game.key, title: game.title, sport: game.sport, phase: game.phase, finishConflict: game.finishConflict,
+    tokenIds: [...game.tokenIds], bookUpdates: game.bookUpdates, trades: game.trades,
+    stateObservations: game.stateObservations, lastBookAtMs: game.lastBookAtMs,
+    finishedAtMs: game.finishedAtMs, ...(game.finishAnchor === undefined ? {} : { finishAnchor: game.finishAnchor }),
+    ...(game.archive ? { archive: compactArchive(game.archive) } : {})
+  };
+}
+
+/** Project a status snapshot down to the fields the local dashboard and archive join need. */
+export function compactContinuousStatus(status: ContinuousStatus | CompactContinuousStatus): CompactContinuousStatus {
+  return {
+    ...status,
+    games: status.games.map(compactGame),
+    connections: status.connections.map(connection => ({
+      ...connection,
+      ...(connection.gameKeys ? { gameKeys: [...connection.gameKeys] } : {})
+    })),
+    errors: status.errors.map(error => ({ ...error })),
+    ...(status.compactStorage ? { compactStorage: { ...status.compactStorage } } : {}),
+    ...(status.compression ? { compression: { ...status.compression } } : {})
+  };
+}
+
 /**
  * Tokens a `/books` batch response actually carried.
  *
@@ -644,12 +691,19 @@ export class ContinuousState {
       for (const id of old.eventIds) this.events.delete(id);
     }
   }
-  snapshot(): ContinuousStatus & { compression: CompressionState } {
-    return JSON.parse(JSON.stringify({ schemaVersion: 1, instanceId: this.instanceId, pid: process.pid, startedAtMs: this.startedAtMs,
+  private currentStatus(): ContinuousStatus & { compression: CompressionState } {
+    return { schemaVersion: 1, instanceId: this.instanceId, pid: process.pid, startedAtMs: this.startedAtMs,
       updatedAtMs: this.updatedAtMs, stateStaleAfterMs: this.stateStaleAfterMs, dataRoot: this.dataRoot, port: this.port, mode: this.mode, runId: this.runId, runDirectory: this.runDirectory,
       receivedRecords: this.receivedRecords, lastRecordAtMs: this.lastRecordAtMs, freeBytes: this.freeBytes, rawBytes: this.rawBytes,
       queuedBytes: this.queuedBytes, desiredTokens: this.desiredTokens, games: [...this.games.values()], connections: [...this.connections.values()], errors: this.errors,
-      ...(this.compactStorage ? { compactStorage: this.compactStorage } : {}), compression: this.compression })) as ContinuousStatus & { compression: CompressionState };
+      ...(this.compactStorage ? { compactStorage: this.compactStorage } : {}), compression: this.compression };
+  }
+  snapshot(): ContinuousStatus & { compression: CompressionState };
+  snapshot(view: "full"): ContinuousStatus & { compression: CompressionState };
+  snapshot(view: "compact"): CompactContinuousStatus;
+  snapshot(view: "full" | "compact" = "full"): ContinuousStatus & { compression: CompressionState } | CompactContinuousStatus {
+    const status = this.currentStatus();
+    return view === "compact" ? compactContinuousStatus(status) : JSON.parse(JSON.stringify(status)) as ContinuousStatus & { compression: CompressionState };
   }
   restore(saved: ContinuousStatus): void {
     if (saved.schemaVersion !== 1 || !Array.isArray(saved.games)) throw new Error("CAPTURE_STATE_INVALID");

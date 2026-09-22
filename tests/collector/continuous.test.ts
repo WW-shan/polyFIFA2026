@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -6,7 +6,7 @@ import { createCollector, type CollectorRuntime, type CollectorStreamLike } from
 import { continuousConfig } from "../../src/collector/continuous-config.js";
 import { ContinuousCollector } from "../../src/collector/continuous.js";
 import { ContinuousState } from "../../src/collector/continuous-state.js";
-import { writeCaptureState } from "../../src/collector/continuous-storage.js";
+import { readCaptureHeartbeat, writeCaptureState } from "../../src/collector/continuous-storage.js";
 import { normalizeCollectorEvent } from "../../src/collector/catalog.js";
 import { createJournal } from "../../src/collector/journal.js";
 import { readJournalRecords } from "../../src/collector/replay.js";
@@ -29,6 +29,33 @@ test("startup refuses corrupt state without overwriting its evidence", async () 
   await expect(manager.start()).rejects.toThrow();
   await manager.stop();
   expect(await readFile(join(config.dataRoot, "state.json"), "utf8")).toBe("broken-state");
+});
+
+test("volatile progress refreshes only the heartbeat while structural state rewrites the snapshot", async () => {
+  const path = await root();
+  const now = Date.now();
+  const config = continuousConfig({ dataRoot: join(path, "capture"), minFreeBytes: 100_000,
+    pulseIntervalMs: 100_000, compressionEnabled: false }, path);
+  let runtime: CollectorRuntime | undefined;
+  const manager = new ContinuousCollector(config, {
+    now: () => now, diskBytes: async () => 1_000_000, startServer: noServer,
+    createCollector: (options, deps) => (runtime = createCollector(options, { ...deps,
+      discover: async () => [], request: async () => ({}), createStreams: emptyStreams }))
+  });
+  try {
+    await manager.start(); await until(() => runtime?.status === "running");
+    manager.state.observe(journalRecord(1, now, "gamma", "event_metadata", eventMetadata(0)));
+    manager.state.observe(journalRecord(2, now + 1, "clob", "ws_message", book("A"), "clob"));
+    await manager.pulse();
+    const before = await lstat(join(config.dataRoot, "state.json"));
+    manager.state.observe(journalRecord(3, now + 2, "clob", "ws_message", book("A", "0.4", "0.6", now + 2), "clob"));
+    await manager.pulse();
+    expect((await lstat(join(config.dataRoot, "state.json"))).ino).toBe(before.ino);
+
+    manager.state.issue("test", "business state changed", now);
+    await manager.pulse();
+    expect((await lstat(join(config.dataRoot, "state.json"))).ino).not.toBe(before.ino);
+  } finally { await manager.stop(); }
 });
 
 test.each(["runs", "checkpoints"])("startup rejects a symlinked %s parent without using its target", async kind => {
@@ -722,7 +749,7 @@ test("startup prunes stale restored games using the discovery horizon", async ()
   }
 });
 
-test("only actual state publication advances supervisor freshness", async () => {
+test("heartbeat advances supervisor freshness without rewriting unchanged state", async () => {
   const path = await root(), config = continuousConfig({ dataRoot: join(path, "capture"), minFreeBytes: 100_000, pulseIntervalMs: 100_000 }, path);
   let now = 1000;
   const manager = new ContinuousCollector(config, { now: () => now, diskBytes: async () => 0, startServer: noServer });
@@ -733,7 +760,8 @@ test("only actual state publication advances supervisor freshness", async () => 
     expect(manager.state.snapshot().updatedAtMs).toBe(1000);
     await manager.pulse();
     expect(manager.state.snapshot().updatedAtMs).toBe(2000);
-    expect(JSON.parse(await readFile(join(config.dataRoot, "state.json"), "utf8")).updatedAtMs).toBe(2000);
+    expect(JSON.parse(await readFile(join(config.dataRoot, "state.json"), "utf8")).updatedAtMs).toBe(1000);
+    expect(await readCaptureHeartbeat(config.dataRoot)).toMatchObject({ updatedAtMs: 2000 });
     now = 3000;
     expect(manager.state.snapshot().updatedAtMs).toBe(2000);
   } finally { await manager.stop(); }

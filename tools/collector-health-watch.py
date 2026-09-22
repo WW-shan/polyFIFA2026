@@ -105,7 +105,7 @@ class HealthWatch:
 
     # ---------------------------------------------------------------- sources
     def api_status(self) -> dict:
-        url = f"http://127.0.0.1:{self.port}/api/status"
+        url = f"http://127.0.0.1:{self.port}/api/status?view=compact"
         try:
             with urllib.request.urlopen(url, timeout=10) as response:
                 return json.loads(response.read().decode("utf-8"))

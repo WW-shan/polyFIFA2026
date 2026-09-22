@@ -11,7 +11,8 @@ import { runTailExport } from "./continuous-export.js";
 import { runJournalCompression } from "./continuous-compression.js";
 import { sealJournalSnapshot } from "./sealed-journal.js";
 import { startContinuousServer } from "./continuous-server.js";
-import { acquireCaptureLock, availableDiskBytes, pruneRawRunDirectories, rawRunBytes, readCaptureState, writeCaptureState } from "./continuous-storage.js";
+import { acquireCaptureLock, availableDiskBytes, captureStateFingerprint, pruneRawRunDirectories, rawRunBytes,
+  readCaptureState, writeCaptureHeartbeat, writeCaptureState } from "./continuous-storage.js";
 import type { JsonRequester, JournalRecord, RecordInput } from "./types.js";
 import { metadataFromRecord } from "./tail-context.js";
 import { CompactTailStore, openCompactTailStore } from "./continuous-tail-store.js";
@@ -48,6 +49,8 @@ export class ContinuousCollector {
   private stopTask: Promise<void> | undefined;
   private pulseTask: Promise<void> | undefined;
   private persistence: Promise<void> = Promise.resolve();
+  private persistedFingerprint: string | undefined;
+  private lastStateWriteAtMs: number | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private lock: Awaited<ReturnType<typeof acquireCaptureLock>> | undefined;
   private server: Awaited<ReturnType<typeof startContinuousServer>> | undefined;
@@ -109,7 +112,8 @@ export class ContinuousCollector {
       }
     }
     this.stateReady = true;
-    this.server = await (this.dependencies.startServer ?? startContinuousServer)({ port: this.config.port, dataRoot: this.config.dataRoot, getStatus: () => this.state.snapshot() });
+    this.server = await (this.dependencies.startServer ?? startContinuousServer)({ port: this.config.port, dataRoot: this.config.dataRoot,
+      getStatus: view => view === "compact" ? this.state.snapshot("compact") : this.state.snapshot() });
     this.cancellation.signal.throwIfAborted();
     await this.pulse();
     this.cancellation.signal.throwIfAborted();
@@ -542,9 +546,18 @@ export class ContinuousCollector {
   }
   private persist(): Promise<void> {
     if (!this.lock || !this.stateReady) return Promise.resolve();
-    const work = this.persistence.catch(() => {}).then(() => {
-      this.state.markUpdated(this.now());
-      return writeCaptureState(this.config.dataRoot, this.state.snapshot());
+    const work = this.persistence.catch(() => {}).then(async () => {
+      const now = this.now();
+      this.state.markUpdated(now);
+      const status = this.state.snapshot();
+      const fingerprint = captureStateFingerprint(status);
+      const refreshDue = this.lastStateWriteAtMs === undefined || now - this.lastStateWriteAtMs >= 60_000;
+      if (refreshDue || fingerprint !== this.persistedFingerprint) {
+        await writeCaptureState(this.config.dataRoot, status);
+        this.persistedFingerprint = fingerprint;
+        this.lastStateWriteAtMs = now;
+      }
+      await writeCaptureHeartbeat(this.config.dataRoot, status);
     });
     this.persistence = work; return work;
   }

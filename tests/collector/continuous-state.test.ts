@@ -344,6 +344,25 @@ test("status reads cannot refresh the last published progress timestamp", () => 
   } finally { clock.mockRestore(); }
 });
 
+test("compact snapshots retain dashboard fields and omit replay-only game detail", () => {
+  const state = new ContinuousState("/capture", 8765);
+  state.setRun("tail-test", "/capture/runs/tail-test");
+  for (const record of fixtureRecords().slice(0, 11)) state.observe(record);
+
+  const full = state.snapshot();
+  const compact = state.snapshot("compact");
+  expect(full.games[0]).toHaveProperty("eventMetadata");
+  expect(compact.games[0]).not.toHaveProperty("eventMetadata");
+  expect(compact.games[0]).not.toHaveProperty("sources");
+  expect(compact.games[0]).not.toHaveProperty("sourceFirstSequences");
+  expect(compact.games[0]).toMatchObject({
+    key: "game:123", title: expect.any(String), sport: "soccer", phase: "watching",
+    finishConflict: false, tokenIds: ["A", "B"], bookUpdates: expect.any(Number),
+    trades: expect.any(Number), stateObservations: expect.any(Number), lastBookAtMs: expect.any(Number),
+    finishedAtMs: expect.any(Number)
+  });
+});
+
 test("compact restore drops stale hot-state entries regardless of phase", () => {
   const source = new ContinuousState("/capture", 8765);
   source.setRun("old", "/capture/runs/old");

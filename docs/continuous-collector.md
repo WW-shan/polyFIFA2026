@@ -72,6 +72,7 @@ npm run collect:stop
 
 ```text
 state.json                 当前运行及热缓存内的比赛状态，不是完整历史归档目录
+state-heartbeat.json       112 B 左右的进程心跳；只含 instanceId/pid/updatedAtMs
 tail.sqlite                去重后的滚动窗口与终场前 180 秒 + 1 秒参考结果库
 collector.lock             当前写入实例的独占锁
 runs/<runId>/*.ndjson[.gz]  compact 模式下主要是控制/metadata；旧模式才是全量原始记录
@@ -462,9 +463,15 @@ schema v5 之前 finalize 的场次没有 `metadata_json`，导出时从 raw run
 
 ### 9. 本轮核查后确认不是问题的点
 
-- `continuous-server.ts /api/status`：实测 973 个 games、约 4.93 MB，连续 5 次请求耗时 15–33 ms，当前不是性能故障。
+- `continuous-server.ts /api/status`：旧版本实测 973 个 games、约 4.93 MB，虽然本地请求耗时不高，但 dashboard 每 2 秒轮询仍会放大带宽与 JSON 序列化开销；已由 §10 的 compact view 替代。
 - `finishEvidence === undefined`：旧归档兼容字段，未贸然改写。
 - `tail-backtest-io` 固定四文件输入：manifest 负责完整性和哈希校验，当前输入契约正确。
+
+### 10. 状态写放大与 dashboard 响应瘦身（2026-09-22 修复）
+
+`ContinuousCollector.persist()` 不再每个 pulse 都把完整热状态写入 `state.json`。写盘改为“恢复所需结构指纹变化”或“距上次全量写盘 60 秒”触发；高频变化的 `receivedRecords`、`lastRecordAtMs`、盘口计数和最后盘口时间只由心跳承载。`state-heartbeat.json` 固定只写 `instanceId` / `pid` / `updatedAtMs`，`collect:status` 会在身份匹配后用它判断进程新鲜度。
+
+`/api/status?view=compact` 新增为 dashboard、健康守护、live watcher 和 `/api/archives` 使用的精简视图，只保留这些调用方需要的字段；原 `/api/status` 全量契约保留。2026-09-22 线上重启后实测 91 场比赛时，compact 响应 **140,557 B**，全量响应 **714,259 B**；`state.json` 约 698 KB，连续 30 秒保持同一 inode，而 112 B 心跳每 5 秒更新，并观测到 60 秒全量刷新。结构性状态变化仍会立即写完整快照。
 
 ### 本轮验证证据
 

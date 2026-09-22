@@ -72,7 +72,7 @@ class LiveWatch:
     # ------------------------------------------------------------------ io
     def api(self) -> dict | None:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/status", timeout=5) as response:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/status?view=compact", timeout=5) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError):
             try:

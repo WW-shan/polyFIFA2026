@@ -6,6 +6,7 @@ import {
   collectorServiceStatus, startCollectorService, stopCollectorService,
   type CollectorServiceDependencies, type CollectorServiceOptions
 } from "../../src/collector/continuous-service.js";
+import { writeCaptureHeartbeat } from "../../src/collector/continuous-storage.js";
 import type { ContinuousStatus } from "../../src/collector/continuous-state.js";
 
 const label = "com.polyfifa.public-collector";
@@ -388,6 +389,28 @@ describe("read-only continuous service status", () => {
     expect(input.calls.map(call => call.args)).toEqual([["print", target]]);
     expect((await lstat(join(input.dataRoot, "state.json"))).mtimeMs).toBe(before.mtimeMs);
     expect(await readFile(input.plistPath, "utf8")).toBe(plist);
+  });
+
+  test("uses a matching heartbeat when the full snapshot has not changed", async () => {
+    const input = await fixture({ pulseIntervalMs: 1_000 });
+    await startCollectorService(input.options, input.deps);
+    const state = await saveState(input, { updatedAtMs: 10_000 });
+    await writeCaptureHeartbeat(input.dataRoot, { instanceId: state.instanceId, pid: state.pid, updatedAtMs: 49_000 });
+
+    expect(await collectorServiceStatus(input.options, input.deps)).toMatchObject({
+      updatedAtMs: 49_000, stateAgeMs: 1_000, stale: false
+    });
+  });
+
+  test("does not trust a heartbeat from another collector instance", async () => {
+    const input = await fixture({ pulseIntervalMs: 1_000 });
+    await startCollectorService(input.options, input.deps);
+    const state = await saveState(input, { updatedAtMs: 10_000 });
+    await writeCaptureHeartbeat(input.dataRoot, { instanceId: "other-instance", pid: state.pid, updatedAtMs: 49_000 });
+
+    const result = await collectorServiceStatus(input.options, input.deps);
+    expect(result).toMatchObject({ updatedAtMs: 10_000, stateAgeMs: 40_000, stale: true });
+    expect(result.errors.join(" ")).toContain("HEARTBEAT");
   });
 
   test("reports missing state and an absent job without creating directories", async () => {

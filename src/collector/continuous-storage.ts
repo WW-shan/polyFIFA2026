@@ -6,6 +6,7 @@ import { join, relative, resolve } from "node:path";
 import type { ContinuousStatus } from "./continuous-state.js";
 
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
+const MAX_HEARTBEAT_BYTES = 4096;
 const MAX_LOCK_BYTES = 4096;
 const MAX_SAFE_BYTES = BigInt(Number.MAX_SAFE_INTEGER);
 const LOCK_KIND = "poly-fifa-continuous-collector";
@@ -112,6 +113,70 @@ export async function readCaptureState(dataRoot: string): Promise<ContinuousStat
   }
   // Game restoration/validation belongs to ContinuousState, not the file layer.
   return value as ContinuousStatus;
+}
+
+export interface CaptureHeartbeat {
+  schemaVersion: 1;
+  instanceId: string;
+  pid: number;
+  updatedAtMs: number;
+}
+
+export async function writeCaptureHeartbeat(
+  dataRoot: string,
+  heartbeat: Pick<ContinuousStatus, "instanceId" | "pid" | "updatedAtMs">
+): Promise<void> {
+  const content = JSON.stringify({ schemaVersion: 1, instanceId: heartbeat.instanceId,
+    pid: heartbeat.pid, updatedAtMs: heartbeat.updatedAtMs }) + "\n";
+  const directory = resolve(dataRoot);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const pending = join(directory, `.state-heartbeat.json.${randomUUID()}.tmp`);
+  const stamp = await writeExclusiveFile(pending, content);
+  try {
+    await rename(pending, join(directory, "state-heartbeat.json"));
+  } catch (error) {
+    await unlinkSameFile(pending, stamp).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function readCaptureHeartbeat(dataRoot: string): Promise<CaptureHeartbeat | undefined> {
+  const saved = await readBoundedFile(join(dataRoot, "state-heartbeat.json"), MAX_HEARTBEAT_BYTES, "CAPTURE_HEARTBEAT");
+  if (!saved) return undefined;
+  const value: unknown = JSON.parse(saved.text);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("CAPTURE_HEARTBEAT_INVALID");
+  const heartbeat = value as Partial<CaptureHeartbeat>;
+  if (heartbeat.schemaVersion !== 1 || typeof heartbeat.instanceId !== "string"
+    || !Number.isSafeInteger(heartbeat.pid) || (heartbeat.pid ?? 0) <= 0
+    || !Number.isSafeInteger(heartbeat.updatedAtMs) || (heartbeat.updatedAtMs ?? -1) < 0) {
+    throw new Error("CAPTURE_HEARTBEAT_INVALID");
+  }
+  return heartbeat as CaptureHeartbeat;
+}
+
+/**
+ * Fingerprint the state that matters for restart recovery.
+ *
+ * Counters and last-activity timestamps change on every feed message and would
+ * otherwise force a full 5+ MB snapshot write every pulse. They are refreshed
+ * by the periodic full write; the heartbeat carries liveness in between.
+ */
+export function captureStateFingerprint(status: ContinuousStatus): string {
+  return JSON.stringify({
+    schemaVersion: status.schemaVersion, instanceId: status.instanceId, pid: status.pid, startedAtMs: status.startedAtMs,
+    stateStaleAfterMs: status.stateStaleAfterMs, dataRoot: status.dataRoot, port: status.port, mode: status.mode,
+    runId: status.runId, runDirectory: status.runDirectory, errors: status.errors,
+    games: status.games.map(game => ({
+      key: game.key, title: game.title, sport: game.sport, gameId: game.gameId,
+      eventIds: game.eventIds, eventSlugs: game.eventSlugs, tokenIds: game.tokenIds, marketIds: game.marketIds,
+      firstSeenAtMs: game.firstSeenAtMs, firstBookAtMs: game.firstBookAtMs,
+      lastBookRunId: game.lastBookRunId, lastActiveBookRunId: game.lastActiveBookRunId,
+      finishedAtMs: game.finishedAtMs, finishAnchor: game.finishAnchor, finishConflict: game.finishConflict,
+      retiredEventIds: game.retiredEventIds, eventMetadata: game.eventMetadata, phase: game.phase,
+      sources: game.sources, sourceFirstSequences: game.sourceFirstSequences, finishRunId: game.finishRunId,
+      finishRevision: game.finishRevision, finishFacts: game.finishFacts, archive: game.archive
+    }))
+  });
 }
 
 async function readLock(path: string): Promise<{ record: LockRecord; stamp: Stats; text: string } | undefined> {

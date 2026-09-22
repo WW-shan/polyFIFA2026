@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ContinuousStatus } from "../../src/collector/continuous-state.js";
 import {
-  acquireCaptureLock, availableDiskBytes, pruneRawRunDirectories, rawRunBytes, readCaptureState, writeCaptureState
+  acquireCaptureLock, availableDiskBytes, pruneRawRunDirectories, rawRunBytes, readCaptureHeartbeat,
+  readCaptureState, writeCaptureHeartbeat, writeCaptureState
 } from "../../src/collector/continuous-storage.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -94,6 +95,22 @@ describe("continuous capture state storage", () => {
     expect((await lstat(root)).mode & 0o777).toBe(0o700);
     expect((await lstat(join(parent, "nested"))).mode & 0o777).toBe(0o700);
     expect(await readdir(root)).toEqual(["state.json"]);
+  });
+
+  test("round trips a private heartbeat without replacing the full state snapshot", async () => {
+    const root = await temporaryRoot(), initial = status(root);
+    await writeCaptureState(root, initial);
+    const before = await lstat(join(root, "state.json"));
+
+    await writeCaptureHeartbeat(root, { ...initial, updatedAtMs: 300 });
+
+    expect(await readCaptureHeartbeat(root)).toEqual({
+      schemaVersion: 1, instanceId: initial.instanceId, pid: initial.pid, updatedAtMs: 300
+    });
+    expect(await readCaptureState(root)).toEqual(initial);
+    expect((await lstat(join(root, "state.json"))).ino).toBe(before.ino);
+    expect((await lstat(join(root, "state-heartbeat.json"))).mode & 0o777).toBe(0o600);
+    expect((await lstat(join(root, "state-heartbeat.json"))).size).toBeLessThan(256);
   });
 
   test("keeps the old snapshot readable until the temporary file is synced", async () => {

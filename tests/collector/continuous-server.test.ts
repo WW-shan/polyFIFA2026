@@ -119,7 +119,7 @@ async function openDashboard(server: StatusServer, now = () => 20_000) {
     AbortSignal,
     setTimeout: (callback: () => unknown, delay: number) => { timers.push(callback); delays.push(delay); return timers.length; },
     fetch: async (path: string, init: RequestInit) => {
-      expect(path === "/api/status" || path.startsWith("/api/archives?")).toBe(true);
+      expect(path === "/api/status?view=compact" || path.startsWith("/api/archives?")).toBe(true);
       requests.push({ path, init });
       const response = await http(server.port, path);
       return { ok: response.status === 200, json: async () => JSON.parse(response.body.toString()) };
@@ -194,6 +194,31 @@ describe("continuous loopback status server", () => {
     const next = await http(server.port);
     expect(JSON.parse(next.body.toString())).toEqual(status);
     expect(JSON.parse(next.body.toString())).not.toHaveProperty("config");
+  });
+
+  test("serves a compact status view without replay-only game fields", async () => {
+    status.games = [game({
+      eventMetadata: { markets: [{ id: "winner" }] },
+      sources: [{ runId: "run-test", runDirectory: join(dataRoot, "runs", "run-test") }],
+      sourceFirstSequences: { "run-test": 1 },
+      archive: { status: "complete", runId: "run-test", attempt: 2,
+        outputDirectory: join(dataRoot, "exports", "game"), priceReadyTokens: 1, strictReadyTokens: 0 }
+    })];
+    const server = await start();
+    const full = JSON.parse((await http(server.port, "/api/status")).body.toString());
+    const compact = JSON.parse((await http(server.port, "/api/status?view=compact")).body.toString());
+
+    expect(full.games[0]).toHaveProperty("eventMetadata");
+    expect(compact.games[0]).not.toHaveProperty("eventMetadata");
+    expect(compact.games[0]).not.toHaveProperty("sources");
+    expect(compact.games[0]).not.toHaveProperty("sourceFirstSequences");
+    expect(compact.games[0]).toMatchObject({
+      key: "game:123", title: "甲队 vs 乙队", sport: "tennis", phase: "watching",
+      finishConflict: false, tokenIds: ["A", "B"], bookUpdates: 12, trades: 3,
+      stateObservations: 4, lastBookAtMs: 14_000, finishedAtMs: null,
+      archive: { status: "complete", attempt: 2, priceReadyTokens: 1, strictReadyTokens: 0 }
+    });
+    expect(compact.games[0].archive).not.toHaveProperty("runId");
   });
 
   test("actually binds only IPv4 127.0.0.1 and reports the allocated port", async () => {
@@ -389,7 +414,7 @@ describe("Chinese read-only dashboard", () => {
     expect(view.get("free-gb").textContent).toBe("未知");
     expect(view.get("last-record-age").textContent).toBe("尚未收到");
     expect(view.get("received-records").textContent).toBe("58");
-    expect(view.requests.filter(request => request.path === "/api/status")).toHaveLength(2);
+    expect(view.requests.filter(request => request.path === "/api/status?view=compact")).toHaveLength(2);
     for (const request of view.requests) expect(request.init).toMatchObject({ cache: "no-store", mode: "same-origin", redirect: "error" });
     expect(view.delays.every(delay => delay >= 1000 && delay <= 10_000)).toBe(true);
   });
