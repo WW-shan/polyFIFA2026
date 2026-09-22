@@ -5,7 +5,7 @@ import { exportTail } from "./tail-export.js";
 import type { TailExportResult } from "./tail-export.js";
 import { objectValue } from "./replay-values.js";
 import type { CompactStoredRecord, CompactTailStore } from "./continuous-tail-store.js";
-import { isPublishedFinishSource, isTailFinishSource } from "./tail-types.js";
+import { isTailFinishSource } from "./tail-types.js";
 import type { JournalRecord } from "./types.js";
 
 export interface CompactExportOptions {
@@ -68,7 +68,11 @@ function safeRunId(gameKey: string): string {
  */
 function eventDocument(metadata: Record<string, unknown>, finishedAtMs: number,
   finishAnchor: string | null): Record<string, unknown> {
-  if (!isPublishedFinishSource(finishAnchor)) return { ...metadata };
+  // Only Gamma may claim `finishedTimestamp`. A Sports boundary is carried by
+  // the finish-facts sidecar; copying it here under Gamma's field would invent
+  // an independent witness and turn every later Sports refinement into a
+  // cross-source conflict.
+  if (finishAnchor !== "gamma.finishedTimestamp") return { ...metadata };
   return { ...metadata, finishedTimestamp: new Date(finishedAtMs).toISOString() };
 }
 

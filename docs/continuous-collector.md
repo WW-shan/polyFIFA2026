@@ -527,9 +527,36 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 
 回归测试：`tests/collector/compact-export.test.ts` 新增用例，构造“REST 时钟领先、随后到达的 delta 事件时间更早”的生产同形输入，断言归档里不再出现 `out_of_order_delta` / `snapshot_required`，且该 token `validSeconds > 170`（修复前必失败）。
 
+### 15. 同一来源的终场修正被误判为跨来源冲突（2026-09-23 修复）
+
+线上 compact 归档长期出现大量 `conflicting-finish-labels`，但逐条检查 witness 后确认主要不是两个真实时钟互相矛盾，而是两个独立缺陷叠加：
+
+1. `ContinuousState.finish()` 只要看到 `finishedAtMs` 发生变化就置 `finishConflict=true`。Sports 会连续发布同一场比赛的修正值（例如 `00:46:37` → `00:46:43`），这是同一来源的新值覆盖旧值，不是第二个来源在反对。
+2. `compact-export.ts` 只要 `finishAnchor` 是任一 published source，就把该边界写成 Gamma 的 `finishedTimestamp`。当真实边界来自 Sports 时，导出会凭空制造一个 Gamma 时钟；Sports 后续的每次修正就会与这个伪 Gamma 值形成“跨来源冲突”。
+3. 终场修正使已完成的 compact 比赛失效后，`finalize()` 只查 staging；此时 staging 早已被消费，于是重归档可能把一个有数据的 artifact 覆盖成 `records=0` 的“complete”空结果。修复后 `finalize(..., "finalized")` 可以从保留的 `tail_records` 重新锚定，零行尝试只标记失败，不再覆盖成功 artifact。
+
+修复后：
+
+- 终场冲突只比较每个 published 来源的最新 witness；同一来源的旧值被自己的新值取代，`book-quiet` / `book-tail` 是采集器兜底，不作为独立时钟参与冲突。
+- 归档导出只在 `finishAnchor === "gamma.finishedTimestamp"` 时写 Gamma 的 `finishedTimestamp`。Sports 边界只通过 finish-facts sidecar 保留，不再冒充 Gamma。
+- 重启恢复和 `refreshFinishEvidence()` 会用保留的 facts 重新解析，而不是永久保留旧的冲突位；只有拿到替换 facts 时才允许清除冲突，避免空刷新误删真实争议。
+
+真实库只读核查（31 场带 finish facts 的比赛）：23 场是单来源且边界不是最新值，属于上述覆盖语义；6 场单来源边界已是最新值；2 场 Gamma/Sports 最新值一致。8 场线上归档重导出后 `conflicting-finish-labels` 从 6 场降到 0 场，且所有边界都落在最新 published witness 上。
+
+保留边界：两个独立 published 时钟最新值仍不一致时，窗口继续标记冲突并拒绝回测；已经发布但保留兜底边界的 artifact，如果后来出现真实时钟，仍保留原边界并标记争议，避免静默改写已发布结果。
+
 ### 本轮验证证据
 
-**2026-09-22 修复后（当前运行态）**
+**2026-09-23 修复后（当前运行态）**
+
+- 全量测试：**96 个测试文件 / 2,672 项测试通过，0 失败**；`tsc --noEmit` 通过；`git diff --check` 通过。
+- 生产重启：`npm run collect:restart` 将采集器 PID 从 89693 换为 **3436**，健康守护 PID 从 89708 换为 **3440**。重启后 `collect:status` 为 `mode=collecting`、`errors=[]`、`dataAgeMs` 约 3–5 秒；`/`、`/api/status?view=compact`（约 466 KB）、`/api/archives` 全部 200；`PRAGMA quick_check=ok`、`journal_mode=wal`；`matches=46`、`finish_conflict=1` 的匹配数为 **0**。
+- 全链路真实导出：从当前正式 SQLite 导出 **43/43 成功**，`failed=0`；43 个窗口 `finishConflict=0`、`missing-actual-finish=0`，其中 10 个 token 达到 `readyForReplay`。31 场近期网球比赛的子集也是 **31/31 成功、0 冲突**。
+- 真实回测：43 份归档加 `--allow-book-anchor-finish` 后 **14,064 个 scenario、136 个 eligible**（60 秒 72 个、180 秒 64 个），`conflicting-finish-labels` 排除数为 **0**；31 场近期子集为 **12,360 个 scenario、56 个 eligible**（60 秒 32 个、180 秒 24 个）。默认不显式接受 `book-tail` / `book-quiet` 时，兜底窗口仍按设计排除。
+- 归档重锚定：对已被消费 staging 的旧 compact 比赛，重启后会从保留的 `tail_records` 重新落盘；本次修复把多个此前 `no compact records in final window` 的空归档恢复为有数据的 `book-tail` 窗口。
+- 上游仍会间歇性出现 `books` 批量锚点超时、`ECONNRESET` 和 `AbortError`，守护会记为 `collector_error` 并在下一轮重试；这些是上游/网络压力，不是本次终场时钟解析缺陷。
+
+**2026-09-22 上一轮**
 
 - 全量测试：**95 个测试文件 / 2,659 项测试通过，0 失败**，连续两次全量运行均通过；`tsc --noEmit` 通过；三个 Python 守护脚本 `py_compile` 通过。
 - 生产重启：`npm run collect:restart` 用 `launchctl kickstart -k` 换掉旧实例（PID 81896 → 89693），健康守护同步重启（PID 89708）。重启后 `collect:status` 为 `mode=collecting`、`errors=[]`、`dataAgeMs` 稳定在数百毫秒到数秒，`state-heartbeat.json` 143 B 且每 5 秒带着 `lastRecordAtMs` 更新；`/`、`/api/status?view=compact`（约 364 KB）、`/api/archives` 全部 200，`PRAGMA quick_check=ok`、`journal_mode=wal`。

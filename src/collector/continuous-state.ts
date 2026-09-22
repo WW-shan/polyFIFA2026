@@ -3,6 +3,7 @@ import { metadataFromRecord, observationsFromRecord, windowKeyForIdentity } from
 import { objectValue } from "./replay-values.js";
 import { activeSnapshotTokens, isTerminalClearFrame } from "./book-evidence.js";
 import type { JournalRecord } from "./types.js";
+import { finishEvidenceConflict, isPublishedFinishSource, newestFinishFacts } from "./tail-types.js";
 import type { TailFinishFact, TailMetadata } from "./tail-types.js";
 import type { CompactTailStoreStatus } from "./continuous-tail-store.js";
 
@@ -46,6 +47,38 @@ export interface ArchiveState {
  *   the real market tail instead of being published empty.
  */
 export type FinishAnchor = "gamma.finishedTimestamp" | "sports.finishedAt" | "book-quiet" | "book-tail";
+
+interface ResolvedFinishEvidence {
+  finishedAtMs: number | null;
+  finishAnchor: FinishAnchor | null | undefined;
+  finishConflict: boolean;
+}
+
+/**
+ * Resolve a finish boundary from the newest witness of every published clock.
+ *
+ * Returns `null` when no published clock is available, which means the caller
+ * must preserve the existing fallback behavior. `incomingValue` is only used
+ * when a disputed set of clocks arrives before any boundary exists.
+ */
+function resolveFinishEvidence(finishedAtMs: number | null, finishAnchor: FinishAnchor | null | undefined,
+  facts: readonly TailFinishFact[], archiveWasComplete: boolean, incomingValue?: number): ResolvedFinishEvidence | null {
+  const published = newestFinishFacts(facts).filter(fact => isPublishedFinishSource(fact.source));
+  if (published.length === 0) return null;
+  const disputed = finishEvidenceConflict(facts);
+  const newestPublished = published.reduce((best, fact) => fact.observedAtMs >= best.observedAtMs ? fact : best);
+  const agreed = disputed ? null : newestPublished.atMs;
+  // Check every published witness, not just the newest one. A boundary written
+  // by an earlier value from the same clock was still published; it must be
+  // treated as a superseded clock value, not as the collector's book fallback.
+  const boundaryIsFallback = finishedAtMs !== null
+    && !facts.some(fact => isPublishedFinishSource(fact.source) && fact.atMs === finishedAtMs);
+  if (agreed !== null && (!boundaryIsFallback || !archiveWasComplete)) {
+    return { finishedAtMs: agreed, finishAnchor: newestPublished.source, finishConflict: false };
+  }
+  return { finishedAtMs: finishedAtMs ?? incomingValue ?? null, finishAnchor,
+    finishConflict: disputed || (agreed !== null && boundaryIsFallback && archiveWasComplete) };
+}
 /**
  * One frame of a CLOB record, already attributed to the single game that owns
  * its token. `kind` is overridden when a container record is split into frames
@@ -315,7 +348,6 @@ export class ContinuousState {
     origin?: Pick<TailFinishFact, "source" | "eventId" | "eventSlug" | "gameId" | "frameIndex">): void {
     if (value === null) return;
     const previousFinishedAtMs = game.finishedAtMs;
-    const wasBookQuiet = game.finishAnchor === "book-quiet";
     const archiveWasComplete = game.archive?.status === "complete";
     let newFact = false;
     if (origin) {
@@ -328,8 +360,35 @@ export class ContinuousState {
         newFact = true;
       }
     }
-    if (game.finishedAtMs !== null && value !== game.finishedAtMs) {
-      if (!game.finishConflict || newFact) {
+    // Resolve the boundary from the newest witness of every published clock.
+    // A source that re-publishes a corrected end time supersedes its own older
+    // value, so only two independent clocks disagreeing leaves the window
+    // disputed; treating every refinement as a contradiction marked most of
+    // the collected matches as conflicting while nothing actually disagreed.
+    const facts = game.finishFacts ?? [];
+    const resolved = resolveFinishEvidence(game.finishedAtMs, game.finishAnchor, facts, archiveWasComplete, value);
+    let next: number;
+    if (resolved !== null) {
+      // A fallback is not yet a published artifact when its archive is still
+      // pending or failed, so the real clock replaces it. A complete artifact
+      // keeps the boundary it published and is only marked disputed.
+      next = resolved.finishedAtMs ?? value;
+      if (resolved.finishAnchor !== undefined) game.finishAnchor = resolved.finishAnchor;
+      else if (game.finishedAtMs === null && origin !== undefined) game.finishAnchor = origin.source;
+      game.finishConflict = resolved.finishConflict;
+    } else if (game.finishedAtMs !== null) {
+      next = game.finishedAtMs;
+      game.finishConflict = false;
+    } else {
+      next = value;
+      if (origin !== undefined) game.finishAnchor = origin.source;
+      game.finishConflict = false;
+    }
+    if (game.finishedAtMs !== next) {
+      if (game.finishedAtMs === null) {
+        game.finishRunId = record.runId;
+        game.finishRevision = 1;
+      } else {
         game.finishRevision = (game.finishRevision ?? 0) + 1;
         game.finishRunId = record.runId;
         if (game.archive) {
@@ -339,18 +398,7 @@ export class ContinuousState {
           game.phase = "archive_failed";
         }
       }
-      game.finishConflict = true;
-    }
-    if (game.finishedAtMs === null) { game.finishRunId = record.runId; game.finishRevision = 1; }
-    if (game.finishedAtMs === null && origin !== undefined) game.finishAnchor = origin.source;
-    game.finishedAtMs ??= value;
-    // A book-quiet fallback is not yet a published artifact when its archive is
-    // still pending or failed. If a real clock arrives in that state, prefer
-    // the clock for the eventual window; keep the old boundary only when a
-    // complete artifact already exists and must not be rewritten silently.
-    if (wasBookQuiet && !archiveWasComplete && origin !== undefined) {
-      game.finishedAtMs = value;
-      game.finishAnchor = origin.source;
+      game.finishedAtMs = next;
     }
     // A new witness is itself a revision even when every source agrees on the
     // boundary. Without this, an archive completed before the witness arrived
@@ -751,6 +799,33 @@ export class ContinuousState {
       if (!Object.hasOwn(game, "lastActiveBookRunId")) game.lastActiveBookRunId = game.lastBookRunId;
       if (game.archive?.status === "running") game.archive = { ...game.archive, status: "failed", error: "export interrupted by restart", retryAtMs: 0 };
       if (game.archive?.status === "failed") game.archive.retryAtMs = 0;
+      if (game.archive?.status === "complete" && game.archive.error?.includes("no compact records in final window")) {
+        // Older builds could publish an empty replacement after a finish
+        // correction consumed the staging rows. The retained finalized tail is
+        // still re-anchorable, so retry instead of preserving a false success.
+        game.archive = { ...game.archive, status: "failed", refreshSnapshot: true, retryAtMs: 0,
+          priceReadyTokens: 0, strictReadyTokens: 0 };
+      }
+      // Re-run the same source-aware resolution used for live witnesses. Older
+      // state files were written before refinements from one clock superseded
+      // its own previous value, so a restart must not preserve those stale
+      // conflicts (or an old boundary) when the retained facts now resolve.
+      const resolved = game.finishFacts?.length
+        ? resolveFinishEvidence(game.finishedAtMs, game.finishAnchor, game.finishFacts, game.archive?.status === "complete")
+        : null;
+      if (resolved !== null) {
+        if (resolved.finishedAtMs !== null && resolved.finishedAtMs !== game.finishedAtMs) {
+          game.finishedAtMs = resolved.finishedAtMs;
+          game.finishRevision = (game.finishRevision ?? 0) + 1;
+          if (game.archive) {
+            const { snapshotDirectory: _staleSnapshot, finishFactsFile: _staleFacts, ...archive } = game.archive;
+            game.archive = { ...archive, status: "failed", refreshSnapshot: true, retryAtMs: 0,
+              priceReadyTokens: 0, strictReadyTokens: 0, error: "finish label changed; fresh source evidence must be evaluated" };
+          }
+        }
+        if (resolved.finishAnchor !== undefined) game.finishAnchor = resolved.finishAnchor;
+        game.finishConflict = resolved.finishConflict;
+      }
       if (game.finishConflict && game.archive) {
         const { snapshotDirectory: _staleSnapshot, finishFactsFile: _staleFacts, ...archive } = game.archive;
         game.archive = { ...archive, status: "failed", refreshSnapshot: true, retryAtMs: 0, priceReadyTokens: 0, strictReadyTokens: 0 };

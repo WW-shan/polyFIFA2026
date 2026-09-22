@@ -130,7 +130,7 @@ describe("tail catalog finish evidence retention", () => {
     expect(catalog.windows[0]).toMatchObject({ endAtMs: finishAtMs, finishConflict: false });
   });
 
-  test("ever-changing finish times keep the first boundary and one conflict witness per provenance", async () => {
+  test("ever-changing finish times keep one witness per provenance and follow the newest value", async () => {
     const count = 2000;
     const runDirectory = await writeRun([
       journalRecord(1, 0, "collector", "session_start", {}),
@@ -145,8 +145,10 @@ describe("tail catalog finish evidence retention", () => {
       { atMs: finishAtMs, observedAtMs: 400_000, source: "gamma.finishedTimestamp", eventSlug: "game" },
       { atMs: finishAtMs - 1, observedAtMs: 400_001, source: "gamma.finishedTimestamp", eventSlug: "game" }
     ]);
-    expect(window).toMatchObject({ startAtMs: 10_000, endAtMs: finishAtMs, finishConflict: true });
-    expect(catalog.warnings).toContain("conflicting-finish-labels:game:123");
+    // The newest value from that single clock wins; nothing independent
+    // disagrees, so the window is not disputed.
+    expect(window).toMatchObject({ startAtMs: finishAtMs - 1 - 300_000, endAtMs: finishAtMs - 1, finishConflict: false });
+    expect(catalog.warnings).not.toContain("conflicting-finish-labels:game:123");
   });
 
   test("deduplication preserves independent Gamma, Sports and sidecar provenance in receipt order", async () => {

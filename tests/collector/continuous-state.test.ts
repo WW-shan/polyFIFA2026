@@ -116,6 +116,31 @@ describe("persistent continuous capture observations", () => {
     expect(state.anchorQuietFinishes(500_000, 300_000, 900_000).map(game => game.finishedAtMs)).toEqual([200]);
   });
 
+  test("a later value from the same clock supersedes its own earlier boundary", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    for (const record of fixtureRecords()) state.observe(record);
+    expect(state.snapshot().games[0]?.finishedAtMs).toBe(310_000);
+
+    // Sports re-published the same match's end time a few seconds later. That is
+    // a corrected value from one witness, not two independent clocks disagreeing.
+    state.observe(journalRecord(50, 310_000, "gamma", "event_metadata", eventMetadata(310_006)));
+
+    expect(state.snapshot().games[0]).toMatchObject({ finishedAtMs: 310_006, finishConflict: false,
+      finishAnchor: "gamma.finishedTimestamp" });
+    expect(state.snapshot().games[0]?.finishFacts?.filter(fact => fact.source === "gamma.finishedTimestamp")
+      .map(fact => fact.atMs)).toEqual([310_000, 310_006]);
+  });
+
+  test("two independent clocks disagreeing leaves the boundary disputed", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    for (const record of fixtureRecords()) state.observe(record);
+    state.observe(journalRecord(50, 310_000, "sports", "ws_message",
+      JSON.stringify({ gameId: 123, slug: "game", sport: "soccer", score: "1-0", period: "2H", ended: true,
+        finishedTimestamp: new Date(310_006).toISOString() }), "sports"));
+
+    expect(state.snapshot().games[0]).toMatchObject({ finishedAtMs: 310_000, finishConflict: true });
+  });
+
   test("a published clock beats the fallback, and a late clock is retained as conflicting evidence", () => {
     const labelled = new ContinuousState("/capture", 8765); labelled.setRun("tail-test", "/capture/runs/tail-test");
     for (const record of fixtureRecords().slice(0, 13)) labelled.observe(record);
@@ -130,12 +155,12 @@ describe("persistent continuous capture observations", () => {
     quiet.observe(journalRecord(12, lastBookAtMs + 1_000, "collector", "event_retired",
       { eventId: "event", eventSlug: "game", gameId: "123", finishedAtMs: null }));
     expect(quiet.anchorQuietFinishes(lastBookAtMs + 300_000, 300_000, 900_000).map(game => game.key)).toEqual(["game:123"]);
-    // A clock that only shows up minutes later must not shift a window that is
-    // already published from data the user may already be reading, but its
-    // witness cannot be silently discarded.
+    // The fallback was never published (no archive exists yet), so the real
+    // clock replaces it and the witness is kept. Only a boundary that was
+    // already published keeps the fallback and reports a disputed window.
     quiet.observe(journalRecord(13, lastBookAtMs + 900_000, "gamma", "event_metadata", eventMetadata(lastBookAtMs + 5_000)));
     expect(quiet.snapshot().games[0]).toMatchObject({ finishedAtMs: lastBookAtMs + 5_000,
-      finishAnchor: "gamma.finishedTimestamp", finishConflict: true });
+      finishAnchor: "gamma.finishedTimestamp", finishConflict: false });
     expect(quiet.snapshot().games[0]?.finishFacts).toContainEqual(expect.objectContaining({
       source: "gamma.finishedTimestamp", atMs: lastBookAtMs + 5_000 }));
   });
@@ -176,6 +201,34 @@ describe("persistent continuous capture observations", () => {
     expect(restored.readyToArchive("next")).toHaveLength(1);
   });
 
+  test("restart re-resolves same-source finish refinements instead of preserving a stale conflict", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    for (const record of fixtureRecords()) state.observe(record);
+    const saved = state.snapshot(), game = saved.games[0]!;
+    game.finishConflict = true; game.finishedAtMs = 310_000; game.finishAnchor = "sports.finishedAt";
+    game.archive = { status: "complete", runId: "tail-test", attempt: 1, outputDirectory: "/capture/exports/old",
+      priceReadyTokens: 2, strictReadyTokens: 2 };
+    game.finishFacts = [
+      { source: "sports.finishedAt", eventId: null, eventSlug: "game", gameId: "123", atMs: 310_000, observedAtMs: 310_100,
+        sourceRunId: "tail-test", sourceRunDirectory: "/capture/runs/tail-test", sequence: 13, frameIndex: 0 },
+      { source: "sports.finishedAt", eventId: null, eventSlug: "game", gameId: "123", atMs: 310_006, observedAtMs: 310_200,
+        sourceRunId: "tail-test", sourceRunDirectory: "/capture/runs/tail-test", sequence: 14, frameIndex: 0 }
+    ];
+    const restored = new ContinuousState("/capture", 8765); restored.restore(saved);
+    expect(restored.snapshot().games[0]).toMatchObject({ finishedAtMs: 310_006, finishAnchor: "sports.finishedAt", finishConflict: false,
+      archive: { status: "failed", refreshSnapshot: true, retryAtMs: 0 } });
+  });
+
+  test("restart retries a completed archive that recorded no compact rows", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    for (const record of fixtureRecords()) state.observe(record);
+    const saved = state.snapshot(), game = saved.games[0]!;
+    game.archive = { status: "complete", runId: "tail-test", attempt: 1, outputDirectory: "/capture/tail.sqlite",
+      priceReadyTokens: 0, strictReadyTokens: 0, error: "no compact records in final window" };
+    const restored = new ContinuousState("/capture", 8765); restored.restore(saved);
+    expect(restored.snapshot().games[0]?.archive).toMatchObject({ status: "failed", refreshSnapshot: true, retryAtMs: 0 });
+  });
+
   test("a new agreeing witness invalidates a completed archive so provenance is not lost", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     for (const record of fixtureRecords().slice(0, 10)) state.observe(record);
@@ -188,7 +241,7 @@ describe("persistent continuous capture observations", () => {
     expect(state.snapshot().games[0]?.archive).toMatchObject({ status: "failed", refreshSnapshot: true, retryAtMs: 0 });
   });
 
-  test("changed finish evidence invalidates the old snapshot and prevents any complete-quality claim", () => {
+  test("a same-source correction invalidates the old snapshot without becoming a conflict", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     for (const record of fixtureRecords().slice(0, 10)) state.observe(record);
     state.observe(journalRecord(14, 310_100, "collector", "event_retired", { eventId: "event", finishedAtMs: 310_000 }));
@@ -196,10 +249,11 @@ describe("persistent continuous capture observations", () => {
     state.observe(journalRecord(15, 320_000, "gamma", "event_metadata", eventMetadata(310_001)));
     expect(state.snapshot().games[0]?.finishFacts?.map(fact => fact.atMs)).toEqual([310_000, 310_001]);
     expect(state.snapshot().games[0]?.finishFacts?.[1]).toMatchObject({ sourceRunId: "tail-test", sequence: 15, source: "gamma.finishedTimestamp" });
-    expect(state.snapshot().games[0]?.archive).toMatchObject({ status: "failed", refreshSnapshot: true });
+    expect(state.snapshot().games[0]).toMatchObject({ finishedAtMs: 310_001, finishConflict: false,
+      archive: { status: "failed", refreshSnapshot: true } });
     expect(state.snapshot().games[0]?.archive?.snapshotDirectory).toBeUndefined();
     state.markArchive("game:123", { status: "complete", runId: "tail-test", attempt: 2, outputDirectory: "/capture/exports/new", priceReadyTokens: 2, strictReadyTokens: 2 });
-    expect(state.snapshot().games[0]?.archive).toMatchObject({ priceReadyTokens: 0, strictReadyTokens: 0 });
+    expect(state.snapshot().games[0]?.archive).toMatchObject({ priceReadyTokens: 2, strictReadyTokens: 2 });
   });
 
   test("attributes connection invalidation to every game carried by that connection", () => {

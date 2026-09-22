@@ -1,6 +1,6 @@
 import { decimal, objectValue } from "../collector/replay-values.js";
 import type { ReplayLevel } from "../collector/replay-types.js";
-import { isPublishedFinishSource, isTailFinishSource } from "../collector/tail-types.js";
+import { finishBoundaryDisputed, isPublishedFinishSource, isTailFinishSource } from "../collector/tail-types.js";
 import type { TailBookChange, TailClockIssue, TailMarket, TailSecond, TailTokenQuality, TailWindow } from "../collector/tail-types.js";
 import type {
   EffectiveTailBacktestOptions, TailBacktestExclusion, TailBacktestInput, TailBacktestOptions, TailBacktestResult,
@@ -554,7 +554,9 @@ function trialFor(source: IndexedSource, indexed: IndexedWindow, outcomes: Index
   const finishKnown = window.endAtMs !== null && window.finishSources.length > 0 &&
     window.finishSources.every(label => options.allowBookAnchorFinish ? isTailFinishSource(label) : isPublishedFinishSource(label));
   const finishAtMs = finishKnown ? window.endAtMs : null;
-  const finishConflict = window.finishConflict || (window.endAtMs !== null && (window.finishEvidence ?? []).some(fact => fact.atMs !== window.endAtMs));
+  // Superseded values from the same clock are not a dispute; independent
+  // clocks disagreeing, or a published fallback boundary, still is.
+  const finishConflict = window.finishConflict || finishBoundaryDisputed(window.finishEvidence ?? [], window.endAtMs);
   const entryAtMs = finishAtMs === null ? null : finishAtMs - windowSeconds * 1_000;
   const references = outcomes.map(token => referenceFor(token, entryAtMs, indexed, source));
   const allReferencesValid = references.every(reference => reference.priceValid);

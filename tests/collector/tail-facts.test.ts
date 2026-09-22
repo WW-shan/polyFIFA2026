@@ -72,19 +72,29 @@ describe("normalized cross-run finish facts", () => {
     expect(await readFile(data.finishFactsFile, "utf8")).toBe(factsBefore);
   });
 
-  test("native F1 plus r2 F2 retains r1 books and marks the conflicting finish", async () => {
-    const newer = fact({ atMs: 310_001 });
+  test("a corrected value from the same clock moves the boundary instead of conflicting", async () => {
+    const newer = fact({ atMs: 310_001, observedAtMs: 450_001 });
     const data = await input(document([newer]), fixtureRecords());
     const { summary, seconds, raw } = await replay(data);
-    expect(summary.windows[0]).toMatchObject({ startAtMs: 10_000, endAtMs: 310_000, finishConflict: true });
+    // One witness re-publishing a corrected end time supersedes its own earlier
+    // value; nothing independent disagrees, so the window is not disputed.
+    expect(summary.windows[0]).toMatchObject({ startAtMs: 10_001, endAtMs: 310_001, finishConflict: false });
     expect(summary.windows[0]?.finishEvidence).toContainEqual({ ...newer, sourceFile: data.finishFactsFile });
     expect(summary.windows[0]?.finishEvidence).toContainEqual({ atMs: 310_000, observedAtMs: 100,
       source: "gamma.finishedTimestamp", eventSlug: "game" });
-    expect(summary.tokens.every(token => !token.observedWindowComplete && !token.readyForReplay)).toBe(true);
     expect(seconds).toHaveLength(600);
+    expect(seconds.some(row => row.reasons.includes("conflicting-finish-labels"))).toBe(false);
+    expect(seconds.find(row => row.tokenId === "A" && row.startAtMs === 11_001)?.bestBid).toBe("0.94");
+    expect(raw).toEqual(data.records.filter(record => record.receivedAtMs >= 10_001 && record.receivedAtMs < 310_001));
+  });
+
+  test("an independent clock disagreeing keeps the finish disputed", async () => {
+    const newer = fact({ atMs: 310_001, source: "sports.finishedAt", eventId: null, eventSlug: null, observedAtMs: 450_001 });
+    const data = await input(document([newer]), fixtureRecords());
+    const { summary, seconds } = await replay(data);
+    expect(summary.windows[0]).toMatchObject({ startAtMs: 10_000, endAtMs: 310_000, finishConflict: true });
+    expect(summary.tokens.every(token => !token.observedWindowComplete && !token.readyForReplay)).toBe(true);
     expect(seconds.every(row => row.reasons.includes("conflicting-finish-labels"))).toBe(true);
-    expect(seconds.find(row => row.tokenId === "A" && row.startAtMs === 11_000)?.bestBid).toBe("0.94");
-    expect(raw).toEqual(data.records.filter(record => record.receivedAtMs >= 10_000 && record.receivedAtMs < 310_000));
   });
 
   test("retains independent source-run, sequence and frame provenance for conflicting and agreeing facts", async () => {
@@ -135,7 +145,9 @@ describe("normalized cross-run finish facts", () => {
     }] });
     await writeFile(finishLabelsFile, labelText);
     const { summary, seconds } = await replay({ ...data, finishLabelsFile });
-    expect(summary.windows[0]).toMatchObject({ endAtMs: 310_000, finishConflict: true });
+    // Both witnesses are the same clock: the later one corrects the boundary,
+    // and both keep their own provenance.
+    expect(summary.windows[0]).toMatchObject({ endAtMs: 310_001, finishConflict: false });
     expect(summary.windows[0]?.finishEvidence).toEqual([
       { atMs: 310_000, observedAtMs: 400_000, source: "gamma.finishedTimestamp", eventSlug: "game", sourceFile: finishLabelsFile },
       { ...newer, sourceFile: data.finishFactsFile }

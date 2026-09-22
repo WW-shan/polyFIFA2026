@@ -450,6 +450,20 @@ export class CompactTailStore {
     return typeof row?.at === "number" ? row.at : null;
   }
 
+  /** True when this game already has a finalized tail that can be re-anchored. */
+  hasFinalizedRecords(gameKey: string): boolean {
+    if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
+    return this.db.prepare("SELECT 1 AS present FROM tail_records WHERE game_key = ? LIMIT 1").get(gameKey) !== undefined;
+  }
+
+  /** Receipt time of the newest finalized order-book frame, or null. */
+  finalizedTailAt(gameKey: string): number | null {
+    if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
+    const row = this.db.prepare(`SELECT MAX(received_at_ms) AS at FROM tail_records
+      WHERE game_key = ? AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')`).get(gameKey) as { at?: number | null } | undefined;
+    return typeof row?.at === "number" ? row.at : null;
+  }
+
   markPendingFinalize(gameKey: string, finishAtMs: number): void {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
     if (!Number.isSafeInteger(finishAtMs) || finishAtMs < 0) throw new RangeError("finishAtMs must be a nonnegative safe integer");
@@ -461,11 +475,12 @@ export class CompactTailStore {
   /** Refresh finish provenance on an already-finalized match without touching its price window. */
   refreshFinishEvidence(game: Pick<CapturedGame, "key" | "finishAnchor" | "finishConflict" | "finishFacts" | "eventMetadata">): void {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
+    const facts = game.finishFacts?.length ? JSON.stringify(game.finishFacts) : null;
     this.db.prepare(`UPDATE matches SET finish_anchor = COALESCE(?, finish_anchor),
-      finish_conflict = MAX(finish_conflict, ?), finish_facts_json = COALESCE(?, finish_facts_json),
+      finish_conflict = CASE WHEN ? IS NULL THEN finish_conflict ELSE ? END,
+      finish_facts_json = COALESCE(?, finish_facts_json),
       metadata_json = COALESCE(?, metadata_json), updated_at_ms = ? WHERE game_key = ?`)
-      .run(game.finishAnchor ?? null, game.finishConflict ? 1 : 0,
-        game.finishFacts?.length ? JSON.stringify(game.finishFacts) : null,
+      .run(game.finishAnchor ?? null, facts, game.finishConflict ? 1 : 0, facts,
         game.eventMetadata === undefined ? null : JSON.stringify(game.eventMetadata), this.now(), game.key);
   }
 
@@ -564,36 +579,39 @@ export class CompactTailStore {
     }
   }
 
-  finalize(game: CapturedGame, finishAtMs: number): FinalizeResult {
+  finalize(game: CapturedGame, finishAtMs: number, source: "staging" | "finalized" = "staging"): FinalizeResult {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
     if (!Number.isSafeInteger(finishAtMs) || finishAtMs < 0) throw new RangeError("finishAtMs must be a nonnegative safe integer");
     this.flush();
     const start = finishAtMs - this.tailWindowMs;
+    const table = source === "finalized" ? "tail_records" : "staging_records";
     // The window floor is a boundary, not a starting state. Reconstructing the
     // ask ladder from it needs the last full-depth anchor at or before it plus
     // every delta since; copying only `[start, finish]` left the exported
     // window with no seed, so the depth could not be rebuilt from the floor.
-    const seed = this.seedStart(game.key, start);
-    const available = this.db.prepare(`SELECT COUNT(*) AS count FROM staging_records
+    const seed = this.seedStart(game.key, start, table);
+    const available = this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}
       WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?`).get(game.key, seed.copyStart, finishAtMs) as { count?: number } | undefined;
     const availableCount = available?.count ?? 0;
-    const depth = this.db.prepare(`SELECT COUNT(*) AS count FROM staging_records
+    const depth = this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}
       WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
         AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')`).get(game.key, seed.copyStart, finishAtMs) as { count?: number } | undefined;
     const depthCount = depth?.count ?? 0;
     // Report how much of the target window actually survived. Coverage is about
     // the order book, not unrelated sports/lifecycle records, so a sports score
     // at the floor cannot make an empty CLOB window look complete.
-    const coverage = this.windowCoverage(game.key, start, finishAtMs, depthCount, seed.anchorAtMs, seed.copyStart);
+    const coverage = this.windowCoverage(game.key, start, finishAtMs, depthCount, seed.anchorAtMs, seed.copyStart, table);
     if (depthCount === 0) {
       // A retry can arrive after the rolling rows were pruned. If the match
       // already exists, still refresh its finish provenance; otherwise the
       // database would keep an older conflict/fact set while the in-memory
       // state claimed the archive was current.
       this.refreshFinishEvidence(game);
-      const hashes = this.db.prepare("SELECT DISTINCT payload_hash FROM staging_records WHERE game_key = ?").all(game.key) as Array<{ payload_hash: string }>;
-      this.db.prepare("DELETE FROM staging_records WHERE game_key = ?").run(game.key);
-      this.cleanupOrphanPayloads(hashes.map(row => row.payload_hash));
+      if (source === "staging") {
+        const hashes = this.db.prepare("SELECT DISTINCT payload_hash FROM staging_records WHERE game_key = ?").all(game.key) as Array<{ payload_hash: string }>;
+        this.db.prepare("DELETE FROM staging_records WHERE game_key = ?").run(game.key);
+        this.cleanupOrphanPayloads(hashes.map(row => row.payload_hash));
+      }
       this.pendingFinalize.delete(game.key);
       return { records: 0, ...coverage };
     }
@@ -609,12 +627,14 @@ export class CompactTailStore {
         largest_gap_ms=excluded.largest_gap_ms, finish_anchor=excluded.finish_anchor, finish_conflict=excluded.finish_conflict,
         finish_facts_json=COALESCE(excluded.finish_facts_json, matches.finish_facts_json),
         metadata_json=COALESCE(excluded.metadata_json, matches.metadata_json)`);
-    const copy = this.db.prepare(`INSERT OR IGNORE INTO tail_records
+    const copy = source === "staging" ? this.db.prepare(`INSERT OR IGNORE INTO tail_records
       (game_key, run_id, sequence, frame_index, received_at_ms, source, kind, payload_hash)
       SELECT game_key, run_id, sequence, frame_index, received_at_ms, source, kind, payload_hash
-      FROM staging_records WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?`);
-    const remove = this.db.prepare("DELETE FROM staging_records WHERE game_key = ?");
-    const removedHashes = this.db.prepare("SELECT DISTINCT payload_hash FROM staging_records WHERE game_key = ?").all(game.key) as Array<{ payload_hash: string }>;
+      FROM staging_records WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?`) : null;
+    const remove = source === "staging" ? this.db.prepare("DELETE FROM staging_records WHERE game_key = ?") : null;
+    const removedHashes = source === "staging"
+      ? this.db.prepare("SELECT DISTINCT payload_hash FROM staging_records WHERE game_key = ?").all(game.key) as Array<{ payload_hash: string }>
+      : [];
     this.db.exec("BEGIN IMMEDIATE");
     try {
       upsertMatch.run(game.key, game.title, game.sport, game.gameId, JSON.stringify(game.eventIds), JSON.stringify(game.eventSlugs),
@@ -622,8 +642,8 @@ export class CompactTailStore {
         coverage.windowStartMs, coverage.windowComplete ? 1 : 0, coverage.missingFrontMs, coverage.largestGapMs, game.finishAnchor ?? null,
         game.finishConflict ? 1 : 0, game.finishFacts?.length ? JSON.stringify(game.finishFacts) : null,
         game.eventMetadata === undefined ? null : JSON.stringify(game.eventMetadata));
-      copy.run(game.key, seed.copyStart, finishAtMs);
-      remove.run(game.key);
+      copy?.run(game.key, seed.copyStart, finishAtMs);
+      remove?.run(game.key);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -647,8 +667,8 @@ export class CompactTailStore {
    * floor, so a window whose evidence genuinely starts late is still reported
    * as short.
    */
-  private seedStart(gameKey: string, start: number): { copyStart: number; anchorAtMs: number | null } {
-    const anchor = this.db.prepare(`SELECT MAX(received_at_ms) AS at FROM staging_records
+  private seedStart(gameKey: string, start: number, table: "staging_records" | "tail_records"): { copyStart: number; anchorAtMs: number | null } {
+    const anchor = this.db.prepare(`SELECT MAX(received_at_ms) AS at FROM ${table}
       WHERE game_key = ? AND kind = 'book_snapshot' AND received_at_ms <= ? AND received_at_ms >= ?`)
       .get(gameKey, start, start - this.tailWindowMs) as { at?: number | null } | undefined;
     const anchorAtMs = typeof anchor?.at === "number" ? anchor.at : null;
@@ -668,9 +688,9 @@ export class CompactTailStore {
    * not move across the gap, so that front is covered even without a row.
    */
   private windowCoverage(gameKey: string, start: number, finishAtMs: number, count: number,
-    anchorAtMs: number | null, copyStart: number): Omit<FinalizeResult, "records"> {
+    anchorAtMs: number | null, copyStart: number, table: "staging_records" | "tail_records"): Omit<FinalizeResult, "records"> {
     if (count === 0) return { windowStartMs: null, windowComplete: false, missingFrontMs: this.tailWindowMs, largestGapMs: this.tailWindowMs };
-    const oldest = this.db.prepare(`SELECT MIN(received_at_ms) AS at FROM staging_records
+    const oldest = this.db.prepare(`SELECT MIN(received_at_ms) AS at FROM ${table}
       WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
         AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')`).get(gameKey, start, finishAtMs) as { at?: number | null } | undefined;
     const windowStartMs = typeof oldest?.at === "number" ? oldest.at : null;
@@ -685,7 +705,7 @@ export class CompactTailStore {
     // that moved the ladder between the anchor and the floor were retained too.
     // `largestGapMs` below proves that: an anchor with a hole after it cannot
     // seed a window, so it must not excuse the missing front either.
-    const largestGapMs = this.largestRetainedGap(gameKey, copyStart, finishAtMs);
+    const largestGapMs = this.largestRetainedGap(gameKey, copyStart, finishAtMs, table);
     const continuityMs = Math.max(this.maxFeedSilenceMs, this.redundantKeepAliveMs);
     const continuous = largestGapMs <= continuityMs;
     const provenByAnchor = anchorAtMs !== null && anchorAtMs <= start && continuous;
@@ -711,8 +731,8 @@ export class CompactTailStore {
    * `redundantKeepAliveMs`, so a caller must allow at least that much silence
    * before calling a hole real; `windowCoverage` does.
    */
-  private largestRetainedGap(gameKey: string, copyStart: number, finishAtMs: number): number {
-    const rows = this.db.prepare(`SELECT received_at_ms AS at FROM staging_records
+  private largestRetainedGap(gameKey: string, copyStart: number, finishAtMs: number, table: "staging_records" | "tail_records"): number {
+    const rows = this.db.prepare(`SELECT received_at_ms AS at FROM ${table}
       WHERE game_key = ? AND received_at_ms >= ? AND received_at_ms <= ?
         AND source = 'clob' AND kind IN ('ws_message', 'book_snapshot')
       ORDER BY received_at_ms ASC`).all(gameKey, copyStart, finishAtMs) as Array<{ at: number }>;

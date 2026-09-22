@@ -242,6 +242,27 @@ describe("compact tail export", () => {
     store.close();
   });
 
+  test("does not fabricate a Gamma clock when the boundary came from Sports", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
+    store.ingest(anchor(2, START, "no", [{ price: "0.4", size: "30" }], [{ price: "0.5", size: "40" }], "1000", "h2"), ["game:42"]);
+    const facts = [{ source: "sports.finishedAt" as const, atMs: FINISH, observedAtMs: FINISH, eventId: null, eventSlug: "a-vs-b",
+      gameId: "42", sourceRunId: "run-1", sourceRunDirectory: null, sequence: 7, frameIndex: 0 }];
+    store.finalize({ ...game(), finishAnchor: "sports.finishedAt", finishFacts: facts }, FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    // The Gamma metadata record must not claim a finish that only Sports
+    // published. Otherwise every Sports refinement looks like a cross-source
+    // contradiction against a boundary the exporter invented.
+    expect(summary.windows[0]).toMatchObject({ endAtMs: FINISH, finishConflict: false, finishSources: ["sports.finishedAt"] });
+    expect(summary.windows[0].finishEvidence).toEqual([expect.objectContaining({ source: "sports.finishedAt", atMs: FINISH })]);
+    store.close();
+  });
+
   test("refuses a match that has no stored market identity", async () => {
     const path = await root();
     const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,

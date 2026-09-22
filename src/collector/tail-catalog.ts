@@ -10,7 +10,7 @@ import { identifier, objectValue } from "./replay-values.js";
 import { gammaEventFromRecord, metadataFromRecord, observationsFromRecord, windowKeyForIdentity, windowKeyForBoundIdentity } from "./tail-context.js";
 import { TailIdentityScope } from "./tail-identity-scope.js";
 import type { JournalRecord } from "./types.js";
-import { isTailFinishSource } from "./tail-types.js";
+import { finishBoundaryDisputed, isPublishedFinishSource, isTailFinishSource, newestFinishFacts } from "./tail-types.js";
 import type { TailClockIssue, TailClockPolicy, TailClockReceipt, TailEventIdentity, TailFinishFact, TailMetadata, TailObservation, TailOptions, TailWindow, TailWindowIdentity } from "./tail-types.js";
 
 export type EffectiveTailOptions = TailOptions & Required<Pick<TailOptions,"windowSeconds"|"maxFeedSilenceMs"|"sportsStaleAfterMs"|"maxClockDriftMs"|"shockThreshold"|"clockPolicy">>;
@@ -260,6 +260,28 @@ export async function scanTailCatalog(options:EffectiveTailOptions):Promise<Tail
       (window.finishEvidence??=[]).push({...fact,sourceFile:options.finishFactsFile});
     }
     warnings.add("normalized finish facts imported only for window boundaries; original observations remain in their source journals");
+  }
+  // Resolve each boundary from the newest witness of every published clock.
+  // A source that re-publishes a corrected end time supersedes its own earlier
+  // value, so only two independent clocks disagreeing is a conflict. The
+  // earlier rule flagged every refinement, which marked most collected matches
+  // as disputed while nothing actually disagreed.
+  for(const window of allWindows){
+    const evidence=window.finishEvidence??[];
+    const published=newestFinishFacts(evidence).filter(fact=>isPublishedFinishSource(fact.source));
+    if(published.length===0)continue; // A fallback-only window keeps its own boundary.
+    const newest=published.reduce((best,fact)=>fact.observedAtMs>=best.observedAtMs?fact:best);
+    if(finishBoundaryDisputed(evidence,window.endAtMs)){
+      // Two clocks disagree, or a published artifact keeps the collector's own
+      // fallback boundary while a real clock exists: both stay disputed.
+      window.finishConflict=true;
+      continue;
+    }
+    window.finishConflict=false;
+    if(window.endAtMs!==newest.atMs){
+      window.endAtMs=newest.atMs;
+      window.startAtMs=newest.atMs-options.windowSeconds*1000;
+    }
   }
   for(const window of allWindows){
     if(window.finishConflict)warnings.add(`conflicting-finish-labels:${window.key}`);

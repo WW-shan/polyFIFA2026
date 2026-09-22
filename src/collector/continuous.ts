@@ -363,19 +363,38 @@ export class ContinuousCollector {
       // empty window loses the whole match, so fall back to the newest frame
       // the store really holds and publish the real market tail instead.
       const tailWindowMs = this.config.tailWindowSeconds * 1000;
-      const hasRequestedWindow = this.compactStore!.hasStagedInWindow(game.key, finishAtMs - tailWindowMs, finishAtMs);
-      const stagedTailAtMs = hasRequestedWindow ? null : this.compactStore!.stagedTailAt(game.key);
-      const anchorOnStoredTail = stagedTailAtMs !== null;
-      const effectiveFinishAtMs = stagedTailAtMs ?? finishAtMs;
+      const hasStagedRequestedWindow = this.compactStore!.hasStagedInWindow(game.key, finishAtMs - tailWindowMs, finishAtMs);
+      const stagingTailAtMs = hasStagedRequestedWindow ? null : this.compactStore!.stagedTailAt(game.key);
+      // Once a compact match is finalized, its staging rows are gone. A later
+      // finish correction must re-anchor from the retained finalized tail
+      // instead of calling finalize against an empty staging table and
+      // replacing a good artifact with zero rows. Prefer whichever retained
+      // tail is newest when both stores have rows.
+      const finalizedTailAtMs = !hasStagedRequestedWindow && this.compactStore!.hasFinalizedRecords(game.key)
+        ? this.compactStore!.finalizedTailAt(game.key) : null;
+      const useFinalized = finalizedTailAtMs !== null && (stagingTailAtMs === null || finalizedTailAtMs >= stagingTailAtMs);
+      const storedTailAtMs = useFinalized ? finalizedTailAtMs : stagingTailAtMs;
+      const anchorOnStoredTail = storedTailAtMs !== null;
+      const effectiveFinishAtMs = storedTailAtMs ?? finishAtMs;
       const finalized = this.compactStore!.finalize(
-        anchorOnStoredTail ? { ...game, finishAnchor: "book-tail" } : game, effectiveFinishAtMs);
+        anchorOnStoredTail ? { ...game, finishAnchor: "book-tail" } : game, effectiveFinishAtMs,
+        useFinalized ? "finalized" : "staging");
       this.state.setCompactStorage(this.compactStore!.snapshot());
       signal.throwIfAborted();
+      if (finalized.records === 0) {
+        // Never turn a previous artifact into a "complete" empty replacement.
+        // The match row can still be refreshed, but the archive turn must retry
+        // when retained rows become available (or remain visibly failed).
+        this.state.markArchive(game.key, { status: "failed", runId: sourceRunId, attempt,
+          error: "no compact records in final window", refreshSnapshot: true,
+          retryAtMs: this.now() + Math.min(3_600_000, 60_000 * 2 ** Math.min(attempt - 1, 6)) });
+        return;
+      }
       // Report the reason the window is unusable, not just the front. A hole in
       // the middle leaves `missingFrontMs` at zero, and quoting only that made a
       // broken tail look almost complete.
-      const windowError = finalized.records === 0 ? "no compact records in final window"
-        : !finalized.windowComplete ? `incomplete final window: missing ${Math.round(finalized.missingFrontMs / 1000)}s from the front, largest gap ${Math.round(finalized.largestGapMs / 1000)}s`
+      const windowError = !finalized.windowComplete
+        ? `incomplete final window: missing ${Math.round(finalized.missingFrontMs / 1000)}s from the front, largest gap ${Math.round(finalized.largestGapMs / 1000)}s`
         : undefined;
       const anchorNote = anchorOnStoredTail
         ? `finish anchor moved to the last stored frame (published clock ${new Date(finishAtMs).toISOString()}, stored tail ${new Date(effectiveFinishAtMs).toISOString()})`

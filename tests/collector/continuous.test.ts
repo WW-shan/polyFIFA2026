@@ -78,7 +78,11 @@ test.each([false, true])("recovers pending stopped-run archives without using a 
   const path = await root(), config = continuousConfig({ dataRoot: join(path, "capture"), minFreeBytes: 100_000, pulseIntervalMs: 100_000 }, path);
   const oldDirectory = join(config.dataRoot, "runs", "tail-test"); await mkdir(oldDirectory, { recursive: true });
   const records = fixtureRecords();
-  if (conflict) records.splice(-1, 0, journalRecord(1, 310_000, "gamma", "event_metadata", eventMetadata(310_001)));
+  // A disputed boundary needs two independent clocks that disagree. A later
+  // value from the same source is a superseding refinement, not a conflict.
+  if (conflict) records.splice(-1, 0, journalRecord(1, 310_000, "sports", "ws_message",
+    JSON.stringify({ gameId: 123, slug: "game", sport: "soccer", score: "1-0", period: "2H", ended: true,
+      finishedTimestamp: new Date(310_001).toISOString() }), "sports"));
   records.forEach((r, index) => { r.sequence = index + 1; r.monotonicNs = String(BigInt(r.receivedAtMs) * 1_000_000n + BigInt(index)); });
   await writeFile(join(oldDirectory, "1970-01-01-000000.ndjson"), records.map(r => JSON.stringify(r)).join("\n") + "\n");
   const previous = new ContinuousState(config.dataRoot, config.port); previous.setRun("tail-test", oldDirectory);
@@ -120,7 +124,11 @@ test("new-run finish evidence is evaluated alongside old-run books before the fi
     })) });
   try {
     await manager.start(); await until(() => sink !== undefined);
-    sink!.record({ source: "gamma", kind: "event_metadata", data: eventMetadata(310_001) });
+    // An independent clock in the new run disagrees with the old run's gamma
+    // label; a later value from gamma itself would be a superseding witness.
+    sink!.record({ source: "sports", kind: "ws_message", connectionId: "sports",
+      data: JSON.stringify({ gameId: 123, slug: "game", sport: "soccer", score: "1-0", period: "2H", ended: true,
+        finishedTimestamp: new Date(310_001).toISOString() }) });
     release(); await until(() => runtime?.status === "running"); await manager.pulse();
     await until(() => manager.state.snapshot().games[0]?.archive?.status === "complete");
     const archive = manager.state.snapshot().games[0]!.archive!;
@@ -130,7 +138,8 @@ test("new-run finish evidence is evaluated alongside old-run books before the fi
     expect(quality.windows[0].finishConflict).toBe(true);
     expect(archive).toMatchObject({ priceReadyTokens: 0, strictReadyTokens: 0 });
     const facts = JSON.parse(await readFile(archive.finishFactsFile!, "utf8"));
-    expect(facts.facts).toContainEqual(expect.objectContaining({ atMs: 310_001, sourceRunId: runtime!.runId }));
+    expect(facts.facts).toContainEqual(expect.objectContaining({ atMs: 310_001, source: "sports.finishedAt",
+      sourceRunId: runtime!.runId }));
   } finally { release(); await manager.stop(); }
 }, 10_000);
 

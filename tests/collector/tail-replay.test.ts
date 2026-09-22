@@ -123,7 +123,11 @@ describe("auditable second-by-second final-five-minute books",()=>{
   test("unknown finish and conflicting finish labels stay explicit in quality and every derived row",async()=>{
     const missing=fixtureRecords();missing[1]!.data=eventMetadata(0);
     expect((await replay(missing)).summary.tokens.every(q=>q.missingSeconds===300)).toBe(true);
-    const conflict=fixtureRecords();conflict.splice(13,0,journalRecord(1,14_100,"gamma","event_metadata",eventMetadata(310_001)));
+    // Only two independent clocks disagreeing is a conflict; a corrected value
+    // from one source is a superseding witness, not a contradiction.
+    const conflict=fixtureRecords();conflict.splice(13,0,journalRecord(1,14_100,"sports","ws_message",
+      JSON.stringify({gameId:123,slug:"game",sport:"soccer",score:"1-0",period:"2H",ended:true,
+        finishedTimestamp:new Date(310_001).toISOString()}),"sports"));
     conflict.forEach((r,i)=>{r.sequence=i+1;r.monotonicNs=String(BigInt(r.receivedAtMs)*1_000_000n+BigInt(i));});
     const r=await replay(conflict);
     expect(r.summary.windows[0]?.finishConflict).toBe(true);

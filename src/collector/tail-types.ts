@@ -40,6 +40,69 @@ export interface TailFinishFact {
   sequence: number; frameIndex: number;
 }
 
+/**
+ * Newest witness per source.
+ *
+ * A source that re-publishes a corrected end time supersedes its own earlier
+ * value: Sports repeatedly refined the same match by seconds, and treating each
+ * refinement as an independent contradiction marked three quarters of the
+ * collected matches as disputed even though nothing disagreed. Only the newest
+ * value of each source takes part in the conflict decision.
+ */
+/** The fields every finish witness carries, whatever provenance it also keeps. */
+export interface FinishWitness { source: string; atMs: number; observedAtMs: number; sequence?: number; frameIndex?: number }
+
+export function newestFinishFacts<Witness extends FinishWitness>(facts: readonly Witness[]): Witness[] {
+  const newest = new Map<string, Witness>();
+  for (const fact of facts) {
+    const current = newest.get(fact.source);
+    // Ordering is by when the witness was observed, not by the clock it names:
+    // a corrected end time can move the boundary backwards.
+    const sequence = fact.sequence ?? 0, currentSequence = current?.sequence ?? 0;
+    if (current === undefined || fact.observedAtMs > current.observedAtMs
+      || (fact.observedAtMs === current.observedAtMs
+        && (sequence > currentSequence
+          || (sequence === currentSequence && (fact.frameIndex ?? 0) >= (current.frameIndex ?? 0))))) {
+      newest.set(fact.source, fact);
+    }
+  }
+  return [...newest.values()];
+}
+
+/** Newest value of every source that publishes a real match clock. */
+export function publishedFinishValues(facts: readonly FinishWitness[]): number[] {
+  return newestFinishFacts(facts).filter(fact => isPublishedFinishSource(fact.source)).map(fact => fact.atMs);
+}
+
+/**
+ * True when two independent clocks still disagree.
+ *
+ * `book-quiet` / `book-tail` are the collector's own fallbacks, not witnesses,
+ * so they never create a conflict here; a published artifact that keeps a
+ * fallback boundary while a clock exists is handled by the callers.
+ */
+export function finishEvidenceConflict(facts: readonly FinishWitness[]): boolean {
+  return new Set(publishedFinishValues(facts)).size > 1;
+}
+
+/**
+ * True when a window's end boundary is still disputed by its own evidence.
+ *
+ * Disputed means two independent clocks disagree, or the boundary is not a
+ * value any published clock named while such a clock exists (a published
+ * artifact that kept the collector's own `book-quiet` / `book-tail` fallback).
+ * Superseded values from the same source are not disputes.
+ */
+export function finishBoundaryDisputed(facts: readonly FinishWitness[], endAtMs: number | null): boolean {
+  // Any published witness counts as naming the boundary, including one this
+  // same source later corrected: a superseded clock value is still a clock,
+  // not the collector's own book fallback.
+  const named = facts.filter(fact => isPublishedFinishSource(fact.source));
+  if (named.length === 0) return false;
+  if (finishEvidenceConflict(facts)) return true;
+  return endAtMs === null || !named.some(fact => fact.atMs === endAtMs);
+}
+
 export interface TailMarket {
   eventId: string; eventSlug: string; gameId: string | null;
   marketId: string; marketSlug: string; conditionId: string;

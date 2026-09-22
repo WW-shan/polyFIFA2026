@@ -111,6 +111,40 @@ describe("compact sqlite tail store", () => {
     store.close();
   });
 
+  test("clears a stale finish conflict only when replacement facts are present", async () => {
+    const path = await root();
+    const store = await open(path, () => 400);
+    store.ingest(record(1, 300, { asset_id: "yes", bids: [], asks: [{ price: "0.6", size: "1" }] }), ["game:1"]);
+    const first = [{ source: "sports.finishedAt" as const, atMs: 399, observedAtMs: 399, eventId: null, eventSlug: "game",
+      gameId: "1", sourceRunId: "run-1", sourceRunDirectory: null, sequence: 9, frameIndex: 0 }];
+    store.finalize({ ...game("game:1", 400), finishConflict: true, finishFacts: first }, 400);
+
+    // A refresh without replacement facts must not erase an existing dispute.
+    store.refreshFinishEvidence({ key: "game:1", finishAnchor: "sports.finishedAt", finishConflict: false });
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ finishConflict: true, finishFacts: first });
+
+    const replacement = [...first, { ...first[0]!, atMs: 400, observedAtMs: 400, sequence: 10 }];
+    store.refreshFinishEvidence({ key: "game:1", finishAnchor: "sports.finishedAt", finishConflict: false, finishFacts: replacement });
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ finishConflict: false, finishFacts: replacement });
+    store.close();
+  });
+
+  test("re-finalizes retained rows after staging has already been consumed", async () => {
+    const path = await root();
+    const store = await open(path, () => 400);
+    store.ingest(record(1, 300, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.ingest(record(2, 400, { asset_id: "yes", value: 2 }), ["game:1"]);
+    store.finalize(game("game:1", 400), 400);
+    const before = store.readFinalized("game:1");
+    expect(before).toHaveLength(2);
+
+    const result = store.finalize({ ...game("game:1", 400), finishAnchor: "book-tail" }, 400, "finalized");
+    expect(result.records).toBe(2);
+    expect(store.readFinalized("game:1")).toHaveLength(2);
+    expect(store.readMatchCoverage("game:1")).toMatchObject({ finishAnchor: "book-tail" });
+    store.close();
+  });
+
   test("does not treat sports or lifecycle rows as order-book window coverage", async () => {
     const path = await root();
     const store = await open(path, () => 400);

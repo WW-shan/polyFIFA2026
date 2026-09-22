@@ -460,6 +460,16 @@ describe("coverage, exclusions and outcome accounting", () => {
     expect(backtestTailArchives([conflict], options).trials[0]?.exclusions).toContain("conflicting-finish-labels");
   });
 
+  test("a superseded value from the same clock does not dispute the boundary", () => {
+    const data = archive();
+    // The same source first published an earlier end time and then corrected it
+    // to the boundary the archive uses. Nothing independent disagrees.
+    data.summary.windows[0]!.finishEvidence!.push({ atMs: finish - 1_000, observedAtMs: finish + 50,
+      source: "gamma.finishedTimestamp", eventSlug: "a-b" });
+    const trials = backtestTailArchives([data], options).trials;
+    expect(trials.every(trial => !trial.exclusions.includes("conflicting-finish-labels"))).toBe(true);
+  });
+
   test("per-set market types explicitly retain the match-finish window basis", () => {
     const data = archive();
     data.summary.windows[0]!.markets.forEach(market => { market.marketType = "set_winner"; });
