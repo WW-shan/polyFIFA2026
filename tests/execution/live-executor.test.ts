@@ -43,6 +43,23 @@ describe("LiveExecutor", () => {
     });
   });
 
+  test("treats blank env values as unset instead of overriding defaults", () => {
+    expect(liveConfigFromEnv({
+      POLY_CLOB_HOST: "",
+      POLY_CHAIN_ID: "",
+      POLY_SIGNATURE_TYPE: "",
+      POLY_DEPOSIT_WALLET_ADDRESS: ""
+    })).toMatchObject({
+      host: "https://clob.polymarket.com",
+      chainId: 137,
+      signatureType: 1
+    });
+    expect(liveConfigFromEnv({ POLY_CLOB_HOST: "  ", POLY_CHAIN_ID: "  " })).toMatchObject({
+      host: "https://clob.polymarket.com",
+      chainId: 137
+    });
+  });
+
   test("passes order details to injected live client", async () => {
     const placeLimitBuy = vi.fn(async (): Promise<TradeResult> => ({
       mode: "live",

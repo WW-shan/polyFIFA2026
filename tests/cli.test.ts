@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchCandidateOrderbooks, runCli } from "../src/cli.js";
 import type { MatchState, OrderbookSnapshot, StrategyMarket } from "../src/domain/types.js";
+import type { SettlementConfig } from "../src/execution/settlement.js";
 
 const sportsLiveMock = vi.hoisted(() => {
   type Listener = (event?: unknown) => void;
@@ -3814,6 +3815,49 @@ describe("CLI", () => {
         status: "no_trade",
         reason: "MATCH_NOT_LATE_ENOUGH"
       }
+    });
+  });
+
+  test("an empty POLY_RELAYER_URL falls back to the default relayer endpoint", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-empty-relayer-"));
+    const marketsFile = join(dir, "markets.json");
+    await writeFile(marketsFile, JSON.stringify([]));
+    const settleRedeemablePositions = vi.fn((_config: SettlementConfig) => new Promise<never>(() => {}));
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-empty-relayer-2026-06-27",
+        homeTeam: "Empty",
+        awayTeam: "Relayer",
+        homeGoals: 1,
+        awayGoals: 0,
+        minute: 70,
+        period: "2H",
+        isLive: true
+      };
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", marketsFile,
+      "--interval-ms", "0",
+      "--max-iterations", "1"
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x00000000000000000000000000000000000000bb",
+      POLY_PRIVATE_KEY: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      POLY_RELAYER_URL: ""
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-empty-relayer-2026-06-27", homeTeam: "Empty", awayTeam: "Relayer" }],
+      watchSportsUpdates: async () => updates(),
+      fetchVerifiedClock: async () => null,
+      settleRedeemablePositions
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(settleRedeemablePositions).toHaveBeenCalledTimes(1);
+    expect(settleRedeemablePositions.mock.calls[0]?.[0]).toMatchObject({
+      relayerUrl: "https://relayer-v2.polymarket.com"
     });
   });
 

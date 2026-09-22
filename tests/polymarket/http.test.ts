@@ -180,14 +180,15 @@ describe("HTTP request lifetime", () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = `127.0.0.1:${(server.address() as AddressInfo).port}`;
       const proxyUrl = tunnel ? `http://${address}` : mode === "HTTPS proxy TLS" ? `https://${address}` : "";
+      const abortAfterMs = 500;
       const script = `
         import { fetchJson } from './src/polymarket/http.ts';
         const controller = new AbortController();
         const reason = new Error('caller stop');
-        ${mode === "caller abort" ? "setTimeout(() => controller.abort(reason), 50);" : ""}
+        ${mode === "caller abort" ? `setTimeout(() => controller.abort(reason), ${abortAfterMs});` : ""}
         try {
           await fetchJson(${JSON.stringify(`https://${address}/test`)}, {
-            timeoutMs: ${mode === "caller abort" ? 10_000 : 50}, proxyUrl: ${JSON.stringify(proxyUrl)}, signal: controller.signal
+            timeoutMs: ${mode === "caller abort" ? 10_000 : abortAfterMs}, proxyUrl: ${JSON.stringify(proxyUrl)}, signal: controller.signal
           });
           process.stdout.write('UNEXPECTED_SUCCESS\\n');
         } catch (error) {

@@ -397,11 +397,11 @@ function stalePlanResult(decision: Extract<TradeDecision, { action: "BUY" }>): T
 }
 
 export function liveConfigFromEnv(env: Record<string, string | undefined>): LiveExecutorConfig {
-  const depositWalletAddress = env.POLY_DEPOSIT_WALLET_ADDRESS ?? env.DEPOSIT_WALLET_ADDRESS;
+  const depositWalletAddress = nonEmptyEnv(env.POLY_DEPOSIT_WALLET_ADDRESS) ?? nonEmptyEnv(env.DEPOSIT_WALLET_ADDRESS);
   const config: LiveExecutorConfig = {
-    host: env.POLY_CLOB_HOST ?? "https://clob.polymarket.com",
-    chainId: Number(env.POLY_CHAIN_ID ?? 137),
-    signatureType: depositWalletAddress ? 3 : Number(env.POLY_SIGNATURE_TYPE ?? 1)
+    host: nonEmptyEnv(env.POLY_CLOB_HOST) ?? "https://clob.polymarket.com",
+    chainId: Number(nonEmptyEnv(env.POLY_CHAIN_ID) ?? 137),
+    signatureType: depositWalletAddress ? 3 : Number(nonEmptyEnv(env.POLY_SIGNATURE_TYPE) ?? 1)
   };
 
   if (env.POLY_PRIVATE_KEY) config.privateKey = env.POLY_PRIVATE_KEY;
@@ -640,6 +640,11 @@ function stringRequired(record: Record<string, unknown>, key: string): string {
 function sideField(value: unknown): "BUY" | "SELL" | 0 | 1 {
   if (value === "BUY" || value === "SELL" || value === 0 || value === 1) return value;
   throw new Error("POLY_1271_ORDER_FIELD_MISSING: side");
+}
+
+function nonEmptyEnv(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function parseBooleanEnv(value: string): boolean {

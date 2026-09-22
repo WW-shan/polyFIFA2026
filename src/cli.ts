@@ -1602,7 +1602,7 @@ function autoSettlementMonitor(
     enabled: true,
     walletAddress,
     privateKey: liveConfig.privateKey,
-    relayerUrl: env.POLY_RELAYER_URL ?? DEFAULT_POLYMARKET_RELAYER_URL,
+    relayerUrl: nonEmptyEnv(env.POLY_RELAYER_URL) ?? DEFAULT_POLYMARKET_RELAYER_URL,
     chainId: liveConfig.chainId,
     rpcUrl: liveConfig.rpcUrl ?? DEFAULT_POLYGON_RPC_URL,
     intervalMs: numberEnv(env.POLY_AUTO_REDEEM_INTERVAL_MS) ?? 60_000,
@@ -1986,7 +1986,7 @@ function shouldUseLiveBalance(args: ParsedArgs, env: Record<string, string | und
 
 function resolveLedgerFile(args: ParsedArgs, env: Record<string, string | undefined>): string | undefined {
   if (args.ledgerFile) return args.ledgerFile;
-  if (args.mode === "live" || args.mode === "status") return env.POLY_LEDGER_FILE ?? "data/live-ledger.json";
+  if (args.mode === "live" || args.mode === "status") return nonEmptyEnv(env.POLY_LEDGER_FILE) ?? "data/live-ledger.json";
   return undefined;
 }
 
@@ -2183,6 +2183,11 @@ function numberArg(value: string, flag: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`${flag} must be a number`);
   return parsed;
+}
+
+function nonEmptyEnv(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function numberEnv(value: string | undefined): number | undefined {
