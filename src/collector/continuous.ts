@@ -15,6 +15,7 @@ import { acquireCaptureLock, availableDiskBytes, captureStateFingerprint, pruneR
   readCaptureState, writeCaptureHeartbeat, writeCaptureState } from "./continuous-storage.js";
 import type { JsonRequester, JournalRecord, RecordInput } from "./types.js";
 import { metadataFromRecord } from "./tail-context.js";
+import { finishBoundaryDisputed, isTailFinishSource } from "./tail-types.js";
 import { CompactTailStore, openCompactTailStore } from "./continuous-tail-store.js";
 
 export interface ContinuousDependencies {
@@ -105,7 +106,25 @@ export class ContinuousCollector {
     // prune the tail it still needs to finalize.
     if (this.compactStore) {
       for (const game of this.state.gamesView()) {
-        if (game.finishFacts?.length) this.compactStore.refreshFinishEvidence(game);
+        // The compact store is the source of truth for a completed artifact's
+        // effective boundary. Older builds stored a book fallback there while
+        // leaving the published clock in hot state, so reconcile before serving
+        // status or retrying anything from the restored snapshot. Do this
+        // before refreshing facts: refreshFinishEvidence writes the hot
+        // conflict flag into SQLite and could otherwise erase a persisted
+        // fallback conflict during startup.
+        const coverage = game.archive?.status === "complete" ? this.compactStore.readMatchCoverage(game.key) : undefined;
+        if (coverage && isTailFinishSource(coverage.finishAnchor) && Number.isSafeInteger(coverage.finishedAtMs) && coverage.finishedAtMs > 0) {
+          // Persist the same conservative boundary/conflict decision the
+          // exporter will read, so hot state, SQLite and the archive agree.
+          this.compactStore.refreshFinishEvidence({
+            key: game.key, finishAnchor: coverage.finishAnchor, finishConflict: coverage.finishConflict, finishFacts: coverage.finishFacts
+          });
+          this.state.markArchive(game.key, game.archive!, {
+            finishedAtMs: coverage.finishedAtMs, finishAnchor: coverage.finishAnchor, finishConflict: coverage.finishConflict
+          });
+        }
+        if (game.archive?.status !== "complete" && game.finishFacts?.length) this.compactStore.refreshFinishEvidence(game);
         if (game.finishedAtMs !== null && game.archive?.status !== "complete") {
           this.compactStore.markPendingFinalize(game.key, game.finishedAtMs);
         }
@@ -376,8 +395,11 @@ export class ContinuousCollector {
       const storedTailAtMs = useFinalized ? finalizedTailAtMs : stagingTailAtMs;
       const anchorOnStoredTail = storedTailAtMs !== null;
       const effectiveFinishAtMs = storedTailAtMs ?? finishAtMs;
+      const finishConflict = anchorOnStoredTail
+        ? finishBoundaryDisputed(game.finishFacts ?? [], effectiveFinishAtMs)
+        : game.finishConflict;
       const finalized = this.compactStore!.finalize(
-        anchorOnStoredTail ? { ...game, finishAnchor: "book-tail" } : game, effectiveFinishAtMs,
+        anchorOnStoredTail ? { ...game, finishAnchor: "book-tail", finishConflict } : game, effectiveFinishAtMs,
         useFinalized ? "finalized" : "staging");
       this.state.setCompactStorage(this.compactStore!.snapshot());
       signal.throwIfAborted();
@@ -402,7 +424,9 @@ export class ContinuousCollector {
       const archiveNote = [windowError, anchorNote].filter((value): value is string => value !== undefined).join("; ");
       this.state.markArchive(game.key, { status: "complete", runId: sourceRunId, attempt,
         outputDirectory: this.compactStore!.databasePath, finishRevision: revision, priceReadyTokens: 0, strictReadyTokens: 0,
-        ...(archiveNote ? { error: archiveNote } : {}) });
+        ...(archiveNote ? { error: archiveNote } : {}) }, anchorOnStoredTail ? {
+          finishedAtMs: effectiveFinishAtMs, finishAnchor: "book-tail", finishConflict
+        } : undefined);
     })().catch(error => {
       this.state.markArchive(game.key, { status: "failed", runId: sourceRunId, attempt, error: String(error), retryAtMs: this.now() + 60_000 });
       this.state.issue("compact_archive", error, this.now());

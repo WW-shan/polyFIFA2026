@@ -311,6 +311,49 @@ test("compact mode keeps raw market frames out of NDJSON and finalizes them in S
   expect(records.some(row => row.kind === "ws_message")).toBe(false);
 });
 
+test("compact finalization publishes a stored-tail fallback into hot state and SQLite", async () => {
+  const path = await root();
+  let now = 1_000, sink: RecordSink | undefined, runtime: CollectorRuntime | undefined;
+  const config = continuousConfig({ dataRoot: join(path, "capture"), compactStorageEnabled: true,
+    minFreeBytes: 100_000, pulseIntervalMs: 100_000, postFinishRetentionMs: 0 }, path);
+  const event = normalizeCollectorEvent({ id: "A", slug: "A", gameId: "A", live: true,
+    markets: [{ id: "A-m", conditionId: "A-c", slug: "A-m", outcomes: ["Yes", "No"], clobTokenIds: ["A-yes", "A-no"] }] })!;
+  const manager = new ContinuousCollector(config, {
+    now: () => now, diskBytes: async () => 1_000_000, startServer: noServer,
+    createJournal: options => createJournal({ ...options, monotonicNs: () => BigInt(now) * 1_000_000n }),
+    createCollector: (options, deps) => (runtime = createCollector(options, { ...deps, now: () => now,
+      discover: async () => [event], request: async () => ({}), createStreams: options => {
+        sink = options.journal;
+        return { start() {}, setTokens() {}, stop() {} };
+      } }))
+  });
+  try {
+    await manager.start(); await until(() => runtime?.status === "running");
+    // The published clock is earlier than the only retained book frame. The
+    // requested window is therefore empty and finalization must publish the
+    // real stored tail, not the clock, while keeping the clock as conflict evidence.
+    sink!.record({ source: "sports", kind: "ws_message", connectionId: "sports", data: JSON.stringify({
+      gameId: "A", slug: "A", sport: "tennis", ended: true, finishedAt: new Date(now).toISOString()
+    }) });
+    now = 1_100;
+    sink!.record({ source: "clob", kind: "ws_message", connectionId: "c", data: book("A-yes", "0.50", "0.60", now, "stored-tail") });
+    now = 1_200;
+    sink!.record({ source: "collector", kind: "event_retired", data: { eventId: "A", finishedAtMs: 1_000 } });
+    await manager.pulse();
+    await until(() => manager.state.snapshot().games.some(game => game.key === "game:A" && game.archive?.status === "complete"));
+
+    const hot = manager.state.snapshot().games.find(game => game.key === "game:A")!;
+    expect(hot).toMatchObject({ finishedAtMs: 1_100, finishAnchor: "book-tail", finishConflict: true });
+    expect(hot.archive?.error).toContain("finish anchor moved to the last stored frame");
+
+    const sqlite = await import("../../src/collector/continuous-tail-store.js");
+    const store = await sqlite.openCompactTailStore({ dataRoot: config.dataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, now: () => now });
+    expect(store.readMatchCoverage("game:A")).toMatchObject({ finishedAtMs: 1_100, finishAnchor: "book-tail", finishConflict: true });
+    store.close();
+  } finally { await manager.stop(); }
+}, 10_000);
+
 test("the anchor container is audit evidence and does not file every book twice", async () => {
   const path = await root();
   let now = 900, sink: RecordSink | undefined, runtime: CollectorRuntime | undefined;

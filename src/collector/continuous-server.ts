@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash } from "node:crypto";
 import type { AddressInfo, Socket } from "node:net";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { compactContinuousStatus, type CompactContinuousStatus, type ContinuousStatus } from "./continuous-state.js";
 import { artifactTypes, ContinuousArchiveCatalog, openArtifact, type ArtifactName, type HistoricalArchive } from "./continuous-archive-catalog.js";
@@ -62,12 +62,13 @@ const browserScript = String.raw`
       if (game.finishConflict) phase.append(node("p", "终场时间存在冲突"));
       if (game.archive && game.archive.error) phase.append(node("p", game.archive.error));
       const complete = game.archive && game.archive.status === "complete";
+      const downloadable = complete && typeof game.archive.outputDirectory === "string";
       row.append(title, phase, node("td", game.tokenIds.length),
         node("td", "盘口 " + game.bookUpdates + " · 成交 " + game.trades + " · 状态 " + game.stateObservations),
         node("td", age(game.lastBookAtMs)), node("td", complete ? game.archive.priceReadyTokens : null),
         node("td", complete ? game.archive.strictReadyTokens : null));
       const links = node("td");
-      if (complete && safeKey(game.key)) for (const base of files) {
+      if (downloadable && safeKey(game.key)) for (const base of files) {
         const filename = base === "raw-events.ndjson" && game.archive.rawEventsFile === "raw-events.ndjson.gz" ? "raw-events.ndjson.gz" : base;
         const link = node("a", filename);
         link.setAttribute("href", "/exports/" + encodeURIComponent(game.key) + "/" + filename);
@@ -264,6 +265,11 @@ function respond(request: IncomingMessage, response: ServerResponse, code: numbe
   response.end(request.method === "HEAD" ? undefined : body);
 }
 
+function strictlyInside(root: string, path: string): boolean {
+  const child = relative(root, resolve(path));
+  return child !== "" && child !== ".." && !child.startsWith(".." + sep) && !isAbsolute(child);
+}
+
 /** A read-only, owned listener: no collector controls, configuration reads or network clients. */
 export async function startContinuousServer(options: {
   port: number; dataRoot: string; getStatus: (view?: "full" | "compact") => ContinuousStatus | CompactContinuousStatus;
@@ -308,7 +314,14 @@ export async function startContinuousServer(options: {
         const current = options.getStatus(view);
         const status = view === "compact" ? compactContinuousStatus(current) : current;
         const games = status.games.map(game => {
-          const rawEventsFile = game.archive?.outputDirectory && archives.cachedRawEventsFile(game.archive.outputDirectory);
+          const outputDirectory = game.archive?.outputDirectory;
+          const downloadable = typeof outputDirectory === "string" && strictlyInside(exportsRoot, outputDirectory);
+          if (!game.archive || !downloadable) {
+            if (!game.archive) return game;
+            const { outputDirectory: _compactDatabase, ...archive } = game.archive;
+            return { ...game, archive };
+          }
+          const rawEventsFile = archives.cachedRawEventsFile(outputDirectory);
           return rawEventsFile ? { ...game, archive: { ...game.archive, rawEventsFile } } : game;
         });
         respond(request, response, 200, JSON.stringify({ ...status, games }), "application/json; charset=utf-8");

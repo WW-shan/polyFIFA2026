@@ -767,11 +767,21 @@ export class ContinuousState {
         (!game.archive || (game.archive.status === "failed" && (game.archive.retryAtMs ?? 0) <= nowMs));
     });
   }
-  markArchive(key: string, archive: ArchiveState): void {
+  markArchive(key: string, archive: ArchiveState, finish?: {
+    finishedAtMs: number; finishAnchor: FinishAnchor; finishConflict: boolean;
+  }): void {
     const game = this.games.get(key); if (!game) throw new Error("CAPTURE_GAME_UNKNOWN");
-    game.archive = { ...archive, ...(game.finishConflict && archive.status === "complete" ? {
-      priceReadyTokens: 0, strictReadyTokens: 0, error: "conflicting finish evidence; artifact is available but quality is not approved"
+    const conflict = finish?.finishConflict ?? game.finishConflict;
+    game.archive = { ...archive, ...(conflict && archive.status === "complete" ? {
+      priceReadyTokens: 0, strictReadyTokens: 0,
+      error: archive.error ?? "conflicting finish evidence; artifact is available but quality is not approved"
     } : {}) };
+    if (finish !== undefined) {
+      game.finishedAtMs = finish.finishedAtMs;
+      game.finishAnchor = finish.finishAnchor;
+      game.finishConflict = finish.finishConflict;
+      if (archive.finishRevision !== undefined) game.finishRevision = archive.finishRevision;
+    }
     game.phase = archive.status === "complete" ? "archived" : archive.status === "running" ? "archiving" : "archive_failed";
     // Finished outputs and raw history remain on disk; bound the hot dashboard.
     const finished = [...this.games.values()].filter(game => game.phase === "archived" || game.phase === "missed");

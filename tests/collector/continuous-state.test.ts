@@ -27,6 +27,17 @@ describe("persistent continuous capture observations", () => {
     expect(state.snapshot().games[0]).toMatchObject({ phase: "archived", archive: { priceReadyTokens: 2, strictReadyTokens: 0 } });
   });
 
+  test("markArchive can publish a re-anchored fallback finish without losing conflict provenance", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    for (const record of fixtureRecords()) state.observe(record);
+    state.markArchive("game:123", { status: "complete", runId: "tail-test", attempt: 1,
+      outputDirectory: "/capture/tail.sqlite", finishRevision: 2 }, {
+        finishedAtMs: 320_000, finishAnchor: "book-tail", finishConflict: true
+      });
+    expect(state.snapshot().games[0]).toMatchObject({ finishedAtMs: 320_000, finishAnchor: "book-tail", finishConflict: true,
+      archive: { status: "complete", finishRevision: 2, error: "conflicting finish evidence; artifact is available but quality is not approved" } });
+  });
+
   test("a short /books batch only credits the tokens its response actually carried", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     const metadata = (id: string, yes: string) => ({ event: { id, slug: `${id}-slug`, title: `${id} match`, gameId: null,

@@ -5,6 +5,7 @@ import { resolve, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { CapturedGame } from "./continuous-state.js";
+import { finishBoundaryDisputed, isPublishedFinishSource } from "./tail-types.js";
 import type { TailFinishFact } from "./tail-types.js";
 import { objectValue } from "./replay-values.js";
 import { recordMarksActiveBook } from "./book-evidence.js";
@@ -1135,11 +1136,20 @@ export class CompactTailStore {
       if (!Array.isArray(value)) throw new Error("COMPACT_TAIL_FINISH_FACTS_INVALID");
       finishFacts = value as TailFinishFact[];
     }
+    const finishedAtMs = row.finished_at_ms ?? 0;
+    const recordedAnchor = row.finish_anchor ?? null;
+    const published = finishFacts.filter(fact => isPublishedFinishSource(fact.source));
+    // Older rows could retain a published anchor label after the collector had
+    // actually re-anchored the window on the last stored book. If no published
+    // witness names the stored boundary, keep that boundary and expose the
+    // disagreement rather than letting export move it to a later clock.
+    const inferredFallback = isPublishedFinishSource(recordedAnchor) && published.length > 0
+      && !published.some(fact => fact.atMs === finishedAtMs);
     return { windowStartMs: typeof row.window_start_ms === "number" ? row.window_start_ms : null,
       windowComplete: row.window_complete === 1, missingFrontMs: row.missing_front_ms ?? 0,
       largestGapMs: row.largest_gap_ms ?? 0,
-      finishAnchor: row.finish_anchor ?? null, finishedAtMs: row.finished_at_ms ?? 0, title: row.title ?? "",
-      finishConflict: row.finish_conflict === 1, finishFacts };
+      finishAnchor: inferredFallback ? "book-tail" : recordedAnchor, finishedAtMs, title: row.title ?? "",
+      finishConflict: row.finish_conflict === 1 || finishBoundaryDisputed(finishFacts, finishedAtMs), finishFacts };
   }
 
   /** Trimmed Gamma event document stored with a finalized match, if any. */

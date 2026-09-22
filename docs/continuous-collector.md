@@ -551,7 +551,15 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 
 ### 本轮验证证据
 
-**2026-09-23 修复后（当前运行态）**
+**2026-09-23 全链路复核（最新）**
+
+- 回归修复：旧 compact 行可能把真实尾帧兜底写成 published anchor；导出会因此把窗口静默移到后来到达的 Sports/Gamma 时钟。现在 `readMatchCoverage()` 会在没有 published witness 精确命名已存边界时，把它保留为 `book-tail` 并标记 `finishConflict=true`；重启迁移、热状态、SQLite 与导出使用同一判定。状态页也不再给 compact 的 `tail.sqlite` 伪造 `/exports/...` 下载链接。
+- 验证：`npm test` **96 文件 / 2,682 项通过**，`npm run typecheck` 通过，`git diff --check` 通过。生产采集器重启为 PID **19797**（健康守护 PID 13812），`mode=collecting`、`errors=[]`、`dataAgeMs` 约 3 秒，`/`、`/api/status?view=compact`（约 503 KB）、`/api/archives` 均 200，SQLite `quick_check=ok`。
+- 数据校正：启动迁移把当前 53 场 finalized 中 **28 场**从误标的 published anchor 纠正为 `book-tail + finish_conflict=1`；其中 `game:6299721` 的终点保持 `1790099706151`，不再被 Sports 的 `1790099740871` 静默替换。
+- 全链路实测：compact 导出 **53/53 成功、failed=0**；归档目录扫描 **53/53 可读、diagnostics 全 0**；默认回测 **18,048 scenario / 29 eligible**，显式 `--allow-book-anchor-finish` 后 **18,048 scenario / 109 eligible**。28 个冲突窗口在两组结果中都被排除，未被当成可信窗口。
+- 说明：`game:6288468` 与 `game:78818736` 仍是历史前段缺口的真实不完整窗口；没有插值或把缺失数据伪装成完整。
+
+**2026-09-23 修复后（上一轮运行态）**
 
 - 全量测试：**96 个测试文件 / 2,672 项测试通过，0 失败**；`tsc --noEmit` 通过；`git diff --check` 通过。
 - 生产重启：`npm run collect:restart` 将采集器 PID 从 89693 换为 **3436**，健康守护 PID 从 89708 换为 **3440**。重启后 `collect:status` 为 `mode=collecting`、`errors=[]`、`dataAgeMs` 约 3–5 秒；`/`、`/api/status?view=compact`（约 466 KB）、`/api/archives` 全部 200；`PRAGMA quick_check=ok`、`journal_mode=wal`；`matches=46`、`finish_conflict=1` 的匹配数为 **0**。

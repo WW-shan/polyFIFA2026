@@ -221,6 +221,14 @@ describe("continuous loopback status server", () => {
     expect(compact.games[0].archive).not.toHaveProperty("runId");
   });
 
+  test("does not advertise compact database finalizations as downloadable archives", async () => {
+    status.games = [game({ phase: "archived", archive: {
+      status: "complete", runId: "run-test", attempt: 1, outputDirectory: join(dataRoot, "tail.sqlite")
+    } })];
+    const view = await openDashboard(await start());
+    expect(view.get("games").find(node => node.tagName === "a")).toEqual([]);
+  });
+
   test("actually binds only IPv4 127.0.0.1 and reports the allocated port", async () => {
     // Observe the real server's bound address; the listener and HTTP transport are not mocked.
     const listen = vi.spyOn(Server.prototype, "listen");
