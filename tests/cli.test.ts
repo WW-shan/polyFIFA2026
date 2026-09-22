@@ -252,6 +252,140 @@ describe("CLI", () => {
     });
   });
 
+  test("--rest-price rests a maker bid when nothing is takable at or below it", async () => {
+    const result = await runCli([
+      "--mode", "paper",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--rest-price", "0.7"
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(result.stdout);
+    expect(output).toMatchObject({
+      mode: "paper",
+      status: "posted",
+      action: "BUY",
+      bestAsk: 0.7,
+      reservedNotional: 96.999
+    });
+    expect(output.orderType).toBeUndefined();
+  });
+
+  test("live passes release a resting reservation once the venue reports the order closed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-reconcile-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([{
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "fifwc-esp-ksa-2026-06-21",
+      marketSlug: "fifwc-esp-ksa-2026-06-21-spread-home-2pt5",
+      tokenId: "token-spain-2p5",
+      conditionId: "cond-spain-2p5",
+      outcome: "Spain",
+      orderId: "expired-resting",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    }]));
+
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ], {}, {
+      getLiveOrder: async (_config, orderId) => ({ id: orderId, status: "CANCELED" })
+    });
+
+    // The stale reservation is released, so the run proceeds past the duplicate
+    // gate and only then fails on missing live credentials.
+    expect(result.stderr).toContain("LIVE_CREDENTIALS_MISSING");
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+      expect.objectContaining({ orderId: "expired-resting", status: "canceled", reservedNotional: 0 })
+    ]);
+  });
+
+  test("--rest-price caps the live refresh so a taker leg cannot be repriced above the bid", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-rest-cap-"));
+    let capturedMaxEntryPrice: number | undefined;
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--rest-price", "0.7",
+      "--ledger-file", join(dir, "ledger.json")
+    ], {}, {
+      executeLive: async (decision, options) => {
+        capturedMaxEntryPrice = options.maxEntryPrice;
+        return {
+          mode: "live",
+          status: "posted",
+          orderId: "live-rest",
+          tokenId: decision.tokenId,
+          price: decision.bestAsk,
+          shares: 0,
+          notional: 0,
+          fee: 0,
+          estimatedPayout: 0,
+          estimatedProfit: 0,
+          reservedNotional: decision.notional
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(capturedMaxEntryPrice).toBe(0.7);
+  });
+
+  test("--cancel-order cancels through the injected client and releases the ledger reservation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-cancel-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([{
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-1",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    }]));
+    const canceled: string[] = [];
+
+    const result = await runCli([
+      "--mode", "live",
+      "--event-slug", "fifwc-esp-ksa-2026-06-21",
+      "--cancel-order", "resting-1",
+      "--ledger-file", ledgerFile
+    ], {}, {
+      cancelLiveOrder: async (_config, orderId) => {
+        canceled.push(orderId);
+        return { canceled: true };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(canceled).toEqual(["resting-1"]);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "cancel_requested", orderId: "resting-1", releasedReservation: true });
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+      expect.objectContaining({ orderId: "resting-1", status: "canceled", reservedNotional: 0 })
+    ]);
+  });
+
   test("live mode without credentials returns LIVE_CREDENTIALS_MISSING", async () => {
     const result = await runCli([
       "--mode", "live",

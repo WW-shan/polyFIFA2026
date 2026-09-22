@@ -17,11 +17,12 @@ export class PaperExecutor {
     }
 
     const legs = decision.legs?.length ? decision.legs : [decisionToLeg(decision)];
-    const results = legs.map((leg) => paperFillLeg(leg));
+    const results = legs.map((leg) => (leg.resting === true ? paperRestingLeg(leg) : paperFillLeg(leg)));
     const aggregate = aggregatePaperResults(results);
+    const resting = results.length > 0 && results.every((result) => result.status === "posted");
     return {
       mode: "paper",
-      status: "filled",
+      status: resting ? "posted" : "filled",
       orderId: results.length === 1 ? results[0]!.orderId : deterministicPaperOrderId(decision.conditionId, decision.tokenId, aggregate.shares, decision.bestAsk),
       tokenId: decision.tokenId,
       price: decision.bestAsk,
@@ -29,7 +30,8 @@ export class PaperExecutor {
       notional: aggregate.notional,
       fee: aggregate.fee,
       estimatedPayout: aggregate.estimatedPayout,
-      estimatedProfit: aggregate.estimatedProfit,
+      estimatedProfit: resting ? 0 : aggregate.estimatedProfit,
+      ...(resting ? { reservedNotional: legs.reduce((total, leg) => total + leg.notional, 0) } : {}),
       ...(decision.legs?.length ? { legs: results } : {}),
       raw: {
         marketSlug: decision.marketSlug,
@@ -82,6 +84,29 @@ function paperFillLeg(leg: BuyTradeLeg): TradeResultLeg {
       marketSlug: leg.marketSlug,
       outcome: leg.outcome,
       line: leg.line
+    }
+  };
+}
+
+/** A resting bid has not traded yet: it is posted and reserves its notional. */
+function paperRestingLeg(leg: BuyTradeLeg): TradeResultLeg {
+  return {
+    mode: "paper",
+    status: "posted",
+    orderId: deterministicPaperOrderId(leg.conditionId, leg.tokenId, leg.shares, leg.price),
+    tokenId: leg.tokenId,
+    price: leg.price,
+    shares: 0,
+    notional: 0,
+    fee: 0,
+    estimatedPayout: 0,
+    estimatedProfit: 0,
+    reservedNotional: leg.notional,
+    raw: {
+      marketSlug: leg.marketSlug,
+      outcome: leg.outcome,
+      line: leg.line,
+      resting: true
     }
   };
 }

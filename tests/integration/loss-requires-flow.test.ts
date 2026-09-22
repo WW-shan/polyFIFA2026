@@ -293,3 +293,37 @@ describe("loss-requires decision flow", () => {
     });
   });
 });
+
+describe("resting bid flow", () => {
+  test("rests a maker bid when nothing is takable at or below the bid price", () => {
+    const decision = runDecisionFlow({
+      match,
+      markets,
+      orderbooks: [book("total-under", 0.97, 100)],
+      stake: 97,
+      restingBid: { price: 0.7 }
+    });
+
+    expect(decision).toMatchObject({
+      action: "BUY",
+      resting: true,
+      bestAsk: 0.7,
+      estimatedFee: 0
+    });
+    expect(decision.action === "BUY" ? decision.legs?.[0]?.price : undefined).toBe(0.7);
+    expect(decision.action === "BUY" ? decision.legs?.[0]?.resting : undefined).toBe(true);
+  });
+
+  test("takes liquidity at or below the bid price instead of resting", () => {
+    const decision = runDecisionFlow({
+      match,
+      markets,
+      orderbooks: [book("total-under", 0.6, 100)],
+      stake: 97,
+      restingBid: { price: 0.7 }
+    });
+
+    expect(decision).toMatchObject({ action: "BUY", bestAsk: 0.6 });
+    expect(decision.action === "BUY" ? decision.resting : undefined).toBeUndefined();
+  });
+});

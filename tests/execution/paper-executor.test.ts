@@ -22,6 +22,38 @@ const buyDecision: BuyTradeDecision = {
 };
 
 describe("PaperExecutor", () => {
+  test("reports a resting bid as posted with a reservation instead of a fill", async () => {
+    const restingDecision: BuyTradeDecision = {
+      ...buyDecision,
+      resting: true,
+      bestAsk: 0.7,
+      availableSize: 138.57,
+      shares: 138.57,
+      notional: 96.999,
+      estimatedFee: 0,
+      estimatedNetReturn: (1 - 0.7) / 0.7,
+      legs: [{
+        eventSlug: buyDecision.eventSlug,
+        marketSlug: buyDecision.marketSlug,
+        question: buyDecision.question,
+        tokenId: buyDecision.tokenId,
+        conditionId: buyDecision.conditionId,
+        outcome: buyDecision.outcome,
+        price: 0.7,
+        availableSize: 138.57,
+        shares: 138.57,
+        notional: 96.999,
+        estimatedFee: 0,
+        estimatedNetReturn: (1 - 0.7) / 0.7,
+        resting: true
+      }]
+    };
+
+    const result = await new PaperExecutor().execute(restingDecision);
+
+    expect(result).toMatchObject({ mode: "paper", status: "posted", shares: 0, notional: 0, fee: 0, reservedNotional: 96.999 });
+  });
+
   test("fills a BUY decision deterministically", async () => {
     const result = await new PaperExecutor().execute(buyDecision);
 

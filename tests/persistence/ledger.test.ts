@@ -299,6 +299,66 @@ describe("LiveLedger", () => {
     ]);
   });
 
+  test("cancels a resting order by id and releases its reservation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-cancel-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-1",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    });
+
+    expect(await ledger.markCanceledByOrderId("resting-1")).toBe(true);
+    expect(await ledger.hasActiveTrade("event-1", "token-1")).toBe(false);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ orderId: "resting-1", status: "canceled", reservedNotional: 0 })
+    ]);
+    expect(await ledger.markCanceledByOrderId("unknown-order")).toBe(false);
+  });
+
+  test("keeps a partially filled resting order active when it is canceled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-cancel-partial-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-partial",
+      price: 0.7,
+      shares: 12,
+      notional: 8.4,
+      reservedNotional: 88.6
+    });
+
+    await ledger.markCanceledByOrderId("resting-partial");
+
+    // Filled shares still need settlement, so the position stays active while the
+    // unfilled reservation is released.
+    expect(await ledger.hasActiveTrade("event-1", "token-1")).toBe(true);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ status: "partial", shares: 12, reservedNotional: 0 })
+    ]);
+  });
+
   test("marks lost condition ids inactive after resolution", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-ledger-lost-"));
     const file = join(dir, "ledger.json");

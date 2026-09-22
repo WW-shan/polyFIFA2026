@@ -6,7 +6,15 @@ import { serializeDiagnostic } from "../persistence/ledger.js";
 
 const LOCKED_ENTRY_PRICE_FLOOR = 0.85;
 
-export type LiveOrderType = "FOK" | "FAK";
+export type LiveOrderType = "FOK" | "FAK" | "GTC" | "GTD";
+
+/** GTC/GTD rest on the book; FOK/FAK only ever take. */
+export function isRestingOrderType(orderType: LiveOrderType): boolean {
+  return orderType === "GTC" || orderType === "GTD";
+}
+
+/** Effective GTD lifetime; the venue expires the order ~1 minute early. */
+export const DEFAULT_REST_SECONDS = 180;
 export type LiveErrorCode =
   | "LIVE_CREDENTIALS_MISSING"
   | "LIVE_NO_TRADE_DECISION"
@@ -30,6 +38,10 @@ export interface LiveExecutorConfig {
 
 export interface LiveExecuteOptions {
   orderType?: LiveOrderType;
+  /** Maker-only for resting orders (default true). */
+  postOnly?: boolean;
+  /** Resting lifetime in seconds; GTD signs an expiry from it. */
+  restSeconds?: number;
   refreshOrderbook?: (tokenId: string) => Promise<OrderbookSnapshot>;
   minimumNotional?: number;
   minimumNetReturn?: number;
@@ -46,6 +58,8 @@ export interface LiveOrderRequest {
   tickSize: MarketTickSize;
   negRisk: boolean;
   estimatedFee: number;
+  postOnly?: boolean;
+  expiration?: number;
   beforeSubmit?: (order: LiveOrderRequest) => void | Promise<void>;
 }
 
@@ -106,16 +120,26 @@ export class LiveExecutor {
     if (refreshedLegs.length === 0) return stalePlanResult(decision);
 
     const submissions = await Promise.allSettled(refreshedLegs.map(async (leg) => {
+      const orderType = options.orderType ?? "FAK";
       const order: LiveOrderRequest = {
         tokenId: leg.tokenId,
         price: leg.price,
         size: leg.shares,
         notional: leg.notional,
-        orderType: options.orderType ?? "FAK",
+        orderType,
         tickSize: leg.tickSize ?? "0.001",
         negRisk: leg.negRisk ?? false,
         estimatedFee: leg.estimatedFee
       };
+      if (isRestingOrderType(orderType)) {
+        // Resting bids are maker-only by default and always carry a bounded
+        // lifetime so an abandoned run cannot leave an order on the book.
+        order.postOnly = options.postOnly ?? true;
+        const restSeconds = options.restSeconds ?? DEFAULT_REST_SECONDS;
+        order.expiration = orderType === "GTD"
+          ? Math.floor(Date.now() / 1000) + 60 + Math.max(restSeconds, 120)
+          : 0;
+      }
       if (options.beforeSubmit) order.beforeSubmit = options.beforeSubmit;
       await checkBeforeSubmit(order);
       return client.placeLimitBuy(order);
@@ -205,6 +229,9 @@ async function refreshPlannedLeg(leg: BuyTradeLeg, options: LiveExecuteOptions):
   } catch {
     return null;
   }
+  // A resting bid carries the user's own limit price. Repricing it to the
+  // current ask would silently convert the maker intent into a taker buy.
+  if (leg.resting === true) return refreshRestingLeg(leg, orderbook);
   const refreshed = refreshedExecutableNotional(leg, orderbook, options);
   if (!refreshed) return null;
   const { notional, price } = refreshed;
@@ -231,6 +258,20 @@ async function refreshPlannedLeg(leg: BuyTradeLeg, options: LiveExecuteOptions):
 async function refreshPlannedLegs(legs: readonly BuyTradeLeg[], options: LiveExecuteOptions): Promise<BuyTradeLeg[]> {
   const refreshed = await Promise.all(legs.map((leg) => refreshPlannedLeg(leg, options)));
   return refreshed.filter((leg): leg is BuyTradeLeg => leg !== null);
+}
+
+function refreshRestingLeg(leg: BuyTradeLeg, orderbook: OrderbookSnapshot): BuyTradeLeg | null {
+  const next: BuyTradeLeg = { ...leg };
+  if (orderbook.tickSize) next.tickSize = orderbook.tickSize;
+  if (orderbook.negRisk !== undefined) next.negRisk = orderbook.negRisk;
+  if (orderbook.minimumOrderSize !== undefined && leg.shares < orderbook.minimumOrderSize) return null;
+  const bestAsk = orderbook.asks
+    .filter((ask) => Number.isFinite(ask.price) && Number.isFinite(ask.size) && ask.price > 0 && ask.price < 1 && ask.size > 0)
+    .sort((a, b) => a.price - b.price)[0]?.price;
+  // The bid would take instead of rest (and post-only would be rejected); the
+  // taker path in the next pass owns that case.
+  if (bestAsk !== undefined && leg.price >= bestAsk) return null;
+  return next;
 }
 
 function refreshedExecutableNotional(
@@ -465,6 +506,28 @@ function requireLiveConfig(config: LiveExecutorConfig): RequiredLiveExecutorConf
   return required;
 }
 
+/**
+ * Cancels one live order by id using the same authenticated client the executor
+ * uses. Resting GTC orders have no venue-side expiry, so this is the only way to
+ * take them off the book before they fill.
+ */
+export async function cancelLiveOrder(config: LiveExecutorConfig, orderId: string): Promise<unknown> {
+  const requiredConfig = requireLiveConfig(config);
+  const client = await defaultLiveClientFactory(requiredConfig);
+  const cancel = (client as unknown as LiveClobConfirmationClient).cancelOrder;
+  if (!cancel) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no cancelOrder");
+  return cancel.call(client, { orderID: orderId });
+}
+
+/** Reads one live order snapshot (read-only) for ledger reconciliation. */
+export async function getLiveOrder(config: LiveExecutorConfig, orderId: string): Promise<unknown> {
+  const requiredConfig = requireLiveConfig(config);
+  const client = await defaultLiveClientFactory(requiredConfig);
+  const getOrder = (client as unknown as LiveClobConfirmationClient).getOrder;
+  if (!getOrder) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no getOrder");
+  return getOrder.call(client, orderId);
+}
+
 async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Promise<LiveClobClient> {
   try {
     const clob = await import("@polymarket/clob-client-v2");
@@ -517,17 +580,28 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
 
         assertSupportedLiveTickSize(order.tickSize);
         assertPriceConformsToTickSize(order.price, order.tickSize);
+        const resting = isRestingOrderType(order.orderType);
         const orderType = clob.OrderType[order.orderType] as unknown;
-        const userMarketOrder = {
-          tokenID: order.tokenId,
-          price: order.price,
-          side: clob.Side.BUY,
-          amount: order.notional,
-          orderType
-        };
+        // A market order is amount-based (USD notional); a resting limit order is
+        // size-based (shares), which is what the book needs for a maker bid.
+        const userOrder = resting
+          ? {
+              tokenID: order.tokenId,
+              price: order.price,
+              size: order.size,
+              side: clob.Side.BUY,
+              ...(order.expiration !== undefined && order.expiration > 0 ? { expiration: order.expiration } : {})
+            }
+          : {
+              tokenID: order.tokenId,
+              price: order.price,
+              side: clob.Side.BUY,
+              amount: order.notional,
+              orderType
+            };
         const createOptions = { tickSize: order.tickSize, negRisk: order.negRisk };
-        const postResponse = await submissionContext.run(order, () => createAndPostGuardedMarketOrder(
-          client as unknown as GuardedPostingClient, config, userMarketOrder, createOptions, orderType, order
+        const postResponse = await submissionContext.run(order, () => createAndPostGuardedOrder(
+          client as unknown as GuardedPostingClient, config, userOrder, createOptions, orderType, order, resting
         ));
 
         assertNoPostError(postResponse);
@@ -539,7 +613,11 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
         const openOrdersLookup = await getOpenOrdersSoft(confirmationClient, order.tokenId);
         const openOrders = openOrdersLookup.openOrders;
         const hasOpenOrder = orderId && openOrders ? hasMatchingOpenOrder(order, orderId, openOrders) : false;
-        const cancelAttempt = hasOpenOrder && orderId ? await safeCancelOrder(confirmationClient, orderId) : { type: "none" as const };
+        // Taker leftovers are cancelled immediately; a resting order is meant to
+        // stay on the book, so it must survive this reconciliation step.
+        const cancelAttempt = !resting && hasOpenOrder && orderId
+          ? await safeCancelOrder(confirmationClient, orderId)
+          : { type: "none" as const };
         const confirmation: LiveOrderConfirmation = { postResponse };
         if (tradesLookup.trades) confirmation.trades = tradesLookup.trades;
         if (openOrders) confirmation.openOrders = openOrders;
@@ -560,6 +638,7 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
 
 interface GuardedPostingClient {
   createMarketOrder: (userMarketOrder: any, options: any) => Promise<Record<string, unknown>>;
+  createOrder: (userOrder: any, options: any) => Promise<Record<string, unknown>>;
   postOrder: (signedOrder: Record<string, unknown>, orderType: any, postOnly?: boolean, deferExec?: boolean) => Promise<unknown>;
   _retryOnVersionUpdate?: (operation: () => Promise<void>) => Promise<void>;
 }
@@ -575,25 +654,32 @@ interface LiveClobConfirmationClient {
   cancelOrder?: (payload: { orderID: string }) => Promise<unknown>;
 }
 
-async function createAndPostGuardedMarketOrder(
+async function createAndPostGuardedOrder(
   client: GuardedPostingClient,
   config: RequiredLiveExecutorConfig,
-  userMarketOrder: unknown,
+  userOrder: unknown,
   createOptions: { negRisk: boolean },
   orderType: unknown,
-  order: LiveOrderRequest
+  order: LiveOrderRequest,
+  resting: boolean
 ): Promise<unknown> {
   let response: unknown;
   let submitted = false;
+  const buildSignedOrder = async (): Promise<Record<string, unknown>> => {
+    if (config.signatureType === 3) {
+      return reSignPoly1271Order(await (resting
+        ? client.createOrder(userOrder, createOptions)
+        : client.createMarketOrder(userOrder, createOptions)), config, createOptions);
+    }
+    return resting ? client.createOrder(userOrder, createOptions) : client.createMarketOrder(userOrder, createOptions);
+  };
   const attempt = async () => {
     // Preserve the SDK's bounded version retry only after its authoritative
     // version rejection. A concurrent cache update must not duplicate a post.
     if (submitted && !isOrderVersionMismatch(response)) return;
     let signedOrder: Record<string, unknown>;
     try {
-      signedOrder = config.signatureType === 3
-        ? await createPoly1271MarketOrder(client, config, userMarketOrder, createOptions)
-        : await client.createMarketOrder(userMarketOrder, createOptions);
+      signedOrder = await buildSignedOrder();
     } catch (error) {
       // Local validation/signing failures (invalid tick size, malformed order
       // fields) never reached the wire. Reporting them as uncertain would
@@ -603,7 +689,7 @@ async function createAndPostGuardedMarketOrder(
       });
     }
     await checkBeforeSubmit(order);
-    response = await client.postOrder(signedOrder, orderType, false, false);
+    response = await client.postOrder(signedOrder, orderType, order.postOnly ?? false, false);
     submitted = true;
   };
   if (client._retryOnVersionUpdate) await client._retryOnVersionUpdate(attempt);
@@ -616,13 +702,11 @@ function isOrderVersionMismatch(response: unknown): boolean {
     && JSON.stringify(serializeDiagnostic(response.error)).includes("order_version_mismatch");
 }
 
-async function createPoly1271MarketOrder(
-  client: GuardedPostingClient,
+async function reSignPoly1271Order(
+  signedOrder: Record<string, unknown>,
   config: RequiredLiveExecutorConfig,
-  userMarketOrder: unknown,
   createOptions: { negRisk: boolean }
 ): Promise<Record<string, unknown>> {
-  const signedOrder = await client.createMarketOrder(userMarketOrder, createOptions);
   signedOrder.signature = await signPoly1271Order({
     privateKey: config.privateKey,
     chainId: config.chainId,
@@ -764,7 +848,9 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
   const pendingExecution = unexplainedMatch || pendingTrade || (openOrder && !canceled);
   if (shares > 0) {
     const notional = fills.reduce((total, fill) => total + fill.notional, 0);
-    const fee = fills.reduce((total, fill) => total + fill.fee, 0);
+    // Makers are never charged; only fall back to taker fees when the order was
+    // allowed to cross (post-only disabled) and may therefore have taken.
+    const fee = isMakerOnlyRestingOrder(order) ? 0 : fills.reduce((total, fill) => total + fill.fee, 0);
     const price = notional / shares;
     const requestedSize = confirmedOrderRequestedSize(order, confirmation);
     return {
@@ -793,6 +879,10 @@ export function normalizeConfirmedLiveOrderResult(order: LiveOrderRequest, confi
   if (terminalNoFillStatus) return emptyConfirmedLiveResult(order, orderId, terminalNoFillStatus, confirmation);
 
   return emptyConfirmedLiveResult(order, orderId, "posted", confirmation);
+}
+
+function isMakerOnlyRestingOrder(order: LiveOrderRequest): boolean {
+  return isRestingOrderType(order.orderType) && order.postOnly !== false;
 }
 
 function assertNoPostError(raw: unknown): void {

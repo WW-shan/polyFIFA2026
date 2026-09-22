@@ -7,11 +7,11 @@ import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js
 import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, DEFAULT_POLYGON_RPC_URL, readPusdBalance } from "./execution/balance.js";
-import { LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
+import { cancelLiveOrder, getLiveOrder, LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import type { LiveExecuteOptions, LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type MarketSettlementStatus, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
-import { LiveLedger, isActiveLedgerStatus, isLockedStrategy } from "./persistence/ledger.js";
+import { LiveLedger, isActiveLedgerStatus, isLockedStrategy, serializeDiagnostic } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets, hasLockedGoalStrategyMarkets } from "./polymarket/event-page.js";
 import { Scores365ClockProvider, type Scores365GoalSignal } from "./polymarket/scores365-clock.js";
@@ -38,7 +38,12 @@ const CLI_HELP = `Usage: npm run cli -- --mode paper|live|status [options]
   --stake NUMBER            Maximum stake; paper defaults to 97
   --watch true              Watch continuously
   --worldcup true           Discover public World Cup events
-  --order-type FOK|FAK      Live order type (default: FAK)
+  --order-type FOK|FAK|GTC|GTD
+                            Live order type (default: FAK, or GTD with --rest-price)
+  --rest-price PRICE        Rest a maker bid at PRICE when nothing is takable at or below it
+  --rest-seconds SECONDS    Resting lifetime for GTC/GTD (default: 180)
+  --post-only true|false    Maker-only resting orders (default: true)
+  --cancel-order ORDER_ID   Cancel one live order by id
   --help                    Show this help
 
 Use npm run live:status for a read-only live balance and ledger check.`;
@@ -67,6 +72,10 @@ interface ParsedArgs {
   liveAuditFile?: string;
   depthAuditFile?: string;
   orderType: LiveOrderType;
+  restPrice?: number;
+  restSeconds?: number;
+  postOnly?: boolean;
+  cancelOrder?: string;
 }
 
 interface SinglePassOptions {
@@ -189,6 +198,8 @@ const LOCKED_ENTRY_PRICE_FLOOR = 0.85;
 export interface CliDependencies {
   fetchMatchState?: (eventSlug: string) => Promise<MatchState>;
   readPusdBalance?: (walletAddress: string, rpcUrl?: string) => Promise<number>;
+  cancelLiveOrder?: (config: LiveExecutorConfig, orderId: string) => Promise<unknown>;
+  getLiveOrder?: (config: LiveExecutorConfig, orderId: string) => Promise<unknown>;
   fetchWorldCupEventSlugs?: () => Promise<string[]>;
   fetchWorldCupEventRefs?: () => Promise<WorldCupEventRef[]>;
   watchSportsUpdates?: (events: readonly WorldCupEventRef[], options: { auditFile?: string; proxyUrl?: string }) => Promise<AsyncIterable<MatchState>>;
@@ -214,6 +225,7 @@ export async function runCli(
     const args = parseArgs(argv);
     if (args.help) return { exitCode: 0, stdout: CLI_HELP, stderr: "" };
     if (args.mode === "status") return await runStatus(args, env, deps);
+    if (args.cancelOrder) return await runCancelOrder(args, env, deps);
     if (args.watch) return args.worldcup ? await runSportsWatch(args, env, deps) : await runWatch(args, env, deps);
     return await runSinglePass(args, env, deps);
   } catch (error) {
@@ -222,6 +234,55 @@ export async function runCli(
     }
     return { exitCode: 1, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
   }
+}
+
+const TERMINAL_ORDER_SNAPSHOT_STATUSES = new Set(["canceled", "cancelled", "expired", "invalid", "rejected", "unmatched"]);
+
+/**
+ * Releases ledger reservations for resting orders the venue has already closed
+ * (GTD expiry, manual cancel elsewhere). Read-only against the venue: it only
+ * queries order snapshots and never submits or cancels anything itself.
+ */
+async function reconcileRestingOrders(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies,
+  ledger: LiveLedger
+): Promise<void> {
+  if (args.mode !== "live") return;
+  const active = await ledger.readActiveEntries();
+  const resting = active.filter((entry) => entry.status === "posted" && entry.orderId);
+  if (resting.length === 0) return;
+  const liveConfig = liveConfigFromEnv(env);
+  const readOrder = deps.getLiveOrder ?? getLiveOrder;
+  for (const entry of resting) {
+    try {
+      const snapshot = await readOrder(liveConfig, entry.orderId);
+      const status = typeof snapshot === "object" && snapshot !== null && "status" in snapshot
+        ? String((snapshot as { status: unknown }).status).toLowerCase().replace(/[\s_-]+/g, "")
+        : undefined;
+      if (status && TERMINAL_ORDER_SNAPSHOT_STATUSES.has(status)) {
+        await ledger.markCanceledByOrderId(entry.orderId);
+      }
+    } catch {
+      // Unknown venue state keeps the reservation: never release on a read error.
+    }
+  }
+}
+
+async function runCancelOrder(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  deps: CliDependencies
+): Promise<CliResult> {
+  const orderId = required(args.cancelOrder, "--cancel-order");
+  if (args.mode !== "live") throw new Error("--cancel-order requires --mode live");
+  const liveConfig = liveConfigFromEnv(env);
+  const cancel = deps.cancelLiveOrder ?? cancelLiveOrder;
+  const response = await cancel(liveConfig, orderId);
+  const ledger = new LiveLedger(resolveLedgerFile(args, env) ?? "data/live-ledger.json");
+  const released = await ledger.markCanceledByOrderId(orderId);
+  return ok({ mode: "live", status: "cancel_requested", orderId, releasedReservation: released, response: serializeDiagnostic(response) });
 }
 
 async function runSinglePass(
@@ -300,6 +361,7 @@ async function runSinglePass(
       : await fetchCandidateOrderbooks(match, markets, thresholds.entryWindowMinutes, undefined, deps.fetchOrderbook ?? fetchOrderbook);
     const ledgerFile = resolveLedgerFile(args, env);
     const ledger = ledgerFile ? new LiveLedger(ledgerFile) : undefined;
+    if (ledger) await reconcileRestingOrders(args, env, deps, ledger);
     const duplicateDecisionFor = async (buyDecision: Extract<TradeDecision, { action: "BUY" }>): Promise<NoTradeDecision | undefined> => {
       if (!ledger) return undefined;
       const activePositions = (await ledger.readActiveEntries()).filter((entry) => entry.eventSlug === buyDecision.eventSlug);
@@ -345,6 +407,7 @@ async function runSinglePass(
       };
       if (options.lockedIncidentPreviousMatch) flowInput.lockedIncidentPreviousMatch = options.lockedIncidentPreviousMatch;
       if (suppressLockedIncidentCandidates) flowInput.suppressLockedIncidentCandidates = true;
+      if (args.restPrice !== undefined) flowInput.restingBid = { price: args.restPrice };
       return runDecisionFlow(flowInput);
     };
 
@@ -2003,7 +2066,14 @@ function shouldUseLiveBalance(args: ParsedArgs, env: Record<string, string | und
 
 function resolveLedgerFile(args: ParsedArgs, env: Record<string, string | undefined>): string | undefined {
   if (args.ledgerFile) return args.ledgerFile;
-  if (args.mode === "live" || args.mode === "status") return nonEmptyEnv(env.POLY_LEDGER_FILE) ?? "data/live-ledger.json";
+  if (args.mode === "live" || args.mode === "status") {
+    const configured = nonEmptyEnv(env.POLY_LEDGER_FILE);
+    if (configured) return configured;
+    // Never let the test suite write the operator's real ledger; tests pass an
+    // explicit --ledger-file when they need one.
+    if ((env.NODE_ENV ?? process.env.NODE_ENV) === "test") return undefined;
+    return "data/live-ledger.json";
+  }
   return undefined;
 }
 
@@ -2051,9 +2121,13 @@ function liveExecuteOptions(
   return {
     orderType: args.orderType,
     refreshOrderbook,
+    ...(args.postOnly !== undefined ? { postOnly: args.postOnly } : {}),
+    ...(args.restSeconds !== undefined ? { restSeconds: args.restSeconds } : {}),
     minimumNotional: thresholds.minimumNotional,
     minimumNetReturn: thresholds.minimumNetReturn,
-    maxEntryPrice: thresholds.maxEntryPrice,
+    // With a resting bid configured the entry price is capped at the bid price,
+    // so a taker leg can never be repriced above it.
+    maxEntryPrice: args.restPrice === undefined ? thresholds.maxEntryPrice : Math.min(thresholds.maxEntryPrice, args.restPrice),
     ...(beforeSubmit ? { beforeSubmit } : {})
   };
 }
@@ -2089,6 +2163,8 @@ function summary(mode: Mode, decision: TradeDecision, trade?: TradeResult): Reco
     shares: decision.shares,
     notional: decision.notional,
     estimatedNetReturn: decision.estimatedNetReturn,
+    resting: decision.resting,
+    reservedNotional: trade?.reservedNotional,
     tailWindowSource: decision.tailWindowSource,
     tailWindowDetails: decision.tailWindowDetails,
     legs: decision.legs,
@@ -2150,13 +2226,14 @@ function parseArgs(argv: string[]): ParsedArgs {
 
   const mode = parseMode(raw.mode ?? "paper");
   const wantsWorldcupWatch = booleanEnv(raw.watch) === true && booleanEnv(raw.worldcup) === true;
-  if (mode !== "status" && !wantsWorldcupWatch && !raw.matchFile && !raw.eventSlug) {
+  if (mode !== "status" && !raw.cancelOrder && !wantsWorldcupWatch && !raw.matchFile && !raw.eventSlug) {
     throw new Error("--match-file or --event-slug is required");
   }
   if (raw.matchFile && raw.eventSlug) {
     throw new Error("Use only one of --match-file or --event-slug");
   }
-  const orderType = parseOrderType(raw.orderType ?? "FAK");
+  const restPrice = raw.restPrice === undefined ? undefined : numberArg(raw.restPrice, "--rest-price");
+  const orderType = parseOrderType(raw.orderType ?? (restPrice === undefined ? "FAK" : "GTD"));
 
   const parsed: ParsedArgs = {
     mode,
@@ -2186,6 +2263,10 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (raw.minimumNetReturn) parsed.minimumNetReturn = numberArg(raw.minimumNetReturn, "--minimum-net-return");
   if (raw.minimumNotional) parsed.minimumNotional = numberArg(raw.minimumNotional, "--minimum-notional");
   if (raw.entryWindowMinutes) parsed.entryWindowMinutes = numberArg(raw.entryWindowMinutes, "--entry-window-minutes");
+  if (restPrice !== undefined) parsed.restPrice = restPrice;
+  if (raw.restSeconds) parsed.restSeconds = numberArg(raw.restSeconds, "--rest-seconds");
+  if (raw.postOnly) parsed.postOnly = booleanArg(raw.postOnly, "--post-only");
+  if (raw.cancelOrder) parsed.cancelOrder = raw.cancelOrder;
   if (raw.tailTimeMode) throw new Error("--tail-time-mode was removed; live entry always requires verified 365Scores remainingSeconds");
   return parsed;
 }
@@ -2196,8 +2277,8 @@ function parseMode(value: string): Mode {
 }
 
 function parseOrderType(value: string): LiveOrderType {
-  if (value === "FOK" || value === "FAK") return value;
-  throw new Error("--order-type must be FOK or FAK");
+  if (value === "FOK" || value === "FAK" || value === "GTC" || value === "GTD") return value;
+  throw new Error("--order-type must be FOK, FAK, GTC or GTD");
 }
 
 function numberArg(value: string, flag: string): number {

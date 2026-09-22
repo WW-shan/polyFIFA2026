@@ -90,6 +90,39 @@ export class LiveLedger {
     await this.markConditionIds(conditionIds, "lost");
   }
 
+  /**
+   * Marks the entry (and legs) carrying `orderId` as canceled and releases the
+   * notional it had reserved. Used after an explicit venue-side cancel.
+   */
+  async markCanceledByOrderId(orderId: string): Promise<boolean> {
+    const target = orderId.trim();
+    if (!target) return false;
+    let canceled = false;
+    await this.updateEntries((entries) => {
+      let changed = false;
+      const updated = entries.map((entry) => {
+        const legs = entry.legs?.length
+          ? entry.legs.map((leg) => (leg.orderId === target && isActiveLedgerStatus(leg.status)
+            ? { ...leg, status: canceledStatusFor(leg), reservedNotional: 0 }
+            : leg))
+          : undefined;
+        const legChanged = legs !== undefined && legs.some((leg, index) => leg !== entry.legs![index]);
+        const selfMatch = entry.orderId === target && isActiveLedgerStatus(entry.status);
+        if (!legChanged && !selfMatch) return entry;
+        changed = true;
+        if (selfMatch) canceled = true;
+        const next = legChanged ? normalizeLedgerEntry({ ...entry, legs }) : { ...entry };
+        if (selfMatch) {
+          next.status = canceledStatusFor(entry);
+          next.reservedNotional = 0;
+        }
+        return next;
+      });
+      return changed ? updated : undefined;
+    });
+    return canceled;
+  }
+
   private async markConditionIds(conditionIds: readonly string[], status: "redeemed" | "lost"): Promise<void> {
     const conditionSet = new Set(conditionIds.map((conditionId) => conditionId.trim().toLowerCase()).filter(Boolean));
     if (conditionSet.size === 0) return;
@@ -301,6 +334,15 @@ function aggregateLedgerStatus(positions: readonly LedgerTradeEntry[]): LedgerSt
 
 export function isActiveLedgerStatus(status: LedgerStatus): boolean {
   return status === "filled" || status === "partial" || status === "posted";
+}
+
+/**
+ * A resting order that traded before it was canceled/expired still owns the
+ * filled shares, so it must stay active for settlement. Only an untouched order
+ * becomes inactive.
+ */
+function canceledStatusFor(position: { shares: number; notional: number }): LedgerStatus {
+  return position.shares > 0 || position.notional > 0 ? "partial" : "canceled";
 }
 
 function isEstablishedPosition(status: LedgerStatus): boolean {

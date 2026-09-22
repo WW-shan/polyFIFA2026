@@ -9,6 +9,7 @@ import type {
   NoTradeDecision,
   OrderbookSnapshot,
   PriceLevel,
+  RestingBidOptions,
   SelectedStrategyMarket,
   TradeDecision
 } from "./types.js";
@@ -108,6 +109,87 @@ export function allocateTradeLegs(levels: readonly TradeLevel[], thresholds: Dec
   return legs;
 }
 
+const SHARE_SIZE_DECIMALS = 2;
+
+function roundDownShares(value: number): number {
+  return Math.floor(value * 10 ** SHARE_SIZE_DECIMALS) / 10 ** SHARE_SIZE_DECIMALS;
+}
+
+/**
+ * Builds a maker bid that rests on the book at `options.price` instead of taking
+ * liquidity. The venue charges takers only, so the estimate uses a zero fee; the
+ * leg is marked `resting` so executors submit a GTC/GTD limit order rather than a
+ * market order, and paper runs report it as posted rather than filled.
+ */
+export function buildRestingBidDecision(
+  match: MatchState,
+  candidates: readonly SelectedStrategyMarket[],
+  orderbooks: readonly OrderbookSnapshot[],
+  thresholds: DecisionThresholds,
+  options: RestingBidOptions
+): TradeDecision {
+  const tailWindow = classifyTailWindow(match, { entryWindowMinutes: thresholds.entryWindowMinutes });
+  if (!tailWindow.eligible) {
+    return noTrade("MATCH_NOT_LATE_ENOUGH", match.eventSlug, tailWindow.details);
+  }
+  if (!Number.isFinite(options.price) || options.price <= 0 || options.price >= 1) {
+    return noTrade("PRICE_TOO_HIGH", match.eventSlug, `Resting bid price ${options.price} must be between 0 and 1`);
+  }
+
+  let crossedBook = false;
+  for (const candidate of candidates) {
+    const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
+    if (!orderbook) continue;
+    const bestAsk = sortedPositiveAsks(orderbook.asks)[0]?.price;
+    // A bid at or above the best ask would take instead of rest; the taker path
+    // owns that case, so this builder refuses to construct a crossing order.
+    if (bestAsk !== undefined && options.price >= bestAsk) {
+      crossedBook = true;
+      continue;
+    }
+    const shares = roundDownShares(thresholds.maxNotional / options.price);
+    const minimumOrderSize = orderbook.minimumOrderSize ?? options.minimumOrderSize;
+    if (minimumOrderSize !== undefined && shares < minimumOrderSize) {
+      return noTrade(
+        "DEPTH_TOO_SMALL",
+        match.eventSlug,
+        `Resting bid of ${shares} shares is below the venue minimum order size ${minimumOrderSize}`
+      );
+    }
+    const notional = shares * options.price;
+    if (notional < thresholds.minimumNotional) {
+      return noTrade("DEPTH_TOO_SMALL", match.eventSlug, `Resting bid notional ${notional} is below minimum ${thresholds.minimumNotional}`);
+    }
+    const leg: BuyTradeLeg = {
+      eventSlug: match.eventSlug,
+      marketSlug: candidate.marketSlug,
+      question: candidate.question,
+      tokenId: candidate.tokenId,
+      conditionId: candidate.conditionId,
+      outcome: candidate.outcome,
+      price: options.price,
+      availableSize: shares,
+      shares,
+      notional,
+      estimatedFee: 0,
+      estimatedNetReturn: netReturnRate(options.price, 0),
+      resting: true
+    };
+    if (candidate.line !== undefined) leg.line = candidate.line;
+    leg.strategy = candidate.strategy;
+    leg.lossRequiresGoals = candidate.lossRequiresGoals;
+    if (candidate.locked !== undefined) leg.locked = candidate.locked;
+    if (candidate.tickSize) leg.tickSize = candidate.tickSize;
+    if (candidate.negRisk !== undefined) leg.negRisk = candidate.negRisk;
+    return buyDecisionFromLegs([leg]);
+  }
+
+  if (crossedBook) {
+    return noTrade("PRICE_TOO_HIGH", match.eventSlug, `Resting bid ${options.price} crosses the best ask; the taker path handles that case`);
+  }
+  return noTrade("NO_ELIGIBLE_STRATEGY", match.eventSlug, "No candidate market had a usable order book for a resting bid");
+}
+
 export function buyDecisionFromLegs(legs: readonly BuyTradeLeg[]): BuyTradeDecision {
   if (legs.length === 0) {
     throw new Error("Cannot build BUY decision without legs");
@@ -140,6 +222,7 @@ export function buyDecisionFromLegs(legs: readonly BuyTradeLeg[]): BuyTradeDecis
   if (first.locked !== undefined) decision.locked = first.locked;
   if (first.tickSize) decision.tickSize = first.tickSize;
   if (first.negRisk !== undefined) decision.negRisk = first.negRisk;
+  if (first.resting !== undefined) decision.resting = first.resting;
   if (first.tailWindowSource !== undefined) decision.tailWindowSource = first.tailWindowSource;
   if (first.tailWindowDetails !== undefined) decision.tailWindowDetails = first.tailWindowDetails;
   return decision;

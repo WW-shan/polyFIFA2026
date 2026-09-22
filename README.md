@@ -204,6 +204,24 @@ Production World Cup watch is intended to stay up 24/7. With no `--max-iteration
 
 Live capital allocation is all-in by default: if `--stake` is omitted, the bot builds the ranked leg plan above the configured minimum net return, then uses `pUSD balance - POLY_BALANCE_BUFFER` as the maximum order notional. Passing `--stake N` changes this to `min(N, pUSD balance - POLY_BALANCE_BUFFER)`. Live execution refreshes all planned leg orderbooks concurrently, reprices each leg to the current executable ask as long as it still clears the configured return floor and `maxEntryPrice`, then submits the remaining live legs concurrently as immediate-or-cancel FAK limit buys by default. If a refreshed leg falls below the return floor or below `minimumNotional`, that leg is skipped instead of delaying or chasing bad price. If a submitted leg is rejected because depth moved again, that leg is recorded as rejected while other concurrent legs can still fill; the event remains eligible for later retry unless a filled/partial/posted buy plan is recorded.
 
+### Resting limit orders
+
+All Polymarket orders are limit orders; only `GTC`/`GTD` rest on the book, while `FOK`/`FAK` can only take. The taker path above therefore cannot express "bid 0.70 and wait for a panic seller". Set `--rest-price` to add that intent:
+
+```bash
+npm run cli -- --mode live --event-slug <slug> --stake 97 --rest-price 0.70 --rest-seconds 180
+```
+
+Semantics:
+
+- Entries at or below `--rest-price` are still taken immediately (`--max-entry-price` is capped at the bid price), so a cheaper ask is never missed.
+- When nothing is takable at or below the bid price, the planner builds a maker bid at exactly `--rest-price` and the executor signs a **size-based limit order** (not an amount-based market order).
+- Resting legs are maker-only by default (`--post-only false` to allow taking), which guarantees maker status and no taker fee; the venue charges makers nothing, so the recorded fee is `0`.
+- `--order-type` defaults to `GTD` whenever `--rest-price` is set. `GTD` signs `expiration = now + 60 + max(rest-seconds, 120)`, and the venue expires the order roughly a minute early, so an abandoned run cannot leave an order on the book. `--order-type GTC` has no venue expiry and must be removed with `--cancel-order <orderId>`.
+- Every live pass first reconciles `posted` ledger entries against the venue order snapshot. Once an order reads back as canceled/expired/rejected, its reservation is released automatically, so a GTD expiry does not block the event forever. A resting order that traded before it closed keeps its filled shares as an active `partial` position for settlement.
+- The venue minimum order size (`min_order_size`, currently 5 shares) and the market tick size are read from `GET /book`; a bid that would be below the minimum or off the price grid is refused before signing instead of being sent.
+- Paper mode reports a resting bid as `posted` with `reservedNotional` rather than as a fill, because resting does not trade.
+
 ### Auto settlement
 
 Resolved winning Polymarket CTF positions must be redeemed before they become reusable pUSD. In live World Cup watch mode, auto redeem is enabled by default when a live deposit/funder wallet and `POLY_PRIVATE_KEY` are configured. It runs in the background on an interval, so it does not block final-3-minute clock checks or order placement. It scans the Data API for `redeemable=true` current positions, routes regular markets through `CtfCollateralAdapter`, routes negative-risk markets through `NegRiskCtfCollateralAdapter`, submits a deposit-wallet batch through the Polymarket relayer, and then the next live balance read can compound the returned pUSD.
@@ -233,7 +251,7 @@ Optional live env vars:
 - `POLY_DEPOSIT_WALLET_ADDRESS` for CLOB v2 deposit-wallet accounts; this overrides `POLY_FUNDER_ADDRESS` and forces `POLY_SIGNATURE_TYPE=3`
 - `POLY_LEDGER_FILE` defaults to `data/live-ledger.json` in live mode; filled/partial/posted orders are recorded as active ledger entries, and any active same-event trade is skipped
 - `POLY_USE_LIVE_BALANCE=true` to size live orders from pUSD balance; this is automatic when a funder/deposit wallet is configured unless explicitly disabled
-- `POLY_BALANCE_BUFFER` defaults to `0.02` pUSD so stake sizing leaves a small balance cushion
+- `POLY_BALANCE_BUFFER` defaults to `0.02` pUSD; stake sizing additionally reserves the worst-case taker fee (`feeRate * (1 - price)`, bounded by the market's fee rate) because a market BUY's `amount` is a pre-fee notional and fees are charged on top
 - `POLY_SIGNATURE_TYPE` defaults to `1` unless `POLY_DEPOSIT_WALLET_ADDRESS` is set
 - `POLY_SYNC_BALANCE_ALLOWANCE=true` to call CLOB balance/allowance sync before posting an order
 - `POLY_LIVE_AUDIT_FILE` writes raw Sports WebSocket updates and normalized match-update audit records as NDJSON

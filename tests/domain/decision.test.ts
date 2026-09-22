@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildTradeDecision } from "../../src/domain/decision.js";
+import { buildRestingBidDecision, buildTradeDecision } from "../../src/domain/decision.js";
 import type { DecisionThresholds, MatchState, OrderbookSnapshot, SelectedStrategyMarket } from "../../src/domain/types.js";
 
 const match: MatchState = {
@@ -251,5 +251,53 @@ describe("buildTradeDecision", () => {
       reason: "NO_ELIGIBLE_STRATEGY",
       eventSlug: "fifwc-col-prt-2026-06-27"
     });
+  });
+});
+
+describe("buildRestingBidDecision", () => {
+  const restingMatch: MatchState = { ...match, minute: 88, remainingSeconds: 120 };
+  const book = (asks: Array<{ price: number; size: number }>, minimumOrderSize?: number): OrderbookSnapshot => ({
+    tokenId: selected.tokenId,
+    bids: [],
+    asks,
+    tickSize: "0.001",
+    ...(minimumOrderSize === undefined ? {} : { minimumOrderSize })
+  });
+
+  test("rests a maker bid at the requested price with zero fee", () => {
+    const decision = buildRestingBidDecision(restingMatch, [selected], [book([{ price: 0.97, size: 100 }])], thresholds, { price: 0.7 });
+
+    expect(decision.action).toBe("BUY");
+    if (decision.action !== "BUY") throw new Error("expected BUY");
+    expect(decision.resting).toBe(true);
+    expect(decision.bestAsk).toBe(0.7);
+    expect(decision.legs?.[0]).toMatchObject({
+      price: 0.7,
+      shares: 138.57,
+      notional: 96.999,
+      estimatedFee: 0,
+      resting: true
+    });
+    // Makers pay no fee, so the return is the raw (1 - price) / price.
+    expect(decision.estimatedNetReturn).toBeCloseTo((1 - 0.7) / 0.7, 10);
+  });
+
+  test("refuses to rest a bid that crosses the best ask", () => {
+    const decision = buildRestingBidDecision(restingMatch, [selected], [book([{ price: 0.6, size: 100 }])], thresholds, { price: 0.7 });
+
+    expect(decision).toMatchObject({ action: "NO_TRADE", reason: "PRICE_TOO_HIGH" });
+  });
+
+  test("enforces the venue minimum order size reported by the book", () => {
+    const decision = buildRestingBidDecision(restingMatch, [selected], [book([{ price: 0.97, size: 100 }], 5)], { ...thresholds, maxNotional: 3 }, { price: 0.7 });
+
+    expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+  });
+
+  test("does not rest a bid before the tail window opens", () => {
+    const early: MatchState = { ...restingMatch, minute: 10, remainingSeconds: 3000 };
+    const decision = buildRestingBidDecision(early, [selected], [book([{ price: 0.97, size: 100 }])], thresholds, { price: 0.7 });
+
+    expect(decision).toMatchObject({ action: "NO_TRADE", reason: "MATCH_NOT_LATE_ENOUGH" });
   });
 });

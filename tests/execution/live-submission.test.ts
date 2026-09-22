@@ -38,11 +38,13 @@ beforeEach(() => {
 function sdkStubs() {
   const version = vi.spyOn(versionedPrototype, "resolveVersion").mockResolvedValue(2);
   const create = vi.spyOn(ClobClient.prototype, "createMarketOrder").mockImplementation(async () => ({ ...signed }) as never);
+  const createLimit = vi.spyOn(ClobClient.prototype, "createOrder").mockImplementation(async () => ({ ...signed }) as never);
   const post = vi.spyOn(ClobClient.prototype, "postOrder").mockResolvedValue({ success: true, orderID: "order-1", status: "matched" });
+  const cancel = vi.spyOn(ClobClient.prototype, "cancelOrder").mockResolvedValue({ canceled: true });
   vi.spyOn(ClobClient.prototype, "getOrder").mockResolvedValue(undefined as never);
   vi.spyOn(ClobClient.prototype, "getTrades").mockResolvedValue([]);
   vi.spyOn(ClobClient.prototype, "getOpenOrders").mockResolvedValue([]);
-  return { version, create, post };
+  return { version, create, createLimit, post, cancel };
 }
 
 describe("submission acknowledgement and guards", () => {
@@ -98,6 +100,57 @@ describe("submission acknowledgement and guards", () => {
       raw: { error: { reason: "PRE_SUBMIT_LOCAL_ERROR", submitted: false } }
     });
     expect(result.reservedNotional ?? 0).toBe(0);
+  });
+
+  test("T7 a GTD resting bid is signed as a size-based limit order and left on the book", async () => {
+    const { create, createLimit, post, cancel } = sdkStubs();
+    post.mockResolvedValue({ success: true, orderID: "rest-1", status: "live" });
+    vi.spyOn(ClobClient.prototype, "getOpenOrders").mockResolvedValue([
+      { id: "rest-1", status: "LIVE", asset_id: "1", price: "0.70", original_size: "100", size_matched: "0" }
+    ] as never);
+
+    const result = await new LiveExecutor(config).execute(buyDecisionFromLegs([leg]), {
+      orderType: "GTD",
+      restSeconds: 180
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(createLimit).toHaveBeenCalledOnce();
+    const [userOrder] = createLimit.mock.calls[0]!;
+    expect(userOrder).toMatchObject({ tokenID: "1", price: 0.97, size: 100, side: "BUY" });
+    expect((userOrder as { amount?: unknown }).amount).toBeUndefined();
+    expect((userOrder as { expiration?: number }).expiration).toBeGreaterThan(Math.floor(Date.now() / 1000) + 170);
+    expect(post).toHaveBeenCalledWith(expect.anything(), "GTD", true, false);
+    // A resting order must survive reconciliation, unlike a taker leftover.
+    expect(cancel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "posted", shares: 0, notional: 0, reservedNotional: 97 });
+  });
+
+  test("T7 a GTC resting bid is posted maker-only without an expiration", async () => {
+    const { createLimit, post } = sdkStubs();
+    post.mockResolvedValue({ success: true, orderID: "rest-2", status: "live" });
+
+    await new LiveExecutor(config).execute(buyDecisionFromLegs([leg]), { orderType: "GTC" });
+
+    const [userOrder] = createLimit.mock.calls[0]!;
+    expect((userOrder as { expiration?: number }).expiration).toBeUndefined();
+    expect(post).toHaveBeenCalledWith(expect.anything(), "GTC", true, false);
+  });
+
+  test("T7 a maker fill on a resting order carries no taker fee", async () => {
+    const { post } = sdkStubs();
+    post.mockResolvedValue({ success: true, orderID: "rest-3", status: "matched", tradeIDs: ["t1"] });
+    vi.spyOn(ClobClient.prototype, "getTrades").mockResolvedValue([
+      {
+        id: "t1", taker_order_id: "rest-3", market: "cond", asset_id: "1", side: "BUY",
+        size: "100", price: "0.97", status: "CONFIRMED", match_time: "1770000000", outcome: "Over", owner: "me"
+      }
+    ] as never);
+
+    const result = await new LiveExecutor(config).execute(buyDecisionFromLegs([leg]), { orderType: "GTD" });
+
+    expect(result).toMatchObject({ status: "filled", shares: 100, fee: 0 });
+    expect(result.estimatedProfit).toBeCloseTo(100 - 97, 6);
   });
 
   test("T6 an SDK-unsupported tick size is refused before signing", async () => {

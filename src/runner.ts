@@ -1,7 +1,7 @@
-import { allocateTradeLegs, buildTradeDecision, buildTradeLevels, buyDecisionFromLegs, lockedConditionMatchesScore } from "./domain/decision.js";
+import { allocateTradeLegs, buildRestingBidDecision, buildTradeDecision, buildTradeLevels, buyDecisionFromLegs, lockedConditionMatchesScore } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
 import { classifyTailWindow } from "./domain/time-window.js";
-import type { DecisionThresholds, MatchState, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
+import type { DecisionThresholds, MatchState, OrderbookSnapshot, RestingBidOptions, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { LiveExecutor, type LiveExecuteOptions, type LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { DEFAULT_ENTRY_WINDOW_MINUTES } from "./domain/risk-thresholds.js";
@@ -22,6 +22,8 @@ export interface FlowInput {
   thresholds?: Partial<Omit<DecisionThresholds, "maxNotional">>;
   lockedIncidentPreviousMatch?: MatchState;
   suppressLockedIncidentCandidates?: boolean;
+  /** When set, takers are capped at the bid price and the leftover intent rests. */
+  restingBid?: RestingBidOptions;
 }
 
 export interface FlowResult {
@@ -87,17 +89,22 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
     return { action: "NO_TRADE", reason: "ORDERBOOK_UNAVAILABLE", eventSlug: input.match.eventSlug, details: "No orderbooks provided" };
   }
 
+  // With a resting bid configured the entry price is capped at the bid price:
+  // anything at or below it is taken, everything else rests on the book.
+  const takerThresholds = input.restingBid
+    ? { ...thresholds, maxEntryPrice: Math.min(thresholds.maxEntryPrice, input.restingBid.price) }
+    : thresholds;
   const decisions = candidates.flatMap((candidate) => {
     const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
     if (!orderbook) return [];
-    return [buildTradeDecision(input.match, candidate, orderbook, thresholds)];
+    return [buildTradeDecision(input.match, candidate, orderbook, takerThresholds)];
   });
   const levels = candidates.flatMap((candidate) => {
     const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
     if (!orderbook) return [];
-    return buildTradeLevels(input.match, candidate, orderbook, thresholds);
+    return buildTradeLevels(input.match, candidate, orderbook, takerThresholds);
   });
-  const legs = allocateTradeLegs(levels, thresholds);
+  const legs = allocateTradeLegs(levels, takerThresholds);
   if (legs.length > 0) return buyDecisionFromLegs(legs);
 
   const buys = decisions
@@ -109,6 +116,11 @@ export function runDecisionFlow(input: FlowInput): TradeDecision {
     });
 
   if (buys[0]) return buys[0];
+
+  if (input.restingBid) {
+    // Nothing was takable at or below the bid price, so rest the intent instead.
+    return buildRestingBidDecision(input.match, candidates, orderbooks, thresholds, input.restingBid);
+  }
 
   const noTrade = decisions.find((decision) => decision.action === "NO_TRADE");
   if (noTrade) return noTrade;

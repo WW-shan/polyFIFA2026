@@ -77,6 +77,13 @@ export interface SelectedSpread extends SpreadMarket {
   margin: number;
 }
 
+export interface RestingBidOptions {
+  /** Limit price the bid rests at. */
+  price: number;
+  /** Venue minimum order size in shares (from GET /book `min_order_size`). */
+  minimumOrderSize?: number;
+}
+
 export interface SelectedStrategyMarket extends StrategyMarket {
   strategy: TailStrategy;
   outcome: string;
@@ -150,6 +157,8 @@ export interface BuyTradeDecision {
   estimatedNetReturn: number;
   tickSize?: MarketTickSize;
   negRisk?: boolean;
+  /** True when the decision is meant to rest on the book instead of taking. */
+  resting?: boolean;
   tailWindowSource?: TailWindowSource;
   tailWindowDetails?: string;
   legs?: BuyTradeLeg[];
@@ -183,6 +192,8 @@ export interface BuyTradeLeg {
   estimatedNetReturn: number;
   tickSize?: MarketTickSize;
   negRisk?: boolean;
+  /** True when the leg is meant to rest on the book instead of taking. */
+  resting?: boolean;
   tailWindowSource?: TailWindowSource;
   tailWindowDetails?: string;
 }
