@@ -110,7 +110,9 @@ curl -x http://127.0.0.1:10808 \
 
 ## 5. 手续费与收益计算
 
-Polymarket sports taker fee rate：`0.03`。官方公式：
+> **费率更正（2026-09-23）：** 官方 sports taker fee rate 为 `0.05`，不是本节成文时使用的 `0.03`。CLOB `GET /clob-markets/{condition_id}` 对本项目覆盖的 60 个市场全部返回 `fd.r=0.05`、`fd.e=1`，官方费率表在 0.70 价位对 100 shares 收 1.05 USDC 也对应 0.05。下方公式与收益表按成文时的 `0.03` 计算，实际净收益需按 `0.05` 重算（`src/domain/fees.ts` 已改为 0.05）。
+
+Polymarket sports taker fee rate（成文时使用）：`0.03`。官方公式：
 
 ```text
 fee = shares * feeRate * p * (1 - p)

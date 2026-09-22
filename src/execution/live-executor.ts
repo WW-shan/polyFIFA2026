@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { BuyTradeLeg, OrderbookSnapshot, TradeDecision, TradeResult, TradeResultLeg } from "../domain/types.js";
+import type { BuyTradeLeg, MarketTickSize, OrderbookSnapshot, TradeDecision, TradeResult, TradeResultLeg } from "../domain/types.js";
 import { netReturnRate, sportsTakerFeePerShare } from "../domain/fees.js";
 import { signPoly1271Order } from "./poly1271-signature.js";
 import { serializeDiagnostic } from "../persistence/ledger.js";
@@ -43,7 +43,7 @@ export interface LiveOrderRequest {
   size: number;
   notional: number;
   orderType: LiveOrderType;
-  tickSize: "0.1" | "0.01" | "0.001" | "0.0001";
+  tickSize: MarketTickSize;
   negRisk: boolean;
   estimatedFee: number;
   beforeSubmit?: (order: LiveOrderRequest) => void | Promise<void>;
@@ -210,7 +210,10 @@ async function refreshPlannedLeg(leg: BuyTradeLeg, options: LiveExecuteOptions):
   const { notional, price } = refreshed;
   if (notional < (options.minimumNotional ?? 1)) return null;
   const shares = notional / price;
-  return {
+  // The venue's own book is the authority for signing constraints. A stale or
+  // absent decision-time value (notably the 0.001 default) otherwise makes the
+  // SDK throw before submission on markets that quote on a coarser grid.
+  const refreshedLeg: BuyTradeLeg = {
     ...leg,
     price,
     availableSize: shares,
@@ -219,6 +222,10 @@ async function refreshPlannedLeg(leg: BuyTradeLeg, options: LiveExecuteOptions):
     estimatedFee: shares * sportsTakerFeePerShare(price),
     estimatedNetReturn: netReturnRate(price)
   };
+  if (orderbook.tickSize) refreshedLeg.tickSize = orderbook.tickSize;
+  if (orderbook.negRisk !== undefined) refreshedLeg.negRisk = orderbook.negRisk;
+  if (orderbook.minimumOrderSize !== undefined && shares < orderbook.minimumOrderSize) return null;
+  return refreshedLeg;
 }
 
 async function refreshPlannedLegs(legs: readonly BuyTradeLeg[], options: LiveExecuteOptions): Promise<BuyTradeLeg[]> {
@@ -508,6 +515,8 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
           await client.updateBalanceAllowance({ asset_type: clob.AssetType.COLLATERAL });
         }
 
+        assertSupportedLiveTickSize(order.tickSize);
+        assertPriceConformsToTickSize(order.price, order.tickSize);
         const orderType = clob.OrderType[order.orderType] as unknown;
         const userMarketOrder = {
           tokenID: order.tokenId,
@@ -580,9 +589,19 @@ async function createAndPostGuardedMarketOrder(
     // Preserve the SDK's bounded version retry only after its authoritative
     // version rejection. A concurrent cache update must not duplicate a post.
     if (submitted && !isOrderVersionMismatch(response)) return;
-    const signedOrder = config.signatureType === 3
-      ? await createPoly1271MarketOrder(client, config, userMarketOrder, createOptions)
-      : await client.createMarketOrder(userMarketOrder, createOptions);
+    let signedOrder: Record<string, unknown>;
+    try {
+      signedOrder = config.signatureType === 3
+        ? await createPoly1271MarketOrder(client, config, userMarketOrder, createOptions)
+        : await client.createMarketOrder(userMarketOrder, createOptions);
+    } catch (error) {
+      // Local validation/signing failures (invalid tick size, malformed order
+      // fields) never reached the wire. Reporting them as uncertain would
+      // reserve notional for an order the venue never saw.
+      throw new LiveExecutionError("LIVE_ORDER_REJECTED", error instanceof Error ? error.message : String(error), {
+        raw: { reason: "PRE_SUBMIT_LOCAL_ERROR", submitted: false, error: serializeDiagnostic(error) }
+      });
+    }
     await checkBeforeSubmit(order);
     response = await client.postOrder(signedOrder, orderType, false, false);
     submitted = true;
@@ -644,6 +663,42 @@ function stringRequired(record: Record<string, unknown>, key: string): string {
 function sideField(value: unknown): "BUY" | "SELL" | 0 | 1 {
   if (value === "BUY" || value === "SELL" || value === 0 || value === 1) return value;
   throw new Error("POLY_1271_ORDER_FIELD_MISSING: side");
+}
+
+// Mirrors the SDK's ROUNDING_CONFIG price decimals per tick size.
+const TICK_SIZE_PRICE_DECIMALS: Record<MarketTickSize, number> = {
+  "0.1": 1,
+  "0.01": 2,
+  "0.005": 3,
+  "0.0025": 4,
+  "0.001": 3,
+  "0.0001": 4
+};
+
+// @polymarket/clob-client-v2@1.0.6 only ships ROUNDING_CONFIG entries for these
+// four increments; a 0.005/0.0025 market makes the SDK compute NaN amounts.
+const SDK_SUPPORTED_TICK_SIZES: readonly MarketTickSize[] = ["0.1", "0.01", "0.001", "0.0001"];
+
+function assertSupportedLiveTickSize(tickSize: MarketTickSize): void {
+  if (SDK_SUPPORTED_TICK_SIZES.includes(tickSize)) return;
+  throw new LiveExecutionError(
+    "LIVE_ORDER_REJECTED",
+    `tick size ${tickSize} is not supported by the installed clob client; refusing to sign a malformed order`,
+    { raw: { reason: "PRE_SUBMIT_LOCAL_ERROR", submitted: false, unsupportedTickSize: tickSize } }
+  );
+}
+
+export function priceConformsToTickSize(price: number, tickSize: MarketTickSize): boolean {
+  if (!Number.isFinite(price) || price <= 0 || price >= 1) return false;
+  const decimals = TICK_SIZE_PRICE_DECIMALS[tickSize];
+  return Math.abs(Math.round(price * 10 ** decimals) / 10 ** decimals - price) < 1e-9;
+}
+
+function assertPriceConformsToTickSize(price: number, tickSize: MarketTickSize): void {
+  if (priceConformsToTickSize(price, tickSize)) return;
+  throw new LiveExecutionError("LIVE_ORDER_REJECTED", `price ${price} does not conform to tick size ${tickSize}`, {
+    raw: { reason: "PRE_SUBMIT_LOCAL_ERROR", submitted: false }
+  });
 }
 
 function nonEmptyEnv(value: string | undefined): string | undefined {
@@ -752,6 +807,9 @@ function assertNoPostError(raw: unknown): void {
 
 function isUncertainPostResponse(raw: unknown): boolean {
   if (!isRecord(raw) || raw.reason === "BEFORE_SUBMIT_VETO") return false;
+  // A local failure raised before the HTTP boundary never reached the venue, so
+  // it can be reported as a definite rejection instead of a phantom reservation.
+  if (raw.submitted === false) return false;
   const status = numberField(raw, "status") ?? numberField(raw, "statusCode") ?? numberField(raw.response, "status");
   if (status === 408 || (status !== undefined && status >= 500 && status < 600)) return true;
   const error = errorFieldMessage(raw.errorMsg) ?? errorFieldMessage(raw.error);

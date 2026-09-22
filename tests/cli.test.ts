@@ -524,9 +524,9 @@ describe("CLI", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "live",
       status: "filled",
-      notional: 2.29,
+      notional: 2.180952,
       trade: {
-        notional: 2.29
+        notional: 2.180952
       }
     });
   });
@@ -2753,7 +2753,9 @@ describe("CLI", () => {
     clobMock.fetchOrderbook.mockImplementation(async (tokenId: string): Promise<OrderbookSnapshot> => ({
       tokenId,
       bids: [],
-      asks: [{ price: 0.9948, size: 100 }]
+      // 0.9948 no longer clears the 0.5% net-return floor once the official 5%
+      // sports taker fee is applied; 0.9940 still exercises the same path.
+      asks: [{ price: 0.994, size: 100 }]
     }));
     async function* updates(): AsyncIterable<MatchState> {
       yield tailMatch(eventSlug, "Default", "Threshold", 2, 2);
@@ -2783,7 +2785,7 @@ describe("CLI", () => {
       last: {
         status: "filled",
         eventSlug,
-        bestAsk: 0.9948
+        bestAsk: 0.994
       }
     });
   });

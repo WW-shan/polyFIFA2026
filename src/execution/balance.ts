@@ -1,4 +1,5 @@
 import { createPublicClient, erc20Abi, formatUnits, http, type Address } from "viem";
+import { SPORTS_TAKER_FEE_RATE } from "../domain/fees.js";
 import { polygon } from "viem/chains";
 import type { NoTradeReason } from "../domain/types.js";
 
@@ -21,19 +22,25 @@ export type BalanceStakeDecision =
 export function capStakeToAvailableBalance(
   requestedStake: number | undefined,
   balance: number,
-  options: { minimumNotional: number; buffer?: number }
+  options: { minimumNotional: number; buffer?: number; feeReserveRate?: number }
 ): BalanceStakeDecision {
   const buffer = options.buffer ?? 0;
+  // Polymarket charges the taker fee on top of a market BUY's notional
+  // (`amount` is pre-fee), so a stake equal to the balance is rejected for
+  // insufficient funds once the fee is added. Fee per notional for a BUY is
+  // feeRate * (1 - price), which is bounded by feeRate as price approaches 0.
+  const feeReserveRate = options.feeReserveRate ?? SPORTS_TAKER_FEE_RATE;
   const available = roundDownMoney(balance - buffer);
-  if (!Number.isFinite(available) || available < options.minimumNotional) {
+  const spendable = roundDownMoney(available / (1 + Math.max(0, feeReserveRate)));
+  if (!Number.isFinite(spendable) || spendable < options.minimumNotional) {
     return {
       action: "NO_TRADE",
       reason: "INSUFFICIENT_BALANCE",
-      details: `pUSD balance ${balance} minus buffer ${buffer} is below minimum ${options.minimumNotional}`
+      details: `pUSD balance ${balance} minus buffer ${buffer} minus fee reserve ${feeReserveRate} is below minimum ${options.minimumNotional}`
     };
   }
 
-  return { action: "USE_STAKE", stake: requestedStake === undefined ? available : Math.min(requestedStake, available) };
+  return { action: "USE_STAKE", stake: requestedStake === undefined ? spendable : Math.min(requestedStake, spendable) };
 }
 
 export async function readPusdBalance(

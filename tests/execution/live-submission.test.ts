@@ -86,6 +86,44 @@ describe("submission acknowledgement and guards", () => {
     }
   });
 
+  test("T6 a local SDK validation failure before submission is a definite rejection, not a reservation", async () => {
+    const { create, post } = sdkStubs();
+    create.mockRejectedValueOnce(new Error("invalid tick size (0.001), minimum for the market is 0.01"));
+
+    const result = await new LiveExecutor(config).execute(buyDecisionFromLegs([leg]));
+
+    expect(post).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: "rejected", shares: 0, notional: 0,
+      raw: { error: { reason: "PRE_SUBMIT_LOCAL_ERROR", submitted: false } }
+    });
+    expect(result.reservedNotional ?? 0).toBe(0);
+  });
+
+  test("T6 an SDK-unsupported tick size is refused before signing", async () => {
+    const { create, post } = sdkStubs();
+    const quarterCent = { ...leg, price: 0.9975, tickSize: "0.0025" as const };
+
+    const result = await new LiveExecutor(config).execute(buyDecisionFromLegs([quarterCent]));
+
+    expect(create).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "rejected", shares: 0, notional: 0 });
+    expect(result.reservedNotional ?? 0).toBe(0);
+  });
+
+  test("T6 an off-grid price never reaches the wire", async () => {
+    const { create, post } = sdkStubs();
+    const offGrid = { ...leg, price: 0.973, tickSize: "0.01" as const };
+
+    const result = await new LiveExecutor(config).execute(buyDecisionFromLegs([offGrid]));
+
+    expect(create).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "rejected", shares: 0, notional: 0 });
+    expect(result.reservedNotional ?? 0).toBe(0);
+  });
+
   test.each([false, true])("T5 custom clients do not submit after a callback veto (async=%s)", async (asyncVeto) => {
     const placeLimitBuy = vi.fn(async (request: LiveOrderRequest) => normalizeLiveOrderResult(request, { success: true, orderID: "order-1" }));
     const beforeSubmit = asyncVeto

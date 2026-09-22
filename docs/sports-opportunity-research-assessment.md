@@ -38,7 +38,8 @@
 - 按现有默认 endDate 窗口读取第一页 40 个事件，得到 669 个可订阅市场。该页 feeSchedule.rate 均为 `0.05`、exponent 为 1、secondsDelay 为 1；tick 包括 0.01 和 0.001。该页含 moneyline、spread、total、分节/半场、角球、精确比分等多类盘口。
 - 样例 NFL market `0x5010f84522ade23439a6e7b173896fdcdeea448d9a538127b2f697fcb28a3dfc`：Gamma 返回 fee rate 0.05、secondsDelay 1、orderMinSize 5、acceptingOrders true；CLOB `/clob-markets/{condition_id}` 返回 `fd.r=0.05`、`sd=1`、`mos=5`、`ao=true`。
 
-这是有限采样，不代表全平台所有市场/时间使用相同费用或延迟。其意义是证明市场级规则读取不可被静态常量代替。当前 `src/domain/fees.ts:1` 仍默认 0.03。
+这是有限采样，不代表全平台所有市场/时间使用相同费用或延迟。其意义是证明市场级规则读取不可被静态常量代替。
+**已修复（2026-09-23）：** `src/domain/fees.ts` 原先默认 0.03，与实测 `feeSchedule.rate=0.05` 不符；现默认值已改为 `0.05`（本次复核再次确认本项目覆盖的 60 个市场全部为 `fd.r=0.05`、`fd.e=1`）。按市场读取费率的通用化仍待后续实现，非体育类市场若启用本项目需另行接入。
 
 ## 3. 官方机制对研究设计的影响
 

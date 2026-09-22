@@ -91,8 +91,8 @@ describe("buildTradeDecision", () => {
       shares: 100,
       notional: 97
     });
-    expect(decision.action === "BUY" ? decision.estimatedNetReturn : 0).toBeCloseTo(0.03003, 5);
-    expect(decision.action === "BUY" ? decision.estimatedFee : 0).toBeCloseTo(0.0873, 4);
+    expect(decision.action === "BUY" ? decision.estimatedNetReturn : 0).toBeCloseTo(0.029428, 5);
+    expect(decision.action === "BUY" ? decision.estimatedFee : 0).toBeCloseTo(0.1455, 4);
   });
 
   test("best ask above max entry price returns PRICE_TOO_HIGH", () => {

@@ -1,3 +1,5 @@
+export type MarketTickSize = "0.1" | "0.01" | "0.005" | "0.0025" | "0.001" | "0.0001";
+
 export type MatchPeriod = "NS" | "1H" | "HT" | "2H" | "ET" | "FT" | "UNKNOWN";
 
 export type TailWindowSource =
@@ -37,7 +39,7 @@ export interface SpreadMarket {
   clobTokenIds: [string, string] | string[];
   outcomes: [string, string] | string[];
   line: number;
-  tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
+  tickSize?: MarketTickSize;
   negRisk?: boolean;
 }
 
@@ -53,7 +55,7 @@ export interface StrategyMarket {
   line?: number;
   marketType?: StrategyMarketType;
   team?: string;
-  tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
+  tickSize?: MarketTickSize;
   negRisk?: boolean;
 }
 
@@ -113,8 +115,9 @@ export interface OrderbookSnapshot {
   market?: string;
   bids: PriceLevel[];
   asks: PriceLevel[];
-  tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
+  tickSize?: MarketTickSize;
   negRisk?: boolean;
+  minimumOrderSize?: number;
   hash?: string;
   timestamp?: string;
 }
@@ -145,7 +148,7 @@ export interface BuyTradeDecision {
   notional: number;
   estimatedFee: number;
   estimatedNetReturn: number;
-  tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
+  tickSize?: MarketTickSize;
   negRisk?: boolean;
   tailWindowSource?: TailWindowSource;
   tailWindowDetails?: string;
@@ -178,7 +181,7 @@ export interface BuyTradeLeg {
   notional: number;
   estimatedFee: number;
   estimatedNetReturn: number;
-  tickSize?: "0.1" | "0.01" | "0.001" | "0.0001";
+  tickSize?: MarketTickSize;
   negRisk?: boolean;
   tailWindowSource?: TailWindowSource;
   tailWindowDetails?: string;

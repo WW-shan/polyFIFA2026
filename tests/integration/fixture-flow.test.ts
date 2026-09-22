@@ -22,7 +22,7 @@ describe("fixture paper flow", () => {
       strategy: "spread_tight_loss_ge2",
       lossRequiresGoals: 3,
       bestAsk: 0.97,
-      estimatedNetReturn: expect.closeTo(0.03003, 5)
+      estimatedNetReturn: expect.closeTo(0.029428, 5)
     });
     expect(result.trade).toMatchObject({
       mode: "paper",

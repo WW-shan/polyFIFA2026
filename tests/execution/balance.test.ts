@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import { SPORTS_TAKER_FEE_RATE } from "../../src/domain/fees.js";
 import { capStakeToAvailableBalance, DEFAULT_POLYGON_RPC_URL, readPusdBalance } from "../../src/execution/balance.js";
 
 describe("live pUSD balance helpers", () => {
@@ -6,17 +7,40 @@ describe("live pUSD balance helpers", () => {
     expect(DEFAULT_POLYGON_RPC_URL).toBe("https://polygon-bor-rpc.publicnode.com");
   });
 
-  test("caps stake to balance after keeping a small buffer", () => {
+  test("caps stake to balance after keeping a small buffer and the taker fee reserve", () => {
     expect(capStakeToAvailableBalance(97, 1.825, { minimumNotional: 1, buffer: 0.05 })).toEqual({
       action: "USE_STAKE",
-      stake: 1.775
+      stake: 1.690476
     });
   });
 
-  test("uses the full buffered balance when requested stake is omitted", () => {
+  test("uses the full fee-aware balance when requested stake is omitted", () => {
     expect(capStakeToAvailableBalance(undefined, 2.34, { minimumNotional: 1, buffer: 0.05 })).toEqual({
       action: "USE_STAKE",
-      stake: 2.29
+      stake: 2.180952
+    });
+  });
+
+  test("reserves the taker fee charged on top of the notional so the order stays affordable", () => {
+    const decision = capStakeToAvailableBalance(100, 100, { minimumNotional: 1, buffer: 0 });
+    expect(decision.action).toBe("USE_STAKE");
+    const stake = decision.action === "USE_STAKE" ? decision.stake : 0;
+    // Worst-case BUY fee per notional is feeRate * (1 - price) <= feeRate.
+    expect(stake + stake * SPORTS_TAKER_FEE_RATE).toBeLessThanOrEqual(100);
+    expect(stake).toBeCloseTo(95.238095, 6);
+  });
+
+  test("keeps an explicit stake that already covers its own fees", () => {
+    expect(capStakeToAvailableBalance(50, 100, { minimumNotional: 1, buffer: 0 })).toEqual({
+      action: "USE_STAKE",
+      stake: 50
+    });
+  });
+
+  test("honours an explicit fee reserve override", () => {
+    expect(capStakeToAvailableBalance(undefined, 100, { minimumNotional: 1, buffer: 0, feeReserveRate: 0 })).toEqual({
+      action: "USE_STAKE",
+      stake: 100
     });
   });
 

@@ -1,14 +1,23 @@
 import { describe, expect, test } from "vitest";
-import { netReturnRate, sportsTakerFeePerShare } from "../../src/domain/fees.js";
+import { netReturnRate, SPORTS_TAKER_FEE_RATE, sportsTakerFeePerShare } from "../../src/domain/fees.js";
 
 describe("sports fee math", () => {
-  test("0.97 entry produces about 3.00% net return after sports taker fee", () => {
-    expect(sportsTakerFeePerShare(0.97)).toBeCloseTo(0.000873, 6);
-    expect(netReturnRate(0.97)).toBeCloseTo(0.03003, 5);
+  test("charges the official 5% sports taker rate per share", () => {
+    expect(SPORTS_TAKER_FEE_RATE).toBe(0.05);
+    expect(sportsTakerFeePerShare(0.70)).toBeCloseTo(0.0105, 10);
+    expect(sportsTakerFeePerShare(0.97)).toBeCloseTo(0.001455, 10);
+    expect(sportsTakerFeePerShare(0.98)).toBeCloseTo(0.00098, 10);
   });
 
-  test("0.98 entry produces about 1.98% net return after sports taker fee", () => {
-    expect(sportsTakerFeePerShare(0.98)).toBeCloseTo(0.000588, 6);
-    expect(netReturnRate(0.98)).toBeCloseTo(0.01981, 5);
+  test("0.97 entry produces about 2.94% net return after sports taker fee", () => {
+    expect(netReturnRate(0.97)).toBeCloseTo(0.029428, 5);
+  });
+
+  test("0.98 entry produces about 1.94% net return after sports taker fee", () => {
+    expect(netReturnRate(0.98)).toBeCloseTo(0.019408, 5);
+  });
+
+  test("100 shares at 0.70 cost 1.05 USDC in taker fees, matching the published fee table", () => {
+    expect(sportsTakerFeePerShare(0.70) * 100).toBeCloseTo(1.05, 10);
   });
 });

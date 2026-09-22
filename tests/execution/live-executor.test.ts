@@ -333,6 +333,119 @@ describe("LiveExecutor", () => {
     }));
   });
 
+  test("adopts the live book tick size and neg-risk flag instead of the stale decision values", async () => {
+    const decision: BuyTradeDecision = {
+      ...buyDecision,
+      legs: [{
+        eventSlug: buyDecision.eventSlug,
+        marketSlug: buyDecision.marketSlug,
+        question: buyDecision.question,
+        tokenId: buyDecision.tokenId,
+        conditionId: buyDecision.conditionId,
+        outcome: buyDecision.outcome,
+        price: 0.97,
+        availableSize: 100,
+        shares: 100,
+        notional: 97,
+        estimatedFee: 0.0873,
+        estimatedNetReturn: 0.029428,
+        tickSize: "0.001",
+        negRisk: false
+      }]
+    };
+    const placeLimitBuy = vi.fn(async (order: LiveOrderRequest): Promise<TradeResult> => ({
+      mode: "live",
+      status: "filled",
+      orderId: "live-1",
+      tokenId: order.tokenId,
+      price: order.price,
+      shares: order.size,
+      notional: order.notional,
+      fee: order.estimatedFee,
+      estimatedPayout: order.size,
+      estimatedProfit: order.size - order.notional - order.estimatedFee
+    }));
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    await executor.execute(decision, {
+      orderType: "FAK",
+      refreshOrderbook: async (tokenId) => ({
+        tokenId,
+        bids: [],
+        asks: [{ price: 0.97, size: 100 }],
+        tickSize: "0.01",
+        negRisk: true
+      }),
+      minimumNotional: 1
+    });
+
+    expect(placeLimitBuy).toHaveBeenCalledWith(expect.objectContaining({
+      tokenId: buyDecision.tokenId,
+      price: 0.97,
+      tickSize: "0.01",
+      negRisk: true
+    }));
+  });
+
+  test("skips a leg sized below the venue minimum order size", async () => {
+    const decision: BuyTradeDecision = {
+      ...buyDecision,
+      legs: [{
+        eventSlug: buyDecision.eventSlug,
+        marketSlug: buyDecision.marketSlug,
+        question: buyDecision.question,
+        tokenId: buyDecision.tokenId,
+        conditionId: buyDecision.conditionId,
+        outcome: buyDecision.outcome,
+        price: 0.97,
+        availableSize: 4,
+        shares: 4,
+        notional: 3.88,
+        estimatedFee: 0.0058,
+        estimatedNetReturn: 0.029428,
+        tickSize: "0.001",
+        negRisk: false
+      }]
+    };
+    const placeLimitBuy = vi.fn();
+    const executor = new LiveExecutor(
+      liveConfigFromEnv({
+        POLY_PRIVATE_KEY: "0xabc",
+        POLY_API_KEY: "key",
+        POLY_API_SECRET: "secret",
+        POLY_PASSPHRASE: "passphrase",
+        POLY_FUNDER_ADDRESS: "0xfunder",
+        POLY_SIGNATURE_TYPE: "1"
+      }),
+      async () => ({ placeLimitBuy })
+    );
+
+    const result = await executor.execute(decision, {
+      orderType: "FAK",
+      refreshOrderbook: async (tokenId) => ({
+        tokenId,
+        bids: [],
+        asks: [{ price: 0.97, size: 4 }],
+        tickSize: "0.001",
+        minimumOrderSize: 5
+      }),
+      minimumNotional: 1
+    });
+
+    expect(placeLimitBuy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "rejected", shares: 0, notional: 0, raw: { reason: "STALE_PLAN" } });
+  });
+
   test("reprices a live leg when the refreshed price still clears the return floor", async () => {
     const decision = {
       ...buyDecision,

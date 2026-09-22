@@ -1,6 +1,7 @@
 import { inflateSync, unzipSync } from "node:zlib";
 import type { MatchPeriod, MatchState, SpreadMarket, StrategyMarket, StrategyMarketType } from "../domain/types.js";
 import { fetchJson, fetchText } from "./http.js";
+import { tickSizeValue as parseTickSize } from "./clob.js";
 
 export async function fetchEventSpreadMarkets(eventSlug: string): Promise<SpreadMarket[]> {
   const html = await fetchText(`https://polymarket.com/sports/world-cup/${encodeURIComponent(eventSlug)}`);
@@ -611,8 +612,7 @@ function numberValue(value: unknown): number | null {
 }
 
 function tickSizeValue(value: unknown): SpreadMarket["tickSize"] | undefined {
-  const parsed = typeof value === "number" ? value.toString() : value;
-  return parsed === "0.1" || parsed === "0.01" || parsed === "0.001" || parsed === "0.0001" ? parsed : undefined;
+  return parseTickSize(value);
 }
 
 function parseJsonMaybe(value: string): unknown {
