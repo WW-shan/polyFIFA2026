@@ -237,6 +237,38 @@ function benignBookAbsence(record: JournalRecord): boolean {
   return empty(data.duplicateTokenIds) && empty(data.unrequestedTokenIds) && empty(data.invalidResponseIndices);
 }
 
+function recordIssueMessage(record: JournalRecord): string {
+  const data = objectValue(record.data);
+  if (record.kind === "http_error") {
+    const error = objectValue(data?.error);
+    const batchId = typeof data?.batchId === "string" ? `${data.batchId}: ` : "";
+    return `${batchId}${typeof error?.name === "string" ? error.name : "Error"}: ${
+      typeof error?.message === "string" ? error.message : "request failed"}`;
+  }
+  if (record.kind === "socket_error") {
+    return `${typeof data?.name === "string" ? data.name : "Error"}: ${
+      typeof data?.message === "string" ? data.message : "socket failure"}${
+      typeof data?.code === "string" ? ` (${data.code})` : ""}`;
+  }
+  if (record.kind === "book_snapshot_batch_error") {
+    const code = typeof data?.code === "string" ? data.code : record.kind;
+    const counts = [["missing", "missingTokenIds"], ["duplicate", "duplicateTokenIds"],
+      ["unrequested", "unrequestedTokenIds"], ["invalid", "invalidResponseIndices"]]
+      .flatMap(([label, key]) => {
+        const value = data?.[key!];
+        const length = Array.isArray(value) ? value.length : 0;
+        return length > 0 ? [`${label}=${length}`] : [];
+      });
+    return counts.length === 0 ? code : `${code}: ${counts.join(", ")}`;
+  }
+  const nested = objectValue(data?.error);
+  if (typeof nested?.message === "string") return `${typeof nested.name === "string" ? nested.name : "Error"}: ${nested.message}`;
+  if (typeof data?.message === "string") return data.message;
+  if (record.data instanceof Error) return `${record.data.name}: ${record.data.message}`;
+  if (typeof record.data === "string") return record.data;
+  return record.kind;
+}
+
 export class ContinuousState {
   private readonly games = new Map<string, CapturedGame>();
   private readonly tokens = new Map<string, string>();
@@ -546,8 +578,8 @@ export class ContinuousState {
       const closed = [...this.connections.values()].filter(value => !value.open);
       for (const value of closed.slice(0, Math.max(0, closed.length - 64))) this.connections.delete(value.id);
     }
-    if (record.kind.endsWith("error") && !benignBookAbsence(record)) {
-      this.issue(record.kind, JSON.stringify(record.data), record.receivedAtMs);
+    if (record.kind.endsWith("error") && record.kind !== "discovery_scope_error" && !benignBookAbsence(record)) {
+      this.issue(record.kind, recordIssueMessage(record), record.receivedAtMs);
     }
     const meta = metadataFromRecord(record);
     if (meta) {

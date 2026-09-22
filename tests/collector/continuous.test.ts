@@ -52,7 +52,12 @@ test("volatile progress refreshes only the heartbeat while structural state rewr
     await manager.pulse();
     expect((await lstat(join(config.dataRoot, "state.json"))).ino).toBe(before.ino);
 
-    manager.state.issue("test", "business state changed", now);
+    manager.state.issue("socket_error", "diagnostic noise", now);
+    await manager.pulse();
+    expect((await lstat(join(config.dataRoot, "state.json"))).ino).toBe(before.ino);
+
+    manager.state.markArchive("game:123", { status: "complete", runId: "tail-test", attempt: 1,
+      outputDirectory: join(config.dataRoot, "exports", "game:123"), priceReadyTokens: 1, strictReadyTokens: 0 });
     await manager.pulse();
     expect((await lstat(join(config.dataRoot, "state.json"))).ino).not.toBe(before.ino);
   } finally { await manager.stop(); }

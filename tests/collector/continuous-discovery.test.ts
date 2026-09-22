@@ -145,7 +145,7 @@ describe("continuous discovery", () => {
     roots.forEach((raw, index) => expect(result[index]?.raw).toBe(raw));
     expect(result[4]?.raw).toBe(companion);
     expect(input.issues).toEqual([{ scope: "related", key: "a", message: failure.message }]);
-    expect(input.urls.filter((url) => url.pathname.endsWith("/keyset")).map((url) => url.searchParams.get("game_id")))
+    expect(input.urls.filter((url) => url.pathname.endsWith("/keyset")).map((url) => url.searchParams.get("game_id")).sort())
       .toEqual(["a", "a", "b"]);
     expect(input.requests).toHaveLength(5);
     expect(input.pages).toHaveLength(4);
@@ -160,6 +160,42 @@ describe("continuous discovery", () => {
     const result = await discoverContinuousEvents(options, input.deps, profiles, input.onIssue);
     expect(result.map((item) => item.eventId)).toEqual(["a", "b"]);
     expect(input.issues.map((issue) => issue.scope)).toEqual(["related", "related"]);
+  });
+
+  test("splits compact live discovery into bounded scheduled and live requests", async () => {
+    const scheduled = event("scheduled", null, { startTime: new Date(now).toISOString() });
+    const live = event("live", null, { live: true, startTime: "2020-01-01T00:00:00Z" });
+    const urls: URL[] = [];
+    const result = await discoverContinuousEvents({ ...options, liveDiscovery: true, pageSize: 10 }, {
+      request: async (value) => {
+        const url = new URL(value);
+        urls.push(url);
+        return url.searchParams.get("live") === "true" ? [live] : [scheduled];
+      }
+    }, profiles.slice(0, 1));
+
+    expect(result.map((item) => item.eventId)).toEqual(["scheduled", "live"]);
+    expect(urls).toHaveLength(2);
+    expect(urls.some((url) => url.searchParams.get("live") === "true")).toBe(true);
+    const scheduledUrl = urls.find((url) => url.searchParams.has("start_time_min"));
+    expect(scheduledUrl?.searchParams.get("start_time_min")).toBe(new Date(now - 3_600_000).toISOString());
+    expect(scheduledUrl?.searchParams.has("start_time_max")).toBe(true);
+    expect(urls.every((url) => url.searchParams.get("limit") === "10")).toBe(true);
+  });
+
+  test("keeps the live half of compact discovery when the scheduled request fails", async () => {
+    const live = event("live", null, { live: true, startTime: "2020-01-01T00:00:00Z" });
+    const issues: DiscoveryIssue[] = [];
+    const result = await discoverContinuousEvents({ ...options, liveDiscovery: true, pageSize: 10 }, {
+      request: async (value) => {
+        const url = new URL(value);
+        if (url.searchParams.get("live") === "true") return [live];
+        throw new Error("scheduled window unavailable");
+      }
+    }, profiles.slice(0, 1), issue => issues.push(issue));
+
+    expect(result.map((item) => item.eventId)).toEqual(["live"]);
+    expect(issues).toEqual([{ scope: "profile", key: "tennis", message: "scheduled window unavailable" }]);
   });
 
   test("uses each configured tag and game-start bounds without excluding league aliases", async () => {

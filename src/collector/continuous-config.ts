@@ -117,7 +117,9 @@ export function continuousConfig(
     profiles: [{ name: "tennis", tagId: "864" }, { name: "table-tennis", tagId: "103767" }],
     discoveryIntervalMs: 30_000,
     snapshotIntervalMs: 60_000,
-    httpTimeoutMs: 10_000,
+    // Gamma pages for busy tags can exceed 10s even after the continuous
+    // collector narrows them to the scheduled/live window.
+    httpTimeoutMs: 30_000,
     postFinishRetentionMs: 600_000,
     pulseIntervalMs: 5_000,
     minFreeBytes: 20 * 1024 ** 3,

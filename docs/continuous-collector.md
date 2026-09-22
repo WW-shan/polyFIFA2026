@@ -459,7 +459,9 @@ schema v5 之前 finalize 的场次没有 `metadata_json`，导出时从 raw run
 
 同时增加 SQLite 读取的有限重试：采集器重启的短暂窗口里，单次 `unable to open database file` 不再立刻记为 `watch_cycle_failed`；连续失败仍会按原策略升级并触发重启。
 
-验证：Python 语法编译通过；用回归脚本验证自动重启日志路径会依次写入 `restart_collector` / `restart_collector_done`，并验证数据库前两次打开失败、第三次成功时不会误报。
+此外，macOS LaunchAgent 默认 `PATH` 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，而 Homebrew `npm` 位于 `/opt/homebrew/bin`。两个 watchdog 现在共享 `tools/collector_watch_utils.py`，按“显式参数、`POLY_NPM`、当前 `PATH`、常见绝对路径”解析 npm，不再直接调用裸命令 `npm`。因此健康守护的自动重启路径在 launchd 环境下也能真正执行。
+
+验证：Python 语法编译通过；用回归脚本验证自动重启日志路径会依次写入 `restart_collector` / `restart_collector_done`，验证 npm 解析顺序和找不到时的明确错误，并验证数据库前两次打开失败、第三次成功时不会误报。
 
 ### 9. 本轮核查后确认不是问题的点
 
@@ -473,15 +475,22 @@ schema v5 之前 finalize 的场次没有 `metadata_json`，导出时从 raw run
 
 `/api/status?view=compact` 新增为 dashboard、健康守护、live watcher 和 `/api/archives` 使用的精简视图，只保留这些调用方需要的字段；原 `/api/status` 全量契约保留。2026-09-22 线上重启后实测 91 场比赛时，compact 响应 **140,557 B**，全量响应 **714,259 B**；`state.json` 约 698 KB，连续 30 秒保持同一 inode，而 112 B 心跳每 5 秒更新，并观测到 60 秒全量刷新。结构性状态变化仍会立即写完整快照。
 
+### 11. 发现请求超时与启动阻塞（2026-09-22 修复）
+
+Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可达数 MB；实测通过代理请求时单页超过 60 秒，而连续采集器默认 `httpTimeoutMs=10_000`，导致 tennis profile 每次发现都报 `AbortError`。table-tennis 成功时进程仍进入 `collecting`，形成“看似正常但少采一整类比赛”的隐蔽故障。
+
+连续采集器现在把 discovery 拆成两条有界查询：`start_time_min/max` 的计划赛程窗口（保留 1 小时 catch-up）和 Gamma `live=true` 的进行中赛事；分页从 100 降到 10，连续配置默认 HTTP 超时提高到 30 秒。相关赛事扩展由串行改为最多 8 路并发，但最终仍按 game key 的稳定顺序合并，保持去重与冲突诊断语义不变。pulse 入口也会更新 supervisor 时间，避免一次合法但较长的 discovery 被健康守护误判为 `status_stale`。
+
 ### 本轮验证证据
 
-- 全量测试：**93 个测试文件 / 2,620 项测试通过，0 失败**。
+- 全量测试：**94 个测试文件 / 2,647 项测试通过，0 失败**。
 - TypeScript：`npx tsc --noEmit` 通过。
 - 采集器范围测试：**61 个测试文件 / 2,090 项测试通过**。
 - 从正式 SQLite 只读副本导出 **30 份归档**：`exported 30 / failed 0`；30 场 match-level `window_complete` 全部为 true，每场 `anchorFrames` 为 6–16。归档内仍有 13 场存在至少一个 token 的 `observedWindowComplete=false`（多为 1 秒缺口或未活跃的子盘口），所以回测只有在实际持有窗口完整时才会纳入，不能被 match-level 标志替代。
 - 对上述 30 份归档运行真实回测：**2,208 个 scenario、64 个参数组、152 个 eligible**；未出现解析或执行异常。
-- 正式采集器连续采样：`mode=collecting`、`errors=[]`、`lastRecordAtMs` 持续推进、`dataAgeMs` 保持在约 1–2 秒；正式库为 schema v6，当前 `matches=153`、`tail.sqlite` 约 245.7 MB，磁盘空闲约 85 GiB。
-- 健康守护：`python3 -m py_compile` 通过；自动重启日志路径和 SQLite 短暂打开失败重试均有直接回归验证。
+- 正式采集器连续采样：`mode=collecting`、`errors=[]`、`lastRecordAtMs` 持续推进；重置后的实例启动约 25 秒，当前 146 场、约 2,478 个 desired token，compact status 约 287 KB，`tail.sqlite quick_check=ok`。
+- 状态写入：在非结构性变化期间 `state.json` 保持同一 inode，112 B 心跳每 5 秒更新，约 60 秒做一次全量刷新。
+- 健康守护：`python3 -m py_compile` 通过；自动重启日志路径、launchd PATH 下的 npm 解析、SQLite 短暂打开失败重试均有直接回归验证。
 
 ### 仍需保留的边界
 

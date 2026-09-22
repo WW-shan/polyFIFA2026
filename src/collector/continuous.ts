@@ -174,7 +174,7 @@ export class ContinuousCollector {
     const config = this.config;
     const dependencies: CollectorDependencies = {
       now: this.now,
-      discover: (options, deps) => discoverContinuousEvents({ ...options, singleMatchOnly: config.singleMatchOnly }, deps, config.profiles, issue => {
+      discover: (options, deps) => discoverContinuousEvents({ ...options, singleMatchOnly: config.singleMatchOnly, liveDiscovery: true }, deps, config.profiles, issue => {
         this.state.issue(`discovery:${issue.scope}`, `${issue.key}: ${issue.message}`, this.now());
         if (this.journal) this.record(this.journal, { source: "collector", kind: "discovery_scope_error", data: issue });
       }),
@@ -195,7 +195,7 @@ export class ContinuousCollector {
       dateWindow: "game-start", lookbackHours: config.lookbackHours, aheadHours: config.aheadHours,
       discoveryIntervalMs: config.discoveryIntervalMs, snapshotIntervalMs: config.snapshotIntervalMs,
       httpTimeoutMs: config.httpTimeoutMs, postFinishRetentionMs: config.postFinishRetentionMs, reconciliationConcurrency: 4,
-      backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true,
+      backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true, pageSize: 10,
       absentBookCooldownMs: config.absentBookCooldownMs,
       compactStorageEnabled: config.compactStorageEnabled,
       compactAnchorSnapshots: config.compactAnchorSnapshots
@@ -218,6 +218,10 @@ export class ContinuousCollector {
     return this.pulseTask;
   }
   private async performPulse(): Promise<void> {
+    // A pulse can legitimately spend tens of seconds in discovery or a full
+    // state write. Mark supervisor progress at entry so the health watchdog
+    // measures whether the supervisor is advancing, not how long one pass takes.
+    this.state.markUpdated(this.now());
     const free = await (this.dependencies.diskBytes ?? availableDiskBytes)(this.config.dataRoot);
     if (this.stopping) return;
     this.state.freeBytes = free;

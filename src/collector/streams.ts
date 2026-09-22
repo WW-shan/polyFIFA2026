@@ -81,6 +81,15 @@ interface SocketConnection {
 const DEFAULT_CLOB_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const DEFAULT_SPORTS_URL = "wss://sports-api.polymarket.com/ws";
 
+function serializableStreamError(error: unknown): { name: string; message: string; code?: string } {
+  const name = error instanceof Error && error.name ? error.name : "Error";
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const message = rawMessage.replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/]*@/gi, "$1[redacted]@").slice(0, 2000);
+  const code = error instanceof Error && typeof (error as NodeJS.ErrnoException).code === "string"
+    ? (error as NodeJS.ErrnoException).code : undefined;
+  return { name, message, ...(code === undefined ? {} : { code }) };
+}
+
 const defaultTimers: StreamTimerApi = {
   setTimeout: (handler, timeoutMs) => setTimeout(handler, timeoutMs),
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
@@ -381,7 +390,8 @@ export class PublicStreams {
 
   private handleSocketError(channel: ChannelState, connection: SocketConnection, error: unknown): void {
     if (!this.isCurrent(channel, connection)) return;
-    this.safeRecord({ source: "collector", kind: "socket_error", connectionId: channel.connectionId!, data: error });
+    this.safeRecord({ source: "collector", kind: "socket_error", connectionId: channel.connectionId!,
+      data: serializableStreamError(error) });
     this.reportError(error);
     this.retireConnection(channel, connection, "socket_error");
   }

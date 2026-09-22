@@ -351,6 +351,20 @@ describe("public collector streams", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  test("records socket errors with actionable, serializable details", async () => {
+    const sink = new MemorySink();
+    const socket = new ControlledSocket();
+    const streams = createPublicStreams({ journal: sink, connectSports: false, autoReconnect: false, socketFactory: () => socket });
+    await streams.start(["token"]);
+    socket.open();
+    socket.error(Object.assign(new Error("proxy tunnel reset"), { code: "ECONNRESET" }));
+    await streams.stop();
+
+    expect(sink.records.find(record => record.kind === "socket_error")?.data).toEqual({
+      name: "Error", message: "proxy tunnel reset", code: "ECONNRESET"
+    });
+  });
+
   test.each(["clob", "sports"] as const)("resets the %s silence deadline only when an inbound frame arrives", async (source) => {
     vi.useFakeTimers();
     const socket = new ControlledSocket();

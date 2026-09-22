@@ -290,6 +290,25 @@ describe("persistent continuous capture observations", () => {
       .toEqual(["book_snapshot_batch_error", "book_snapshot_batch_error"]);
   });
 
+  test("summarizes transport failures without dumping request payloads or duplicate discovery records", () => {
+    const state = new ContinuousState("/capture", 8765);
+    state.observe(journalRecord(1, 1_000, "clob", "http_error", {
+      batchId: "run:books:7", tokenIds: ["token".repeat(10_000)],
+      error: { name: "AbortError", message: "request timed out" }
+    }));
+    state.observe(journalRecord(2, 2_000, "collector", "socket_error", {
+      name: "Error", message: "proxy tunnel reset", code: "ECONNRESET"
+    }));
+    state.observe(journalRecord(3, 3_000, "collector", "discovery_scope_error", {
+      scope: "profile", key: "tennis", message: "This operation was aborted"
+    }));
+
+    expect(state.snapshot().errors).toEqual([
+      { atMs: 1_000, scope: "http_error", message: "run:books:7: AbortError: request timed out" },
+      { atMs: 2_000, scope: "socket_error", message: "Error: proxy tunnel reset (ECONNRESET)" }
+    ]);
+  });
+
   test("unknown and malformed frames are recorded as diagnostics, not invented match observations", () => {
     const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
     state.observe(journalRecord(1, 1000, "clob", "ws_message", "not-json", "c"));

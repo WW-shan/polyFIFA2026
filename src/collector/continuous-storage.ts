@@ -154,6 +154,11 @@ export async function readCaptureHeartbeat(dataRoot: string): Promise<CaptureHea
   return heartbeat as CaptureHeartbeat;
 }
 
+function volatileIssueScope(scope: string): boolean {
+  return scope === "socket_error" || scope === "http_error" || scope === "discovery_scope_error"
+    || scope.startsWith("discovery:");
+}
+
 /**
  * Fingerprint the state that matters for restart recovery.
  *
@@ -165,7 +170,8 @@ export function captureStateFingerprint(status: ContinuousStatus): string {
   return JSON.stringify({
     schemaVersion: status.schemaVersion, instanceId: status.instanceId, pid: status.pid, startedAtMs: status.startedAtMs,
     stateStaleAfterMs: status.stateStaleAfterMs, dataRoot: status.dataRoot, port: status.port, mode: status.mode,
-    runId: status.runId, runDirectory: status.runDirectory, errors: status.errors,
+    runId: status.runId, runDirectory: status.runDirectory,
+    errors: status.errors.filter(issue => !volatileIssueScope(issue.scope)),
     games: status.games.map(game => ({
       key: game.key, title: game.title, sport: game.sport, gameId: game.gameId,
       eventIds: game.eventIds, eventSlugs: game.eventSlugs, tokenIds: game.tokenIds, marketIds: game.marketIds,

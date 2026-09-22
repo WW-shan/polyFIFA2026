@@ -11,6 +11,30 @@ export interface DiscoveryIssue {
   message: string;
 }
 
+const RELATED_DISCOVERY_CONCURRENCY = 8;
+
+async function settleInOrder<T>(
+  values: readonly T[],
+  concurrency: number,
+  operation: (value: T, index: number) => Promise<CollectorEvent[]>
+): Promise<PromiseSettledResult<CollectorEvent[]>[]> {
+  const results = new Array<PromiseSettledResult<CollectorEvent[]>>(values.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= values.length) return;
+      try {
+        results[index] = { status: "fulfilled", value: await operation(values[index]!, index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 function fail(code: string, message: string): never {
   const error = new Error(`${code}: ${message}`);
   error.name = code;
@@ -112,15 +136,41 @@ export async function discoverContinuousEvents(
   const fresh = new EventIndex();
   let successfulProfiles = 0;
   for (const profile of profiles) {
-    try {
-      const roots = await discoverSportsEvents({
-        ...options, tagId: profile.tagId, sports: [], dateWindow: "game-start"
-      }, profileDependencies(deps));
-      fresh.merge(roots);
-      successfulProfiles += 1;
-    } catch (error) {
-      onIssue({ scope: "profile", key: profile.name, message: issueMessage(error) });
+    const profileOptions = { ...options, tagId: profile.tagId, sports: [], dateWindow: "game-start" as const };
+    if (!options.liveDiscovery) {
+      try {
+        const roots = await discoverSportsEvents(profileOptions, profileDependencies(deps));
+        fresh.merge(roots);
+        successfulProfiles += 1;
+      } catch (error) {
+        onIssue({ scope: "profile", key: profile.name, message: issueMessage(error) });
+      }
+      continue;
     }
+
+    // Gamma can return megabytes per page for a busy tag. Fetch the bounded
+    // scheduled window and live events as separate small pages instead of
+    // downloading every open event; a failure in one half must not discard the
+    // other half when it succeeded.
+    // Ongoing games are covered by the live query; the scheduled half only
+    // needs a short catch-up window for games whose live flag has not flipped
+    // yet. Keeping this at one hour avoids downloading the whole open catalog.
+    const scheduledOptions = { ...profileOptions,
+      lookbackHours: Math.min(profileOptions.lookbackHours ?? 6, 1) };
+    const halves = await Promise.allSettled([
+      discoverSportsEvents({ ...scheduledOptions, serverStartTimeWindow: true }, profileDependencies(deps)),
+      discoverSportsEvents({ ...profileOptions, liveOnly: true }, profileDependencies(deps))
+    ]);
+    let profileSucceeded = false;
+    for (const half of halves) {
+      if (half.status === "fulfilled") {
+        fresh.merge(half.value);
+        profileSucceeded = true;
+      } else {
+        onIssue({ scope: "profile", key: profile.name, message: issueMessage(half.reason) });
+      }
+    }
+    if (profileSucceeded) successfulProfiles += 1;
   }
   if (successfulProfiles === 0) fail("CONTINUOUS_DISCOVERY_FAILED", "no sport profile completed discovery");
 
@@ -132,14 +182,21 @@ export async function discoverContinuousEvents(
     if (roots) roots.push(event);
     else games.set(event.gameId, [event]);
   }
-  for (const [gameId, roots] of games) {
-    try {
-      const related = await expandRelatedEvents(roots, {
-        ...options, maxPages: Math.min(options.maxPages ?? 20, 20)
-      }, deps);
-      fresh.merge(related);
-    } catch (error) {
-      onIssue({ scope: "related", key: gameId, message: issueMessage(error) });
+  const gameEntries = [...games.entries()];
+  const relatedResults = await settleInOrder(gameEntries, RELATED_DISCOVERY_CONCURRENCY,
+    ([, roots]) => expandRelatedEvents(roots, {
+      ...options, maxPages: Math.min(options.maxPages ?? 20, 20)
+    }, deps));
+  for (let index = 0; index < relatedResults.length; index += 1) {
+    const result = relatedResults[index]!;
+    if (result.status === "fulfilled") {
+      try {
+        fresh.merge(result.value);
+      } catch (error) {
+        onIssue({ scope: "related", key: gameEntries[index]![0], message: issueMessage(error) });
+      }
+    } else {
+      onIssue({ scope: "related", key: gameEntries[index]![0], message: issueMessage(result.reason) });
     }
   }
   return options.singleMatchOnly ? singleMatchEvents(fresh.events, onIssue) : fresh.events;

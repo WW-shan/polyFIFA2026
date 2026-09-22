@@ -28,6 +28,8 @@ import urllib.error
 import urllib.request
 from collections import deque
 
+from collector_watch_utils import resolve_npm
+
 MAX_LOG_BYTES = 4 * 1024 * 1024
 KEEP_LOG_LINES = 4000
 
@@ -181,7 +183,7 @@ class HealthWatch:
         self.last_restart_at = time.time()
         self.log.write("action", "restart_collector", reason=reason)
         try:
-            result = subprocess.run(["npm", "run", "collect:start"], cwd=self.project,
+            result = subprocess.run([resolve_npm(), "run", "collect:start"], cwd=self.project,
                                     capture_output=True, text=True, timeout=180)
             self.log.write("action", "restart_collector_done", code=result.returncode,
                      tail=(result.stdout or result.stderr or "").strip()[-400:])

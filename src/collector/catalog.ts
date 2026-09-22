@@ -9,6 +9,12 @@ export interface CatalogOptions {
   lookbackHours?: number;
   aheadHours?: number;
   allOpen?: boolean;
+  /** Use Gamma's scheduled-start bounds for game-start discovery. */
+  serverStartTimeWindow?: boolean;
+  /** Ask Gamma for live events only. */
+  liveOnly?: boolean;
+  /** Split continuous discovery into bounded scheduled and live requests. */
+  liveDiscovery?: boolean;
   /** Opt-in single-match scope for discoverContinuousEvents; finite discovery is unchanged. */
   singleMatchOnly?: boolean;
   pageSize?: number;
@@ -219,13 +225,17 @@ export async function discoverSportsEvents(options: CatalogOptions, deps: Catalo
     order: "id",
     ascending: "true"
   });
+  if (options.liveOnly) params.set("live", "true");
   let windowStart = -Infinity;
   let windowEnd = Infinity;
   if (!options.allOpen) {
     const current = now();
     windowStart = current - (options.lookbackHours ?? 48) * HOUR_MS;
     windowEnd = current + (options.aheadHours ?? 24) * HOUR_MS;
-    if (options.dateWindow !== "game-start") {
+    if (options.dateWindow === "game-start" && options.serverStartTimeWindow) {
+      params.set("start_time_min", new Date(windowStart).toISOString());
+      params.set("start_time_max", new Date(windowEnd).toISOString());
+    } else if (options.dateWindow !== "game-start") {
       // Gamma end dates are metadata dates, not observed finish clocks.
       params.set("end_date_min", new Date(windowStart).toISOString());
       params.set("end_date_max", new Date(windowEnd).toISOString());

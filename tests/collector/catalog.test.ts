@@ -203,6 +203,28 @@ describe("sports catalog discovery", () => {
     });
   });
 
+  test("opt-in server start-time filtering keeps game-start requests bounded", async () => {
+    const deps = pages([[]]);
+    await discoverSportsEvents({
+      dateWindow: "game-start", serverStartTimeWindow: true, lookbackHours: 6, aheadHours: 2,
+      pageSize: 3, now: () => nowMs
+    }, deps);
+
+    expect(deps.urls[0]?.searchParams.get("start_time_min")).toBe("2026-09-10T06:00:00.000Z");
+    expect(deps.urls[0]?.searchParams.get("start_time_max")).toBe("2026-09-10T14:00:00.000Z");
+    expect(deps.urls[0]?.searchParams.has("end_date_min")).toBe(false);
+    expect(deps.urls[0]?.searchParams.has("end_date_max")).toBe(false);
+  });
+
+  test("live-only discovery delegates the live filter to Gamma", async () => {
+    const deps = pages([[]]);
+    await discoverSportsEvents({ dateWindow: "game-start", liveOnly: true, pageSize: 3, now: () => nowMs }, deps);
+
+    expect(deps.urls[0]?.searchParams.get("live")).toBe("true");
+    expect(deps.urls[0]?.searchParams.has("start_time_min")).toBe(false);
+    expect(deps.urls[0]?.searchParams.has("start_time_max")).toBe(false);
+  });
+
   test("game-start discovers tennis with an endDate seven days after its scheduled start", async () => {
     const raw = event("tennis", {
       slug: "atp-brunold-heide-2026-09-11", sport: "ATP", tags: [{ slug: "Tennis" }],
