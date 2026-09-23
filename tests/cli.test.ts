@@ -312,6 +312,21 @@ describe("CLI", () => {
     ]);
   });
 
+  test("--rest-price refuses a taker-only order type instead of silently not resting", async () => {
+    const result = await runCli([
+      "--mode", "paper",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--rest-price", "0.7",
+      "--order-type", "FAK"
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--rest-price requires a resting order type");
+  });
+
   test("live passes record a filled resting order instead of leaving a stale reservation", async () => {
     const dir = await mkdtemp(join(tmpdir(), "poly-cli-reconcile-fill-"));
     const ledgerFile = join(dir, "ledger.json");

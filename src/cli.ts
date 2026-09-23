@@ -7,7 +7,7 @@ import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js
 import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, DEFAULT_POLYGON_RPC_URL, readPusdBalance } from "./execution/balance.js";
-import { cancelLiveOrder, getLiveOrder, LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
+import { cancelLiveOrder, getLiveOrder, isRestingOrderType, LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import type { LiveExecuteOptions, LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type MarketSettlementStatus, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
@@ -41,7 +41,7 @@ const CLI_HELP = `Usage: npm run cli -- --mode paper|live|status [options]
   --order-type FOK|FAK|GTC|GTD
                             Live order type (default: FAK, or GTD with --rest-price)
   --rest-price PRICE        Rest a maker bid at PRICE when nothing is takable at or below it
-  --rest-seconds SECONDS    Resting lifetime for GTC/GTD (default: 180)
+  --rest-seconds SECONDS    GTD lifetime in seconds (default: 180; GTC never expires)
   --post-only true|false    Maker-only resting orders (default: true)
   --cancel-order ORDER_ID   Cancel one live order by id
   --help                    Show this help
@@ -2273,6 +2273,11 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
   const restPrice = raw.restPrice === undefined ? undefined : numberArg(raw.restPrice, "--rest-price");
   const orderType = parseOrderType(raw.orderType ?? (restPrice === undefined ? "FAK" : "GTD"));
+  // FAK/FOK can only take, so a rest price would be silently ignored while the
+  // bot kept submitting doomed immediate-or-cancel orders.
+  if (restPrice !== undefined && raw.orderType !== undefined && !isRestingOrderType(orderType)) {
+    throw new Error("--rest-price requires a resting order type (GTC or GTD); use --max-entry-price to cap a taker-only order");
+  }
 
   const parsed: ParsedArgs = {
     mode,
