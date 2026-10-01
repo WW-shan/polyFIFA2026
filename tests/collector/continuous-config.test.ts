@@ -22,6 +22,7 @@ describe("continuous configuration", () => {
       profiles: [{ name: "tennis", tagId: "864" }, { name: "table-tennis", tagId: "103767" }],
       discoveryIntervalMs: 30_000,
       snapshotIntervalMs: 60_000,
+      tennisPointsIntervalMs: 15_000,
       httpTimeoutMs: 30_000,
       postFinishRetentionMs: 600_000,
       pulseIntervalMs: 5_000,
@@ -78,7 +79,7 @@ describe("continuous configuration", () => {
     const input: ContinuousConfig = {
       dataRoot: "captures/run",
       profiles: [{ name: " custom sport ", tagId: " custom-tag " }],
-      discoveryIntervalMs: 1, snapshotIntervalMs: 2, httpTimeoutMs: 3,
+      discoveryIntervalMs: 1, snapshotIntervalMs: 2, tennisPointsIntervalMs: 0, httpTimeoutMs: 3,
       postFinishRetentionMs: 0, pulseIntervalMs: 4, minFreeBytes: 1, port: 1,
       lookbackHours: 0.25, aheadHours: 0, retryDelayMs: 5, exportTimeoutMs: 6,
       compressionEnabled: true, compressionIntervalMs: 7, compressionMaxSegments: 3, compressionTimeoutMs: 8,

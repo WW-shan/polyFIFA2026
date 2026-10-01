@@ -26,6 +26,7 @@
   "lookbackHours": 6,
   "aheadHours": 2,
   "discoveryIntervalMs": 30000,
+  "tennisPointsIntervalMs": 15000,
   "snapshotIntervalMs": 10000,
   "httpTimeoutMs": 30000,
   "postFinishRetentionMs": 30000,

@@ -201,7 +201,7 @@ function payloadBlob(payload: string): Buffer {
 
 
 function sourceFrom(value: unknown): JournalRecord["source"] {
-  if (value === "collector" || value === "gamma" || value === "clob" || value === "sports") return value;
+  if (value === "collector" || value === "gamma" || value === "clob" || value === "sports" || value === "scores365") return value;
   throw new Error("COMPACT_TAIL_PAYLOAD_INVALID: source");
 }
 
@@ -626,6 +626,7 @@ export class CompactTailStore {
   private isCaptureRecord(record: JournalRecord): boolean {
     return ((record.source === "sports" || record.source === "clob") &&
       (record.kind === "ws_message" || record.kind === "book_snapshot" || record.kind === "book_snapshot_batch")) ||
+      (record.source === "scores365" && record.kind === "point_frame") ||
       (record.source === "collector" && ["connection_open", "connection_close", "connection_gap", "connection_timeout", "heartbeat_timeout"].includes(record.kind));
   }
 

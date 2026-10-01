@@ -229,7 +229,7 @@ describe("background initial snapshots", () => {
       await turn();
       expect(run.runtime.status).toBe("running");
       expect(startFinished).toBe(true);
-      expect([...run.timers.intervals.values()].map(timer => timer.ms)).toEqual([100, 200]);
+      expect([...run.timers.intervals.values()].map(timer => timer.ms)).toEqual([100, 15_000, 200]);
       events = [game("A"), game("B")];
       run.timers.fireIntervals(100);
       await run.runtime.discoverOnce();

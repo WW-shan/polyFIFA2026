@@ -1,4 +1,4 @@
-export type CollectorSource = "collector" | "gamma" | "clob" | "sports";
+export type CollectorSource = "collector" | "gamma" | "clob" | "sports" | "scores365";
 
 export interface RecordInput {
   source: CollectorSource;

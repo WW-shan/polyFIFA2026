@@ -30,7 +30,7 @@ class BufferedFile {
 const COLUMNS:readonly (keyof TailPreviewRow)[]=["windowKey","eventSlug","gameId","marketId","conditionId","question","marketType","tokenId","outcome",
   "secondIndex","startAtMs","endAtMs","secondsBeforeFinish","status","wholeSecondValid","bestBid","bestAsk","minBestBid","maxBestBid","minBestAsk","maxBestAsk",
   "bookUpdates","tradeCount","tradeShares","bookObservedAtMs","bookSourceAtMs","bookAgeMs","feedAgeMs","bookHash","contextSource","contextObservedAtMs",
-  "contextSourceAtMs","contextAgeMs","contextStatus","score","period","clock","stateChangeCount","reasons","depthOffset","depthBytes"];
+  "contextSourceAtMs","contextAgeMs","contextStatus","score","period","clock","point","pointObservedAtMs","pointAgeMs","pointStatus","stateChangeCount","reasons","depthOffset","depthBytes"];
 
 export async function exportTail(input:TailOptions):Promise<TailExportResult>{
   const options=tailOptions(input);

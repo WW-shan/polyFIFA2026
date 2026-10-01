@@ -1,5 +1,6 @@
 import type { ReplayLevel } from "./replay-types.js";
 import type { JournalRecord } from "./types.js";
+import type { TennisEntrySignal, TennisPointFrame } from "./tennis-points.js";
 
 export type TailClockPolicy = "strict" | "flag-backsteps";
 export type TailClockReceipt = Pick<JournalRecord, "sequence" | "receivedAt" | "receivedAtMs" | "monotonicNs" | "source" | "kind"> & {
@@ -120,6 +121,18 @@ export interface TailMetadata {
   finishAtMs: number | null; finishSource: "gamma.finishedTimestamp" | null;
   observedAtMs: number; sequence: number; raw: Record<string, unknown>;
 }
+/**
+ * Point-level tennis context for one second of a tail: the last 365Scores
+ * point frame observed at or before that second plus the derived late-game
+ * entry signal. Kept optional so archives written before the point source
+ * existed still validate and replay.
+ */
+export interface TailPointContext {
+  observedAtMs: number;
+  frame: TennisPointFrame;
+  signal: TennisEntrySignal | null;
+}
+
 export interface TailObservation {
   eventSlug: string | null; gameId: string | null; sport: string | null;
   source: "sports-ws" | "gamma"; sourceAtMs: number | null; observedAtMs: number;
@@ -167,6 +180,11 @@ export interface TailSecond {
   contextSource: TailObservation["source"] | null; contextObservedAtMs: number | null; contextSourceAtMs: number | null;
   contextAgeMs: number | null; contextStatus: "present" | "missing" | "stale" | "disconnected";
   score: unknown; period: unknown; clock: unknown; stateChangeCount: number;
+  /** Latest 365Scores point-level tennis context, when the point source was running. */
+  point?: TailPointContext | null;
+  pointObservedAtMs?: number | null;
+  pointAgeMs?: number | null;
+  pointStatus?: "present" | "missing" | "stale";
   reasons: string[];
   // References to TailClockIssue.current.sequence in the window/summary diagnostics.
   clockIssueSequences?: number[];

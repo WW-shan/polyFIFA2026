@@ -221,6 +221,13 @@ function validateSecond(row: TailSecond, indexed: IndexedWindow, firstMs: number
     typeof row.wholeSecondValid === "boolean" && nullableId(row.connectionId) && nullableId(row.bookHash) && strings(row.reasons), "invalid second status");
   check(["present", "missing", "stale", "disconnected"].includes(row.contextStatus) &&
     (row.contextSource === null || row.contextSource === "gamma" || row.contextSource === "sports-ws"), "invalid context status/source");
+  check(row.pointStatus === undefined || ["present", "missing", "stale"].includes(row.pointStatus), "invalid point status");
+  check(row.point === undefined || row.point === null || (objectValue(row.point) && time(row.point.observedAtMs) &&
+    objectValue(row.point.frame) && Number.isSafeInteger(row.point.frame.scores365GameId)), "invalid point context");
+  check(row.pointObservedAtMs === undefined || nullableTime(row.pointObservedAtMs), "invalid pointObservedAtMs");
+  check(row.pointAgeMs === undefined || nullableNumber(row.pointAgeMs), "invalid pointAgeMs");
+  if (row.point && row.pointStatus === "present") check(row.pointObservedAtMs === row.point.observedAtMs &&
+    row.pointAgeMs === row.endAtMs - row.point.observedAtMs && row.contextObservedAtMs !== undefined, "point age mismatch");
   for (const field of ["bookObservedAtMs", "bookSourceAtMs", "contextObservedAtMs", "contextSourceAtMs"] as const) check(nullableTime(row[field]), `invalid ${field}`);
   for (const field of ["bookAgeMs", "feedAgeMs", "contextAgeMs"] as const) check(nullableNumber(row[field]), `invalid ${field}`);
   for (const field of ["bookUpdates", "tradeCount", "stateChangeCount"] as const) check(count(row[field]), `invalid ${field}`);

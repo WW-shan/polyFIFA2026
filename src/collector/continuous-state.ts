@@ -4,6 +4,7 @@ import { metadataFromRecord, observationsFromRecord, windowKeyForIdentity } from
 import { objectValue } from "./replay-values.js";
 import { activeSnapshotTokens, isTerminalClearFrame } from "./book-evidence.js";
 import type { JournalRecord } from "./types.js";
+import type { TennisEntrySignal, TennisPointFrame } from "./tennis-points.js";
 import { finishEvidenceConflict, isPublishedFinishSource, newestFinishFacts } from "./tail-types.js";
 import type { TailFinishFact, TailMetadata } from "./tail-types.js";
 import type { CompactTailStoreStatus } from "./continuous-tail-store.js";
@@ -172,6 +173,21 @@ export interface CompressionState {
   enabled: boolean; running: boolean; lastCompletedAtMs: number | null;
   compressedSegments: number; logicalBytesSaved: number; lastError: string | null;
 }
+/**
+ * Latest point-level tennis state for one captured game, mirrored from the
+ * 365Scores point source. `signal` is the derived "常规局丢分" entry state so
+ * live components do not have to re-derive it from raw points.
+ */
+export interface TennisPointStatus {
+  key: string; eventSlug: string; observedAtMs: number; receivedAtMs: number;
+  scores365GameId: number; homeName: string; awayName: string; competition: string | null;
+  setsWon: { home: number; away: number } | null;
+  sets: TennisPointFrame["sets"];
+  setsToWin: 2 | 3 | null;
+  game: TennisPointFrame["game"];
+  signal: TennisEntrySignal | null;
+}
+
 export interface ContinuousStatus {
   schemaVersion: 1; instanceId: string; pid: number; startedAtMs: number; updatedAtMs: number;
   stateStaleAfterMs?: number;
@@ -180,6 +196,7 @@ export interface ContinuousStatus {
   freeBytes: number | null; rawBytes: number; queuedBytes: number; desiredTokens: number;
   games: CapturedGame[]; connections: CaptureConnection[];
   errors: Array<{ atMs: number; scope: string; message: string }>;
+  tennisPoints?: TennisPointStatus[];
   compactStorage?: CompactTailStoreStatus;
   compression?: CompressionState;
 }
@@ -313,6 +330,7 @@ export class ContinuousState {
   private readonly games = new Map<string, CapturedGame>();
   private readonly tokens = new Map<string, string>();
   private readonly events = new Map<string, string>();
+  private readonly tennisPoints = new Map<string, TennisPointStatus>();
   private readonly connections = new Map<string, CaptureConnection>();
   private readonly errors: ContinuousStatus["errors"] = [];
   private readonly newlyFinished = new Set<string>();
@@ -433,6 +451,13 @@ export class ContinuousState {
       if (record.source === "sports" && record.kind === "ws_message") {
         for (const observation of observationsFromRecord(record)) {
           const key = windowKeyForIdentity(observation, [...this.games.values()]);
+          if (key) keys.add(key);
+        }
+      }
+      if (record.source === "scores365" && record.kind === "point_frame") {
+        const eventSlug = objectValue(record.data)?.eventSlug;
+        if (typeof eventSlug === "string") {
+          const key = windowKeyForIdentity({ eventSlug, gameId: null }, [...this.games.values()]);
           if (key) keys.add(key);
         }
       }
@@ -607,6 +632,7 @@ export class ContinuousState {
       game.archive?.status !== "running" && game.phase !== "archiving" && !this.hasPendingArchive(game));
     for (const game of stale) {
       this.games.delete(game.key);
+      this.tennisPoints.delete(game.key);
       this.newlyFinished.delete(game.key);
       for (const token of game.tokenIds) if (this.tokens.get(token) === game.key) this.tokens.delete(token);
       for (const event of game.eventIds) if (this.events.get(event) === game.key) this.events.delete(event);
@@ -706,6 +732,25 @@ export class ContinuousState {
         } : undefined);
       }
     }
+    if (record.source === "scores365" && record.kind === "point_frame") {
+      const data = objectValue(record.data);
+      const eventSlug = typeof data?.eventSlug === "string" ? data.eventSlug : null;
+      const frame = objectValue(data?.frame) as unknown as TennisPointFrame | null;
+      const key = eventSlug === null ? undefined : windowKeyForIdentity({ eventSlug, gameId: null }, [...this.games.values()]);
+      const game = key ? this.games.get(key) : undefined;
+      if (eventSlug !== null && frame && game && typeof frame.scores365GameId === "number") {
+        this.source(game, record);
+        game.lastSeenAtMs = record.receivedAtMs;
+        game.stateObservations++;
+        const signal = objectValue(data?.signal) as unknown as TennisEntrySignal | null;
+        this.tennisPoints.set(game.key, {
+          key: game.key, eventSlug, observedAtMs: record.receivedAtMs, receivedAtMs: record.receivedAtMs,
+          scores365GameId: frame.scores365GameId, homeName: frame.homeName, awayName: frame.awayName,
+          competition: frame.competition ?? null, setsWon: frame.setsWon ?? null, sets: frame.sets ?? [],
+          setsToWin: frame.setsToWin ?? null, game: frame.game ?? null, signal: signal ?? null
+        });
+      }
+    }
     if (record.source === "clob" && (record.kind === "book_snapshot" || record.kind === "book_snapshot_batch")) {
       // An HTTP anchor is a full book too. Without counting it here, a game
       // whose only complete book arrives from the anchor pass is marked
@@ -802,6 +847,7 @@ export class ContinuousState {
       updatedAtMs: this.updatedAtMs, stateStaleAfterMs: this.stateStaleAfterMs, dataRoot: this.dataRoot, port: this.port, mode: this.mode, runId: this.runId, runDirectory: this.runDirectory,
       receivedRecords: this.receivedRecords, lastRecordAtMs: this.lastRecordAtMs, freeBytes: this.freeBytes, rawBytes: this.rawBytes,
       queuedBytes: this.queuedBytes, desiredTokens: this.desiredTokens, games: [...this.games.values()], connections: [...this.connections.values()], errors: this.errors,
+      ...(this.tennisPoints.size > 0 ? { tennisPoints: [...this.tennisPoints.values()] } : {}),
       ...(this.compactStorage ? { compactStorage: this.compactStorage } : {}), compression: this.compression };
   }
   snapshot(): ContinuousStatus & { compression: CompressionState };

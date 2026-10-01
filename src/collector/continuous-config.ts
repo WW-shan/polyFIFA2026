@@ -14,6 +14,12 @@ export interface ContinuousConfig {
   profiles: SportProfile[];
   discoveryIntervalMs: number;
   snapshotIntervalMs: number;
+  /**
+   * Poll cadence for the 365Scores point-level tennis source. This source is
+   * independent of the Polymarket sports feed, which only publishes completed
+   * games; 0 disables it.
+   */
+  tennisPointsIntervalMs: number;
   httpTimeoutMs: number;
   postFinishRetentionMs: number;
   pulseIntervalMs: number;
@@ -125,6 +131,7 @@ export function continuousConfig(
     profiles: [{ name: "tennis", tagId: "864" }, { name: "table-tennis", tagId: "103767" }],
     discoveryIntervalMs: 30_000,
     snapshotIntervalMs: 60_000,
+    tennisPointsIntervalMs: 15_000,
     // Gamma pages for busy tags can exceed 10s even after the continuous
     // collector narrows them to the scheduled/live window.
     httpTimeoutMs: 30_000,
@@ -177,6 +184,9 @@ export function continuousConfig(
     if (!Number.isSafeInteger(config[field]) || config[field] < 1) invalid(`${field} must be a positive safe integer`);
   }
   if (config.port > 65_535) invalid("port must be between 1 and 65535");
+  if (!Number.isSafeInteger(config.tennisPointsIntervalMs) || config.tennisPointsIntervalMs < 0) {
+    invalid("tennisPointsIntervalMs must be a nonnegative safe integer");
+  }
   if (typeof config.compressionEnabled !== "boolean") invalid("compressionEnabled must be boolean");
   if (typeof config.singleMatchOnly !== "boolean") invalid("singleMatchOnly must be boolean");
   if (typeof config.compactStorageEnabled !== "boolean") invalid("compactStorageEnabled must be boolean");

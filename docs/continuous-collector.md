@@ -611,3 +611,20 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 - 真实成交仍使用 `quote-touch-assumed` 等假设模型，不能把回测 PnL 当作已成交实盘收益。
 - 盘口前段可能尚未建立，持有窗口的逐秒完整性仍必须单独校验；`--allow-partial-archive-window` 只放宽归档窗口之外的前段，不放宽实际持有窗口。
 - 2026-09-22 这 8 场线上数据在**默认 60/180 秒持有窗口下 eligible=0**，主因是证据门槛而不是代码：`conflicting-finish-labels`（Gamma 与 Sports 终场钟不一致）、`snapshot-audit-not-passed`、以及源侧自身的 `best_bid_mismatch` / `crossed_book` 造成的逐 token 缺口。要把样本量做起来，需要更长的采集期、更宽的持有窗口下限，或显式接受更弱的证据（`--allow-partial-archive-window`、`--windows-seconds 30`），不能靠改判定把不可信窗口算成可用。
+
+## 2026-10-02：网球点级来源（365Scores）与“常规局丢分”信号
+
+Polymarket 自己的 sports feed 对网球只发到**局**粒度（`"4-6, 6-6(1-5)"`），常规局里的 `0/15/30/40` 根本不出现，所以“热门在发球局丢一分”这个最肥的入场点过去没有落盘。现在采集器在原有 `clob` / `sports` 之外增加第三个来源：
+
+- 来源：`source=scores365`，记录 `kind=point_frame`；每条记录带 `{eventSlug, frame, signal}`，通过标题（双方球员名，任意顺序）把 365Scores 的比赛绑定到正在采集的 Polymarket 事件。`scores365` 的比赛 id 与 Polymarket 的 `gameId` 不同命名空间，绝不混用。
+- 轮询：`tennisPointsIntervalMs`（默认 15000，0 表示关闭；`collector.config.json` 已显式写入 15000）。每 N 秒拉一次 365Scores 的进行中比赛；比赛列表（`/web/games/allscores/`，日期参数 `DD/MM/YYYY`，时区 `Asia/Shanghai`）每 10 分钟刷新一次映射，单场文档（`/web/game/`）按映射抓取，未变化的点级状态默认 60 秒才重复记一次心跳。
+- 字段：`frame.setsWon`（盘分）、`frame.sets`（各盘局分）、`frame.setsToWin`（从 Set 5 是否存在推断三盘两胜/五盘三胜）、`frame.game`（`serving`、`home`/`away` 的 0/15/30/40/A、`tiebreak`、`breakPoint`、`setPoint`、`matchPoint`，以及当前局逐分 `points` 列表）。
+- 落盘与读取：点级记录随该场比赛一起进 compact 归档（`isCaptureRecord`），回放时按秒生成 `point` / `pointObservedAtMs` / `pointAgeMs` / `pointStatus` 上下文；`seconds.csv`、`seconds.ndjson`、HTML viewer 都带这几列，旧归档没有这些字段仍按原样通过校验。采集器状态接口 `/api/status`（完整视图）新增 `tennisPoints[]`，含最新帧与派生信号，供实盘组件直接读取，不需要自己再写解析。
+- 入场信号 `signal.candidate` 的精确定义（`tennisEntrySignal`）：
+  1. 盘分领先方已拿到 `setsToWin - 1` 盘；
+  2. 当前盘局分为 `5-x（x≤4）`、`6-5` 或 `6-6`（`6-6` 记为抢七，`lateSet=true` 但 `regularGame=false`）；
+  3. 当前是常规发球局（非抢七），且**领先方正在发球**；
+  4. 领先方在本局已经丢过至少 1 分（`serverLostPoints = 接发方已得分`，有逐分列表时按 `winner` 计数，否则按接发方当前分数换算）。
+
+  四条同时满足才是 `candidate=true`，即“常规局丢分”入场点；`breakPointAgainstFavorite` 单独给出“已被逼出破发点”的更极端状态。该信号只描述状态，不是下单指令；挂单价格、持有与风控仍按回测结论执行。
+- 边界：365Scores 是第三方公开接口，可能限流、改字段或短时不可用；失败会写 `source=scores365 kind=fetch_error` 诊断并按轮询重试，不会影响盘口采集。抢七的 `points` 在不同上游可能给原始 0..7 分或 15/30/40；解析器在盘分 6-6 且计数 ≤7 时按原始分处理，否则按网球记分处理。

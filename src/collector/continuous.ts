@@ -277,6 +277,7 @@ export class ContinuousCollector {
       ...(config.proxyUrl === undefined ? {} : { proxyUrl: config.proxyUrl }),
       dateWindow: "game-start", lookbackHours: config.lookbackHours, aheadHours: config.aheadHours,
       discoveryIntervalMs: config.discoveryIntervalMs, snapshotIntervalMs: config.snapshotIntervalMs,
+      tennisPointsIntervalMs: config.tennisPointsIntervalMs,
       httpTimeoutMs: config.httpTimeoutMs, postFinishRetentionMs: config.postFinishRetentionMs, reconciliationConcurrency: 4,
       backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true, pageSize: 10,
       absentBookCooldownMs: config.absentBookCooldownMs,

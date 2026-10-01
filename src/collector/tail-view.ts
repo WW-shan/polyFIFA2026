@@ -11,6 +11,7 @@ const previewFields = [
   "status", "wholeSecondValid", "bestBid", "bestAsk", "minBestBid", "maxBestBid", "minBestAsk", "maxBestAsk",
   "bookUpdates", "tradeCount", "tradeShares", "bookObservedAtMs", "bookSourceAtMs", "bookAgeMs", "feedAgeMs",
   "contextSource", "contextObservedAtMs", "contextSourceAtMs", "contextAgeMs", "contextStatus", "score", "period", "clock",
+  "point", "pointObservedAtMs", "pointAgeMs", "pointStatus",
   "stateChangeCount", "reasons", "depthOffset", "depthBytes"
 ] as const satisfies readonly (keyof TailPreviewRow)[];
 

@@ -56,6 +56,30 @@ function lifecycleEvent(id: string, closed = false, finishedAtMs?: number): Coll
     raw: { id, slug: id, gameId: `${id}-game`, closed, markets: [rawMarket], ...(finishedAtMs === undefined ? {} : { finishedTimestamp: new Date(finishedAtMs).toISOString() }) } };
 }
 
+test("journals 365Scores point-level tennis frames for watched matches", async () => {
+  const fixture = JSON.parse(await readFile(new URL("../fixtures/scores365-tennis-game.json", import.meta.url), "utf8")) as unknown;
+  const tennis = { ...event(), sport: "tennis", title: "Guido Ivan Justo vs Pedro Sakamoto", eventSlug: "atp-justo-sakamoto" };
+  const harness = memoryRuntime({ tennisPointsIntervalMs: 15_000 } as CollectorOptions, {
+    discover: async () => [tennis],
+    request: async (url) => {
+      if (url.includes("/allscores/")) return { games: [{ id: 4867638, statusGroup: 3,
+        homeCompetitor: { name: "Guido Ivan Justo" }, awayCompetitor: { name: "Pedro Sakamoto" } }] };
+      if (url.includes("/web/game/")) return fixture;
+      return { asset_id: new URL(url).searchParams.get("token_id"), bids: [], asks: [] };
+    }
+  });
+  try {
+    await harness.runtime.start();
+    await harness.runtime.pollTennisPoints();
+    const point = harness.records.find(record => record.source === "scores365" && record.kind === "point_frame");
+    expect(point).toBeDefined();
+    expect(point!.data).toMatchObject({ eventSlug: "atp-justo-sakamoto", frame: { scores365GameId: 4867638, game: { home: "15", away: "15", serving: "home" } } });
+    expect((point!.data as { signal?: { candidate?: boolean } }).signal).toMatchObject({ oneSetFromMatch: true, lateSet: true, candidate: true });
+  } finally {
+    await harness.runtime.stop();
+  }
+});
+
 test("same-game related markets are subscribed and their lookup is retained",async()=>{
   const root=await mkdtemp(join(tmpdir(),"poly-related-integration-"));temporaryDirectories.push(root);
   const streams=new FakeStreams();const parent=event();

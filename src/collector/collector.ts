@@ -12,6 +12,7 @@ import { createJournal } from "./journal.js";
 import { expandRelatedEvents } from "./related-catalog.js";
 import { EventLifecycle, type EventLifecycleSelection, type EventLifecycleState } from "./lifecycle.js";
 import { createPublicStreams, type PublicStreamsOptions, type StreamTimerApi } from "./streams.js";
+import { SCORES365_BASE_URL, TennisPointsPoller, type TennisPointPollResult } from "./tennis-points.js";
 import type { CollectorEvent, JournalRecord, JsonRequestOptions, JsonRequester, RecordInput, RecordSink } from "./types.js";
 
 export interface CollectorStreamLike {
@@ -89,6 +90,12 @@ export interface CollectorOptions {
    * before asking for it again.
    */
   absentBookCooldownMs?: number;
+  /** 365Scores JSON base URL used for tennis point-level score state. */
+  scores365BaseUrl?: string;
+  /** Poll cadence for live tennis point state; 0 disables the point-level source. */
+  tennisPointsIntervalMs?: number;
+  /** Upper bound on 365Scores game fetches per point poll. */
+  tennisPointsMaxGames?: number;
 }
 
 function bookHasQuotes(book: Record<string, unknown>): boolean {
@@ -199,7 +206,11 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     maxSegmentBytes: positiveInterval(options.maxSegmentBytes, 64 * 1024 * 1024, "maxSegmentBytes"),
     maxBufferBytes: positiveInterval(options.maxBufferBytes, 32 * 1024 * 1024, "maxBufferBytes"),
     reconciliationConcurrency: positiveInterval(options.reconciliationConcurrency, 1, "reconciliationConcurrency"),
-    absentBookCooldownMs: positiveInterval(options.absentBookCooldownMs, 300_000, "absentBookCooldownMs")
+    absentBookCooldownMs: positiveInterval(options.absentBookCooldownMs, 300_000, "absentBookCooldownMs"),
+    scores365BaseUrl: baseUrl(options.scores365BaseUrl, SCORES365_BASE_URL),
+    tennisPointsIntervalMs: options.tennisPointsIntervalMs === 0
+      ? 0 : positiveInterval(options.tennisPointsIntervalMs, 15_000, "tennisPointsIntervalMs"),
+    tennisPointsMaxGames: positiveInterval(options.tennisPointsMaxGames, 24, "tennisPointsMaxGames")
   };
   nonnegativeDuration(effective.durationSeconds);
   // Collector resource bound, not a claim about the server's maximum batch size.
@@ -262,6 +273,10 @@ export class CollectorRuntime {
   private snapshotTimer: unknown;
   private lifecycleTimer: unknown;
   private durationTimer: unknown;
+  private tennisPointsTimer: unknown;
+  private tennisPointsInFlight: Promise<void> | undefined;
+  private readonly tennisPointsPoller: TennisPointsPoller;
+  private lastTennisPointsError = "";
   private startedAt = "";
   private endedAt = "";
   private fatalError: Error | undefined;
@@ -294,6 +309,13 @@ export class CollectorRuntime {
     this.makeJournal = dependencies.createJournal ?? createJournal;
     this.makeStreams = dependencies.createStreams ?? ((streamOptions) => createPublicStreams(streamOptions));
     this.now = dependencies.now ?? (() => new Date());
+    this.tennisPointsPoller = new TennisPointsPoller({
+      request: (url, requestOptions) => this.request(url, requestOptions),
+      baseUrl: this.options.scores365BaseUrl,
+      maxGames: this.options.tennisPointsMaxGames,
+      now: () => dateValue(this.now()).getTime(),
+      onError: (error, detail) => { void this.recordTennisPointsError(detail, error); }
+    });
     this.timers = dependencies.timers ?? defaultTimers;
     this.done = new Promise<CollectorRunResult>((resolve, reject) => {
       this.resolveRun = resolve;
@@ -434,6 +456,13 @@ export class CollectorRuntime {
     this.discoveryTimer = this.timers.setInterval(() => {
       void this.discoverOnce();
     }, this.options.discoveryIntervalMs);
+    if (this.options.tennisPointsIntervalMs > 0) {
+      // The point source starts once the capture is running so a slow initial
+      // book pass cannot race it, and stops with every other capture timer.
+      this.tennisPointsTimer = this.timers.setInterval(() => { void this.pollTennisPoints(); },
+        this.options.tennisPointsIntervalMs);
+      void this.pollTennisPoints();
+    }
     if (!this.collecting) return;
     if (!this.options.compactStorageEnabled) {
       this.snapshotTimer = this.timers.setInterval(() => {
@@ -491,6 +520,48 @@ export class CollectorRuntime {
     return this.snapshotInFlight;
   }
 
+  /**
+   * Poll 365Scores for the point state of the live tennis events this run is
+   * watching. A score-source outage is recorded as evidence and retried on the
+   * next tick; it must never take the order-book capture down.
+   */
+  pollTennisPoints(): Promise<void> {
+    if (!this.collecting || !this.journal) return Promise.resolve();
+    if (this.tennisPointsInFlight) return this.tennisPointsInFlight;
+    const run = Promise.resolve().then(async () => {
+      const targets = this.events.filter(event => event.sport === "tennis")
+        .map(event => ({ eventSlug: event.eventSlug, title: event.title }));
+      if (targets.length === 0) return;
+      const results = await this.tennisPointsPoller.poll(targets);
+      for (const result of results) await this.recordTennisPointFrame(result);
+    }).catch((error: unknown) => {
+      if (!this.isCancellation(error)) void this.recordTennisPointsError("poll", error);
+    }).finally(() => {
+      if (this.tennisPointsInFlight === run) this.tennisPointsInFlight = undefined;
+    });
+    this.tennisPointsInFlight = run;
+    return this.trackRequest(run);
+  }
+
+  private async recordTennisPointFrame(result: TennisPointPollResult): Promise<void> {
+    if (!this.collecting) return;
+    await this.recordControlled({ source: "scores365", kind: "point_frame",
+      data: { eventSlug: result.eventSlug, frame: result.frame, signal: result.signal } });
+  }
+
+  private async recordTennisPointsError(detail: string, error: unknown): Promise<void> {
+    if (!this.collecting) return;
+    const key = `${detail}:${error instanceof Error ? error.message : String(error)}`;
+    if (key === this.lastTennisPointsError) return;
+    this.lastTennisPointsError = key;
+    try {
+      await this.recordControlled({ source: "scores365", kind: "fetch_error",
+        data: { detail, error: serializeError(error) } });
+    } catch {
+      // A failed diagnostic write must not mask the score-source outage.
+    }
+  }
+
   refreshLifecycle(): Promise<void> {
     if (!this.collecting || !this.journal || !this.lifecycle) return Promise.resolve();
     return this.trackRequest(Promise.resolve().then(() => {
@@ -504,7 +575,7 @@ export class CollectorRuntime {
     if (this.cancellation.signal.aborted) return this.done;
     this.state = "stopping";
     this.cancellation.abort(new DOMException("Collector stopped", "AbortError"));
-    for (const timer of [this.discoveryTimer, this.snapshotTimer, this.lifecycleTimer]) {
+    for (const timer of [this.discoveryTimer, this.snapshotTimer, this.lifecycleTimer, this.tennisPointsTimer]) {
       try {
         if (timer !== undefined) this.timers.clearInterval(timer);
       } catch (error) {
@@ -516,7 +587,7 @@ export class CollectorRuntime {
     } catch (error) {
       this.fail(error);
     }
-    this.discoveryTimer = this.snapshotTimer = this.lifecycleTimer = this.durationTimer = undefined;
+    this.discoveryTimer = this.snapshotTimer = this.lifecycleTimer = this.tennisPointsTimer = this.durationTimer = undefined;
     void this.finish();
     return this.done;
   }

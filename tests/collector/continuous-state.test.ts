@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { ContinuousState } from "../../src/collector/continuous-state.js";
+import { tennisEntrySignal, type TennisPointFrame } from "../../src/collector/tennis-points.js";
 import { book, eventMetadata, fixtureRecords, journalRecord } from "./tail-fixture.js";
 
 describe("persistent continuous capture observations", () => {
@@ -60,6 +61,28 @@ describe("persistent continuous capture observations", () => {
       response: [{ asset_id: "TOKEN-A", hash: "hA2", bids: [], asks: [] }] }, "clob"));
     expect(games()["event:first"]?.lastBookAtMs).toBe(900_000);
     expect(games()["event:second"]?.lastBookAtMs).toBe(2_000);
+  });
+
+  test("mirrors 365Scores point frames and their derived entry signal", () => {
+    const state = new ContinuousState("/capture", 8765); state.setRun("tail-test", "/capture/runs/tail-test");
+    state.observe(journalRecord(1, 100, "gamma", "event_metadata", eventMetadata(0)));
+    const frame: TennisPointFrame = {
+      observedAtMs: 300, scores365GameId: 4867638, startTime: null, statusText: "Set 2", statusGroup: 3,
+      competition: "Challenger", homeName: "A", awayName: "B",
+      setsWon: { home: 1, away: 0 }, setsToWin: 2,
+      sets: [
+        { name: "Set 1", shortName: "S1", home: 6, away: 2, ended: true, live: false },
+        { name: "Set 2", shortName: "S2", home: 5, away: 4, ended: false, live: true }
+      ],
+      game: { serving: "home", home: "15", away: "30", tiebreak: false, breakPoint: false, setPoint: false, matchPoint: false,
+        points: [{ winner: "away", home: 15, away: 15, important: 0 }] }
+    };
+    state.observe(journalRecord(2, 300, "scores365", "point_frame", { eventSlug: "game", frame, signal: tennisEntrySignal(frame) }));
+    const status = state.snapshot();
+    expect(status.tennisPoints).toHaveLength(1);
+    expect(status.tennisPoints![0]).toMatchObject({ key: "game:123", eventSlug: "game", scores365GameId: 4867638,
+      setsToWin: 2, game: { home: "15", away: "30" }, signal: { candidate: true, serverLostPoints: 1 } });
+    expect(status.games[0]?.lastSeenAtMs).toBe(300);
   });
 
   test("credits an HTTP anchor even when the response omits asset_id", () => {

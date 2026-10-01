@@ -7,7 +7,7 @@ import { TailBuckets, type TailLiveState } from "./tail-buckets.js";
 import { auditBook, auditSnapshot, sourceMilliseconds } from "./tail-audit.js";
 import type { JournalRecord } from "./types.js";
 import type { ReplayInvalidation } from "./replay-types.js";
-import type { TailAuditBook, TailBookChange, TailObservation, TailOptions, TailSecond, TailSink, TailSnapshotAudit, TailSummary, TailTokenQuality, TailWindow } from "./tail-types.js";
+import type { TailAuditBook, TailBookChange, TailObservation, TailOptions, TailPointContext, TailSecond, TailSink, TailSnapshotAudit, TailSummary, TailTokenQuality, TailWindow } from "./tail-types.js";
 
 function freshQuality(window:TailWindow,tokenId:string,seconds:number):TailTokenQuality{
   const market=window.markets.find(m=>m.tokenId===tokenId)!;
@@ -28,7 +28,7 @@ function sameAuditBatch(a:TailAuditBook,b:TailAuditBook):boolean{
 
 export async function replayTail(input: TailOptions, sink: TailSink): Promise<TailSummary> {
   const options=tailOptions(input),catalog=await scanTailCatalog(options);
-  const live:TailLiveState={books:new Map(),markets:new Map(),feeds:new Map(),connections:new Map(),contexts:new Map(),firstMs:catalog.firstMs,lastMs:catalog.lastMs};
+  const live:TailLiveState={books:new Map(),markets:new Map(),feeds:new Map(),connections:new Map(),contexts:new Map(),points:new Map(),firstMs:catalog.firstMs,lastMs:catalog.lastMs};
   const buckets=catalog.windows.map(window=>new TailBuckets(window,live,options));
   const selectedWindowKeys=new Set(catalog.windows.map(window=>window.key));
   const tokenWindows=new Map<string,TailBuckets[]>();
@@ -51,7 +51,7 @@ export async function replayTail(input: TailOptions, sink: TailSink): Promise<Ta
   const invalidateTail=(event:ReplayInvalidation,uncertainFromMs=current?.receivedAtMs):void=>{
     if(!current)return;
     if(event.connectionId===undefined&&event.tokenId===undefined){
-      live.contexts.clear();previousObservations.clear();
+      live.contexts.clear();live.points.clear();previousObservations.clear();
     }
     const tokens=event.tokenId?[event.tokenId]:[...live.books].filter(([,book])=>event.connectionId===undefined||book.quote.connectionId===event.connectionId).map(([token])=>token);
     for(const tokenId of tokens){
@@ -152,6 +152,16 @@ export async function replayTail(input: TailOptions, sink: TailSink): Promise<Ta
     const metadata=metadataFromRecord(record);
     if(metadata)for(const market of metadata.markets)if(tokenWindows.has(market.tokenId))live.markets.set(market.tokenId,
       resolvedTokens.has(market.tokenId)||metadata.raw.closed===true||metadata.raw.archived===true?{...market,closed:true}:market);
+    if(record.source==="scores365"&&record.kind==="point_frame"){
+      const data=objectValue(record.data);
+      const eventSlug=typeof data?.eventSlug==="string"?data.eventSlug:null;
+      const frame=objectValue(data?.frame);
+      const key=eventSlug===null?undefined:windowKeyForBoundIdentity({eventSlug,gameId:null},catalog.windowIdentities,catalog.eventIdentities);
+      if(key&&selectedWindowKeys.has(key)&&frame&&typeof frame.scores365GameId==="number"){
+        live.points.set(key,{observedAtMs:record.receivedAtMs,frame:frame as unknown as TailPointContext["frame"],
+          signal:(data?.signal??null) as unknown as TailPointContext["signal"]});
+      }
+    }
     for(const observation of observationsFromRecord(record)){
       const key=windowKeyForBoundIdentity({eventSlug:observation.eventSlug,gameId:observation.gameId,
         eventId:observation.source==="gamma"?identifier(observation.raw.id)??null:null},catalog.windowIdentities,catalog.eventIdentities);

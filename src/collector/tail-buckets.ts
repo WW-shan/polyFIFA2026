@@ -1,11 +1,12 @@
 import type { ReplayQuoteRow } from "./replay-types.js";
 import type { EffectiveTailOptions } from "./tail-catalog.js";
-import type { TailAuditBook, TailBookStatus, TailMarket, TailObservation, TailSecond, TailWindow } from "./tail-types.js";
+import type { TailAuditBook, TailBookStatus, TailMarket, TailObservation, TailPointContext, TailSecond, TailWindow } from "./tail-types.js";
 
 export interface TailCurrentBook { quote:ReplayQuoteRow; snapshotSequence:number; snapshotFrameIndex:number; valid:boolean; quarantine:boolean; provisional?:boolean; auditUncertainty?:TailAuditBook }
 export interface TailLiveState {
   books:Map<string,TailCurrentBook>; markets:Map<string,TailMarket>; feeds:Map<string,number>; connections:Map<string,boolean>;
   contexts:Map<string,{ws?:TailObservation;gamma?:TailObservation}>;
+  points:Map<string,TailPointContext>;
   firstMs:number;lastMs:number;
 }
 interface Stats { startValid:boolean; startClosed:boolean; bad:boolean; updates:number; trades:number; shares:number; stateChanges:number;
@@ -104,6 +105,9 @@ export class TailBuckets {
     if(stats.bad)reasons.push("within-second-invalidation");
     if(current?.auditUncertainty&&status!=="closed")reasons.push("pending-snapshot-audit");
     if(context.status!=="present")reasons.push(`context-${context.status}`);
+    const point=this.live.points.get(this.window.key);
+    const pointStatus:TailSecond["pointStatus"]=point===undefined?"missing":end-point.observedAtMs<=this.options.sportsStaleAfterMs?"present":"stale";
+    if(pointStatus!=="present")reasons.push(`point-${pointStatus}`);
     if(usable&&sourceAt===null)reasons.push("missing-book-source-time");
     if(usable&&sourceAt!==null&&(sourceAt>end+this.options.maxClockDriftMs||(end>1e11&&sourceAt<1e11)))reasons.push("book-source-clock-invalid");
     return {windowKey:this.window.key,eventSlug:market.eventSlug,gameId:market.gameId,marketId:market.marketId,conditionId:market.conditionId,
@@ -116,6 +120,8 @@ export class TailBuckets {
       bookHash:current?.quote.bookHash??null,bestBid:prices.bid,bestAsk:prices.ask,minBestBid:stats.minBid,maxBestBid:stats.maxBid,minBestAsk:stats.minAsk,maxBestAsk:stats.maxAsk,
       bookUpdates:stats.updates,tradeCount:stats.trades,tradeShares:stats.shares,contextSource:observation?.source??null,
       contextObservedAtMs:observation?.observedAtMs??null,contextSourceAtMs:observation?.sourceAtMs??null,contextAgeMs:observation?end-observation.observedAtMs:null,
-      contextStatus:context.status,score:observation?.score??null,period:observation?.period??null,clock:observation?.clock??null,stateChangeCount:stats.stateChanges,reasons};
+      contextStatus:context.status,score:observation?.score??null,period:observation?.period??null,clock:observation?.clock??null,
+      point:point??null,pointObservedAtMs:point?.observedAtMs??null,pointAgeMs:point?end-point.observedAtMs:null,pointStatus,
+      stateChangeCount:stats.stateChanges,reasons};
   }
 }
