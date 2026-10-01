@@ -55,7 +55,16 @@ export async function fetchEventMatchState(eventSlug: string): Promise<MatchStat
 
 async function fetchGammaEventStrategyMarkets(eventSlug: string): Promise<StrategyMarket[]> {
   const event = await fetchJson<unknown>(`https://gamma-api.polymarket.com/events/slug/${encodeURIComponent(eventSlug)}`);
-  return findStrategyMarkets(event, eventSlug);
+  const markets = findStrategyMarkets(event, eventSlug);
+  // The main event only lists moneyline/draw; the rest live on the companion.
+  const companionSlug = `${canonicalEventSlug(eventSlug)}${COMPANION_EVENT_SUFFIX}`;
+  try {
+    const companion = await fetchJson<unknown>(`https://gamma-api.polymarket.com/events/slug/${encodeURIComponent(companionSlug)}`);
+    markets.push(...findStrategyMarkets(companion, eventSlug));
+  } catch {
+    // A match without a companion event still has its moneyline markets.
+  }
+  return dedupeMarkets(markets);
 }
 
 export function findStrategyMarketsFromSportsPageHtml(html: string, eventSlug: string): StrategyMarket[] {
@@ -122,8 +131,9 @@ export function extractNextFlightCompressedStates(html: string): unknown[] {
 export function findSpreadMarkets(state: unknown, eventSlug?: string): SpreadMarket[] {
   const markets: SpreadMarket[] = [];
 
-  walkMarketRecords(state, isIsolatedMarketInput(state) ? eventSlug : undefined, (value, owner) => {
-    if (eventSlug && owner !== eventSlug) return;
+  const targetOwner = eventSlug ? canonicalEventSlug(eventSlug) : undefined;
+  walkMarketRecords(state, isIsolatedMarketInput(state) ? targetOwner : undefined, (value, owner) => {
+    if (targetOwner && owner !== targetOwner) return;
     const market = normalizeSpreadMarket(value, owner);
     if (market) markets.push(market);
   });
@@ -134,8 +144,9 @@ export function findSpreadMarkets(state: unknown, eventSlug?: string): SpreadMar
 export function findStrategyMarkets(state: unknown, eventSlug?: string): StrategyMarket[] {
   const markets: StrategyMarket[] = [];
 
-  walkMarketRecords(state, isIsolatedMarketInput(state) ? eventSlug : undefined, (value, owner) => {
-    if (eventSlug && owner !== eventSlug) return;
+  const targetOwner = eventSlug ? canonicalEventSlug(eventSlug) : undefined;
+  walkMarketRecords(state, isIsolatedMarketInput(state) ? targetOwner : undefined, (value, owner) => {
+    if (targetOwner && owner !== targetOwner) return;
     const market = normalizeStrategyMarket(value, owner);
     if (market) markets.push(market);
   });
@@ -189,13 +200,14 @@ export function normalizeStrategyMarket(value: unknown, eventSlug?: string): Str
   const resolvedEventSlug = mergeEventOwners(eventSlug, marketEventOwner(value));
 
   if (!question || !marketSlug || !conditionId || !resolvedEventSlug) return null;
-  if (eventSlug && resolvedEventSlug !== eventSlug) return null;
+  if (eventSlug && resolvedEventSlug !== canonicalEventSlug(eventSlug)) return null;
   if (outcomes.length < 2 || clobTokenIds.length < 2) return null;
 
   const marketType = inferMarketType(value, question);
   if (marketType === "unknown") return null;
 
-  const line = numberValue(value.line ?? value.spreadLine ?? value.spread ?? value.total) ?? parseLine(question, marketType);
+  // Gamma's `spread` is the order-book bid/ask spread, never a handicap line.
+  const line = numberValue(value.line ?? value.spreadLine ?? value.total) ?? parseLine(question, marketType);
   const market: StrategyMarket = {
     eventSlug: resolvedEventSlug,
     marketSlug,
@@ -230,10 +242,10 @@ export function normalizeSpreadMarket(value: unknown, eventSlug?: string): Sprea
   const outcomes = stringArray(value.outcomes);
   const clobTokenIds = stringArray(value.clobTokenIds ?? value.clob_token_ids ?? value.tokenIds);
   const resolvedEventSlug = mergeEventOwners(eventSlug, marketEventOwner(value));
-  const parsedLine = numberValue(value.line ?? value.spreadLine ?? value.spread) ?? (question ? parseSpreadLine(question) : null);
+  const parsedLine = numberValue(value.line ?? value.spreadLine) ?? (question ? parseSpreadLine(question) : null);
 
   if (!question || !marketSlug || !conditionId || !resolvedEventSlug || parsedLine === null) return null;
-  if (eventSlug && resolvedEventSlug !== eventSlug) return null;
+  if (eventSlug && resolvedEventSlug !== canonicalEventSlug(eventSlug)) return null;
   if (outcomes.length < 2 || clobTokenIds.length < 2) return null;
 
   const market: SpreadMarket = {
@@ -464,11 +476,23 @@ type EventOwner = string | undefined | null;
 
 function mergeEventOwners(...owners: EventOwner[]): EventOwner {
   let resolved: EventOwner;
-  for (const owner of owners) {
+  for (const rawOwner of owners) {
+    const owner = rawOwner ? canonicalEventSlug(rawOwner) : rawOwner;
     if (owner === null || (owner && resolved && owner !== resolved)) return null;
     if (owner) resolved = owner;
   }
   return resolved;
+}
+
+// Spreads, totals, team totals and BTTS are listed on a companion
+// `<match>-more-markets` event that the match page nests under the match.
+// Both events describe the same game, so they share one owner.
+const COMPANION_EVENT_SUFFIX = "-more-markets";
+
+function canonicalEventSlug(slug: string): string {
+  return slug.endsWith(COMPANION_EVENT_SUFFIX) && slug.length > COMPANION_EVENT_SUFFIX.length
+    ? slug.slice(0, -COMPANION_EVENT_SUFFIX.length)
+    : slug;
 }
 
 function explicitEventOwner(value: Record<string, unknown>): EventOwner {

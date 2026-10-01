@@ -54,6 +54,9 @@ export function extract365ScoresClock(raw: unknown, match: MatchState): Scores36
   if (addedTime === undefined || minutes === undefined || seconds === undefined) return null;
   if ([addedTime, minutes, seconds].some((value) => !Number.isSafeInteger(value) || value < 0) || seconds >= 60) return null;
   if (precise?.autoProgress !== true || precise.clockDirection !== 1) return null;
+  // Zero is also the value before the stoppage-time board goes up; treating it
+  // as announced would open the window several real minutes early.
+  if (addedTime === 0) return null;
 
   const elapsedSeconds = minutes * 60 + seconds;
   const expectedEndSeconds = (90 + addedTime) * 60;

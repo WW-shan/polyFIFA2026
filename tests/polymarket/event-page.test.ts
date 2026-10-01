@@ -9,6 +9,7 @@ import {
   findSpreadMarkets,
   findStrategyMarkets,
   findStrategyMarketsFromSportsPageHtml,
+  hasLockedGoalStrategyMarkets,
   normalizeSpreadMarket,
   normalizeStrategyMarket,
   parseSpreadLine
@@ -336,11 +337,12 @@ describe("event page initial state parsing", () => {
           negRisk: true
         }
       ]
-    }), { status: 200, headers: { "content-type": "application/json" } }));
+    }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response("not found", { status: 404, statusText: "Not Found" }));
 
     const markets = await fetchEventStrategyMarkets("fifwc-fra-irq-2026-06-22");
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(markets).toEqual([
       expect.objectContaining({
         eventSlug: "fifwc-fra-irq-2026-06-22",
@@ -402,15 +404,119 @@ describe("event page initial state parsing", () => {
             sportsMarketType: "totals"
           }
         ]
-      }), { status: 200, headers: { "content-type": "application/json" } }));
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response("not found", { status: 404, statusText: "Not Found" }));
 
     const markets = await fetchEventStrategyMarkets(eventSlug);
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: `${eventSlug}-ecuador`, marketType: "moneyline" }));
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: `${eventSlug}-total-0pt5`, marketType: "total", line: 0.5 }));
     expect(markets).toContainEqual(expect.objectContaining({ marketSlug: `${eventSlug}-mexico-team-total-0pt5`, marketType: "team_total", team: "Mexico", line: 0.5 }));
     expect(markets.filter((market) => market.conditionId === "cond-ecuador")).toHaveLength(1);
+  });
+
+  test("keeps companion more-markets records the match page nests under the match event", async () => {
+    const eventSlug = "fifwc-esp-ksa-2026-06-21";
+    const companion = { id: "511448", slug: `${eventSlug}-more-markets`, title: "Spain vs. Saudi Arabia - More Markets" };
+    const flightState = {
+      events: {
+        [eventSlug]: {
+          slug: eventSlug,
+          markets: [
+            {
+              slug: `${eventSlug}-esp`,
+              question: "Will Spain win on 2026-06-21?",
+              conditionId: "cond-esp",
+              clobTokenIds: ["esp-yes", "esp-no"],
+              outcomes: ["Yes", "No"],
+              sportsMarketType: "moneyline",
+              events: [{ id: "1", slug: eventSlug }]
+            },
+            {
+              slug: `${eventSlug}-total-2pt5`,
+              question: "Spain vs. Saudi Arabia: O/U 2.5",
+              conditionId: "cond-total",
+              clobTokenIds: ["over", "under"],
+              outcomes: ["Over", "Under"],
+              sportsMarketType: "totals",
+              line: 2.5,
+              events: [companion]
+            },
+            {
+              slug: `${eventSlug}-spread-home-2pt5`,
+              question: "Spread: Spain (-2.5)",
+              conditionId: "cond-spread",
+              clobTokenIds: ["esp-cover", "ksa-cover"],
+              outcomes: ["Spain", "Saudi Arabia"],
+              sportsMarketType: "spreads",
+              line: -2.5,
+              events: [companion]
+            },
+            {
+              slug: "fifwc-other-match-total-2pt5",
+              question: "Other: O/U 2.5",
+              conditionId: "cond-other",
+              clobTokenIds: ["o", "u"],
+              outcomes: ["Over", "Under"],
+              sportsMarketType: "totals",
+              line: 2.5,
+              events: [{ slug: "fifwc-other-match-more-markets" }]
+            }
+          ]
+        }
+      }
+    };
+
+    const markets = findStrategyMarkets(flightState, eventSlug);
+
+    expect(markets.map((market) => market.conditionId).sort()).toEqual(["cond-esp", "cond-spread", "cond-total"]);
+    expect(markets.every((market) => market.eventSlug === eventSlug)).toBe(true);
+    expect(hasLockedGoalStrategyMarkets(markets)).toBe(true);
+  });
+
+  test("never reads Gamma's bid/ask spread field as a market line", () => {
+    const market = normalizeStrategyMarket({
+      slug: "fifwc-a-b-2026-06-21-total-2pt5",
+      question: "A vs. B: O/U 2.5",
+      conditionId: "cond-total",
+      clobTokenIds: ["over", "under"],
+      outcomes: ["Over", "Under"],
+      sportsMarketType: "totals",
+      spread: 0.001
+    }, "fifwc-a-b-2026-06-21");
+
+    expect(market).toMatchObject({ marketType: "total", line: 2.5 });
+  });
+
+  test("Gamma fallback also reads the companion more-markets event", async () => {
+    const eventSlug = "fifwc-fra-irq-2026-06-22";
+    const emptyState = deflateSync(JSON.stringify({ markets: [] })).toString("base64");
+    const html = `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialState: emptyState } } })}</script></html>`;
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(html, { status: 200 }))
+      .mockResolvedValueOnce(json({
+        slug: eventSlug,
+        markets: [{
+          slug: `${eventSlug}-fra`, question: "Will France win on 2026-06-22?", conditionId: "cond-france",
+          clobTokenIds: "[\"yes\",\"no\"]", outcomes: "[\"Yes\",\"No\"]", sportsMarketType: "moneyline"
+        }]
+      }))
+      .mockResolvedValueOnce(json({
+        slug: `${eventSlug}-more-markets`,
+        markets: [{
+          slug: `${eventSlug}-total-0pt5`, question: "France vs. Iraq: O/U 0.5", conditionId: "cond-total",
+          clobTokenIds: "[\"over\",\"under\"]", outcomes: "[\"Over\",\"Under\"]", sportsMarketType: "totals", line: 0.5
+        }]
+      }));
+
+    const markets = await fetchEventStrategyMarkets(eventSlug);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain(`${eventSlug}-more-markets`);
+    expect(markets).toContainEqual(expect.objectContaining({ conditionId: "cond-total", marketType: "total", eventSlug }));
+    expect(markets).toContainEqual(expect.objectContaining({ conditionId: "cond-france", marketType: "moneyline" }));
   });
 
   test("keeps partial sports page markets when Gamma fallback is unavailable", async () => {

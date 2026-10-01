@@ -36,6 +36,17 @@ describe("regulation-only verified clock (O4)", () => {
       expect(extract365ScoresClock({ ...runningGame, statusText }, match)).toBeNull();
     });
 
+  test("does not verify a clock before stoppage time is announced", () => {
+    const beforeBoard = {
+      ...runningGame,
+      gameTimeDisplay: "86'",
+      addedTime: 0,
+      preciseGameTime: { minutes: 86, seconds: 0, autoProgress: true, clockDirection: 1 }
+    };
+    expect(extract365ScoresClock(beforeBoard, { ...match, minute: 86 })).toBeNull();
+    expect(extract365ScoresClock({ ...beforeBoard, addedTime: 5 }, { ...match, minute: 86 })).toMatchObject({ remainingSeconds: 540 });
+  });
+
   test("rejects the audited 117:10 extra-time clock against lagging Sports 2H", () => {
     expect(extract365ScoresClock({
       ...runningGame,

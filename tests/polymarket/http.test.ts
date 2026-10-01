@@ -5,7 +5,7 @@ import { connect as connectTcp, createServer as createTcpServer, type AddressInf
 import type { Duplex } from "node:stream";
 import type { Dispatcher } from "undici";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { fetchHttpResponseText, fetchJson, fetchText, postJson, type HttpOptions } from "../../src/polymarket/http.js";
+import { describeError, fetchHttpResponseText, fetchJson, fetchText, postJson, type HttpOptions } from "../../src/polymarket/http.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -40,7 +40,7 @@ describe("HTTP request lifetime", () => {
     }, async (url) => {
       const controller = new AbortController();
       const outcome = await observeWithin(read(url, { timeoutMs: 50, proxyUrl: "", signal: controller.signal }));
-      expect(outcome).toMatchObject({ status: "rejected", error: { name: "AbortError" } });
+      expect(outcome).toMatchObject({ status: "rejected", error: { name: "TimeoutError", message: "HTTP request timed out after 50ms" } });
       expect(controller.signal.aborted).toBe(false);
       expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
     });
@@ -85,7 +85,7 @@ describe("HTTP request lifetime", () => {
   test("still times out while waiting for response headers", async () => {
     await withServer(() => {}, async (url) => {
       expect(await observeWithin(fetchJson(url, { timeoutMs: 50, proxyUrl: "" })))
-        .toMatchObject({ status: "rejected", error: { name: "AbortError" } });
+        .toMatchObject({ status: "rejected", error: { name: "TimeoutError", message: "HTTP request timed out after 50ms" } });
     });
   });
 
@@ -198,7 +198,7 @@ describe("HTTP request lifetime", () => {
       try {
         const { stdout, stderr, ...result } = await runHttpChild(script);
         expect(attempts, JSON.stringify({ stdout, stderr })).toBeGreaterThan(0);
-        expect(JSON.parse(stdout), stderr).toMatchObject({ name: mode === "caller abort" ? "Error" : "AbortError", sameReason: mode === "caller abort" });
+        expect(JSON.parse(stdout), stderr).toMatchObject({ name: mode === "caller abort" ? "Error" : "TimeoutError", sameReason: mode === "caller abort" });
         expect(result, stderr).toEqual({ forced: false, code: 0, signal: null });
       } finally {
         for (const peer of peers) peer.destroy();
@@ -303,6 +303,18 @@ describe("HTTP request lifetime", () => {
       finishSecond();
       expect(await second).toEqual({ value: { ok: true } });
     });
+  });
+});
+
+describe("error descriptions", () => {
+  test("keeps the transport cause that undici hides behind \"fetch failed\"", () => {
+    const socket = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+    const proxy = Object.assign(new Error("Proxy response (502) !== 200 when HTTP Tunneling"), { code: "UND_ERR_PRX_CONN" });
+    expect(describeError(new TypeError("fetch failed", { cause: socket }))).toBe("fetch failed: other side closed (UND_ERR_SOCKET)");
+    expect(describeError(new TypeError("fetch failed", { cause: proxy })))
+      .toBe("fetch failed: Proxy response (502) !== 200 when HTTP Tunneling (UND_ERR_PRX_CONN)");
+    expect(describeError(new Error("via http://user:secret@proxy.local failed"))).toBe("via http://[redacted]@proxy.local failed");
+    expect(describeError("plain")).toBe("plain");
   });
 });
 
