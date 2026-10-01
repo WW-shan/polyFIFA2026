@@ -42,6 +42,21 @@ async function open(rootPath: string, now: () => number, overrides: Partial<Para
 }
 
 describe("compact sqlite tail store", () => {
+  test("stores scores365 point frames together with the finalized tail", async () => {
+    const path = await root();
+    const store = await open(path, () => 400);
+    const point = { ...record(1, 250, { eventSlug: "game", frame: { scores365GameId: 4867638, setsWon: { home: 1, away: 0 }, setsToWin: 2 },
+      signal: { candidate: true } }, "scores365"), kind: "point_frame" };
+    store.ingest(point, ["game:1"]);
+    store.ingest(record(2, 300, { asset_id: "yes", bids: [{ price: "0.9", size: "1" }], asks: [{ price: "0.95", size: "1" }] }), ["game:1"]);
+    store.ingest(record(3, 400, { asset_id: "yes", bids: [{ price: "0.9", size: "1" }], asks: [{ price: "0.95", size: "1" }] }), ["game:1"]);
+    store.flush();
+    store.finalize(game("game:1", 400), 400);
+    const stored = store.readFinalized("game:1").find(row => row.source === "scores365");
+    expect(stored).toMatchObject({ kind: "point_frame", receivedAtMs: 250,
+      data: { eventSlug: "game", frame: { scores365GameId: 4867638 }, signal: { candidate: true } } });
+  });
+
   test("deduplicates consecutive payloads and finalizes only the last window", async () => {
     const path = await root();
     let now = 400;

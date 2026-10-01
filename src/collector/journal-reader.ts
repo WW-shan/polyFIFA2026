@@ -12,7 +12,7 @@ export function assertJournalRecord(value: unknown): asserts value is JournalRec
     || typeof record.receivedAtMs !== "number" || !Number.isFinite(record.receivedAtMs)
     || typeof record.receivedAt !== "string" || Date.parse(record.receivedAt) !== record.receivedAtMs
     || typeof record.monotonicNs !== "string" || !/^\d+$/.test(record.monotonicNs)
-    || typeof record.source !== "string" || !["collector", "gamma", "clob", "sports"].includes(record.source)
+    || typeof record.source !== "string" || !["collector", "gamma", "clob", "sports", "scores365"].includes(record.source)
     || typeof record.kind !== "string" || !record.kind || !("data" in record)
     || (record.connectionId !== undefined && (typeof record.connectionId !== "string" || !record.connectionId))) {
     throw new Error("REPLAY_RECORD_INVALID: invalid journal envelope");
