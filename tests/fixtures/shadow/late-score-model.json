@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "league": "nfl",
+  "featureSpec": [
+    "margin/10",
+    "margin*root/10",
+    "margin/minutes/10",
+    "root",
+    "ot"
+  ],
+  "finalPeriod": 4,
+  "periodSeconds": 900,
+  "feeRate": 0.05,
+  "l2": 1.0,
+  "coefficients": [
+    -0.4,
+    1.2,
+    0.6,
+    1.9,
+    0.15,
+    0.25
+  ],
+  "mean": [
+    0.3,
+    0.2,
+    0.4,
+    0.5,
+    0.02
+  ],
+  "scale": [
+    0.8,
+    0.6,
+    1.1,
+    0.2,
+    0.15
+  ],
+  "trainedGames": 0,
+  "trainedStates": 0,
+  "firstGameStart": "2026-01-01T00:00:00Z",
+  "lastGameStart": "2026-01-01T00:00:00Z",
+  "datasetSha256": "fixture",
+  "createdAt": "2026-09-28T00:00:00Z",
+  "selfTest": [
+    {
+      "period": 4,
+      "clock": "15:00",
+      "homeScore": 24,
+      "awayScore": 20,
+      "features": [
+        0.4,
+        0.103222226138,
+        0.026637069922,
+        0.258055565345,
+        0.0
+      ],
+      "probability": 0.2303264099
+    },
+    {
+      "period": 4,
+      "clock": "12:00",
+      "homeScore": 24,
+      "awayScore": 20,
+      "features": [
+        0.4,
+        0.115389949733,
+        0.033287101248,
+        0.288474874332,
+        0.0
+      ],
+      "probability": 0.238667209458
+    },
+    {
+      "period": 4,
+      "clock": "3:00",
+      "homeScore": 24,
+      "awayScore": 20,
+      "features": [
+        0.4,
+        0.23030126798,
+        0.132596685083,
+        0.57575316995,
+        0.0
+      ],
+      "probability": 0.341167529051
+    },
+    {
+      "period": 4,
+      "clock": "0:45",
+      "homeScore": 27,
+      "awayScore": 24,
+      "features": [
+        0.3,
+        0.342624144432,
+        0.391304347826,
+        1.14208048144,
+        0.0
+      ],
+      "probability": 0.543844948793
+    },
+    {
+      "period": 4,
+      "clock": "0:05",
+      "homeScore": 17,
+      "awayScore": 20,
+      "features": [
+        -0.3,
+        -0.948683298051,
+        -3.0,
+        3.162277660168,
+        0.0
+      ],
+      "probability": 0.001729769828
+    },
+    {
+      "period": 5,
+      "clock": "4:00",
+      "homeScore": 20,
+      "awayScore": 20,
+      "features": [
+        0.0,
+        0.0,
+        0.0,
+        0.49896157728,
+        1.0
+      ],
+      "probability": 0.472937828601
+    }
+  ],
+  "note": "Synthetic coefficients for cross-language checks; not a live model."
+}

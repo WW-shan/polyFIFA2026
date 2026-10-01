@@ -1,0 +1,55 @@
+{
+ "_source": "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=20260928 (trimmed)",
+ "events": [
+  {
+   "id": "401872963",
+   "date": "2026-09-29T00:15Z",
+   "name": "Philadelphia Eagles at Chicago Bears",
+   "competitions": [
+    {
+     "status": {
+      "clock": 0.0,
+      "displayClock": "0:00",
+      "period": 0,
+      "type": {
+       "id": "1",
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false,
+       "description": "Scheduled",
+       "detail": "Mon, September 28th at 8:15 PM EDT",
+       "shortDetail": "9/28 - 8:15 PM EDT"
+      },
+      "isTBDFlex": false
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "score": "0",
+       "winner": null,
+       "team": {
+        "displayName": "Chicago Bears",
+        "shortDisplayName": "Bears",
+        "name": "Bears",
+        "location": "Chicago",
+        "abbreviation": "CHI"
+       }
+      },
+      {
+       "homeAway": "away",
+       "score": "0",
+       "winner": null,
+       "team": {
+        "displayName": "Philadelphia Eagles",
+        "shortDisplayName": "Eagles",
+        "name": "Eagles",
+        "location": "Philadelphia",
+        "abbreviation": "PHI"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

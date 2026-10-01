@@ -1,0 +1,97 @@
+{
+ "_source": "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=401872962 (trimmed)",
+ "header": {
+  "competitions": [
+   {
+    "status": {
+     "type": {
+      "id": "3",
+      "name": "STATUS_FINAL",
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "detail": "Final",
+      "shortDetail": "Final"
+     },
+     "isTBDFlex": false
+    },
+    "competitors": [
+     {
+      "homeAway": "home",
+      "score": "30",
+      "winner": true,
+      "team": {
+       "displayName": "Denver Broncos",
+       "name": "Broncos",
+       "nickname": "Broncos",
+       "location": "Denver",
+       "abbreviation": "DEN"
+      }
+     },
+     {
+      "homeAway": "away",
+      "score": "26",
+      "winner": false,
+      "team": {
+       "displayName": "Los Angeles Rams",
+       "name": "Rams",
+       "nickname": "Rams",
+       "location": "Los Angeles",
+       "abbreviation": "LAR"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "drives": {
+  "previous": [
+   {
+    "plays": [
+     {
+      "id": "4018729625054",
+      "wallclock": "2026-09-28T03:53:31Z",
+      "period": {
+       "number": 4
+      },
+      "clock": {
+       "displayValue": "0:02"
+      },
+      "homeScore": 30,
+      "awayScore": 26
+     },
+     {
+      "id": "4018729625085",
+      "wallclock": "2026-09-28T03:54:17Z",
+      "period": {
+       "number": 4
+      },
+      "clock": {
+       "displayValue": "0:02"
+      },
+      "homeScore": 30,
+      "awayScore": 26
+     },
+     {
+      "id": "4018729625113",
+      "wallclock": "2026-09-28T03:54:17Z",
+      "period": {
+       "number": 4
+      },
+      "clock": {
+       "displayValue": "0:00"
+      },
+      "homeScore": 30,
+      "awayScore": 26
+     }
+    ]
+   }
+  ]
+ },
+ "winprobability": [
+  {
+   "playId": "4018729625113",
+   "homeWinPercentage": 0.123456789
+  }
+ ]
+}

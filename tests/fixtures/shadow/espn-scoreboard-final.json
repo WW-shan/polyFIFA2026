@@ -1,0 +1,105 @@
+{
+ "_source": "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=20260927 (trimmed)",
+ "events": [
+  {
+   "id": "401872953",
+   "date": "2026-09-27T17:00Z",
+   "name": "Los Angeles Chargers at Buffalo Bills",
+   "competitions": [
+    {
+     "status": {
+      "clock": 0.0,
+      "displayClock": "0:00",
+      "period": 4,
+      "type": {
+       "id": "3",
+       "name": "STATUS_FINAL",
+       "state": "post",
+       "completed": true,
+       "description": "Final",
+       "detail": "Final",
+       "shortDetail": "Final"
+      },
+      "isTBDFlex": false
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "score": "24",
+       "winner": true,
+       "team": {
+        "displayName": "Buffalo Bills",
+        "shortDisplayName": "Bills",
+        "name": "Bills",
+        "location": "Buffalo",
+        "abbreviation": "BUF"
+       }
+      },
+      {
+       "homeAway": "away",
+       "score": "16",
+       "winner": false,
+       "team": {
+        "displayName": "Los Angeles Chargers",
+        "shortDisplayName": "Chargers",
+        "name": "Chargers",
+        "location": "Los Angeles",
+        "abbreviation": "LAC"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401872949",
+   "date": "2026-09-27T17:00Z",
+   "name": "Carolina Panthers at Cleveland Browns",
+   "competitions": [
+    {
+     "status": {
+      "clock": 0.0,
+      "displayClock": "0:00",
+      "period": 4,
+      "type": {
+       "id": "3",
+       "name": "STATUS_FINAL",
+       "state": "post",
+       "completed": true,
+       "description": "Final",
+       "detail": "Final",
+       "shortDetail": "Final"
+      },
+      "isTBDFlex": false
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "score": "21",
+       "winner": true,
+       "team": {
+        "displayName": "Cleveland Browns",
+        "shortDisplayName": "Browns",
+        "name": "Browns",
+        "location": "Cleveland",
+        "abbreviation": "CLE"
+       }
+      },
+      {
+       "homeAway": "away",
+       "score": "18",
+       "winner": false,
+       "team": {
+        "displayName": "Carolina Panthers",
+        "shortDisplayName": "Panthers",
+        "name": "Panthers",
+        "location": "Carolina",
+        "abbreviation": "CAR"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
