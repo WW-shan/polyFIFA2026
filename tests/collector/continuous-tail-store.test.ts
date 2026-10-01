@@ -64,6 +64,31 @@ describe("compact sqlite tail store", () => {
     store.close();
   });
 
+  test("bounds the write-ahead log and retries a blocked truncate checkpoint", async () => {
+    const path = await root();
+    const store = await open(path, () => 1_000);
+    store.ingest(record(1, 1_000, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.flush();
+    expect(store.snapshot()).toMatchObject({ walLimitBytes: 64 * 1024 ** 2, walCheckpointBusy: false });
+    expect(store.snapshot().walBytes).toBeGreaterThan(0);
+    // A second connection holding a read transaction is what starved the
+    // production collector's truncate checkpoint and let the WAL grow to a
+    // multi-gigabyte high-water mark.
+    const reader = new DatabaseSync(join(path, "tail.sqlite"), { readOnly: true });
+    try {
+      reader.exec("BEGIN");
+      reader.prepare("SELECT COUNT(*) AS count FROM payloads").get();
+      store.maintain(1_000 + 11 * 60_000);
+      expect(store.snapshot().walCheckpointBusy).toBe(true);
+    } finally {
+      reader.exec("COMMIT");
+      reader.close();
+    }
+    store.maintain(1_000 + 12 * 60_000);
+    expect(store.snapshot().walCheckpointBusy).toBe(false);
+    store.close();
+  });
+
   test("keeps one copy of an unchanged book so a window always has an anchor", async () => {
     const path = await root();
     let now = 0;
@@ -419,6 +444,84 @@ describe("compact sqlite tail store", () => {
     store.flush();
     const result = store.finalize(game("game:1", 13_000), 13_000);
     expect(result).toMatchObject({ windowComplete: false, missingFrontMs: 8_000 });
+  });
+
+  test("separate unchanged-book chains do not prove the stretch between them", async () => {
+    const path = await root();
+    const store = await open(path, () => 20_000, { tailWindowMs: 10_000, bufferMs: 1_000, redundantKeepAliveMs: 5_000 });
+    // One chain proves [0, 1000]; a different book at 1500 ends it; nothing is
+    // seen until a second chain proves [8000, 12000]. The floor at 3000 falls
+    // in the unproven stretch, so one merged [0, 12000] span would be a lie.
+    store.ingest(record(1, 0, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.ingest(record(2, 1_000, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.ingest(record(3, 1_500, { asset_id: "yes", value: 2 }), ["game:1"]);
+    let sequence = 3;
+    for (let at = 8_000; at <= 12_000; at += 1_000) store.ingest(record(++sequence, at, { asset_id: "yes", value: 3 }), ["game:1"]);
+    store.flush();
+    const result = store.finalize(game("game:1", 13_000), 13_000);
+    expect(result).toMatchObject({ windowComplete: false, missingFrontMs: 5_000, windowStartMs: 8_000 });
+    store.close();
+  });
+
+  test("a repeated sports payload is not order-book coverage", async () => {
+    const path = await root();
+    const store = await open(path, () => 20_000, { tailWindowMs: 10_000, bufferMs: 1_000, redundantKeepAliveMs: 5_000 });
+    let sequence = 0;
+    for (let at = 0; at <= 4_000; at += 1_000) store.ingest(record(++sequence, at, "score 1-0", "sports"), ["game:1"]);
+    store.ingest(record(++sequence, 8_000, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.flush();
+    const result = store.finalize(game("game:1", 13_000), 13_000);
+    expect(result).toMatchObject({ windowComplete: false, missingFrontMs: 5_000 });
+    store.close();
+  });
+
+  test("an identical book on either side of a score still collapses", async () => {
+    const path = await root();
+    const store = await open(path, () => 20_000, { tailWindowMs: 10_000, bufferMs: 1_000, redundantKeepAliveMs: 5_000 });
+    store.ingest(record(1, 0, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.ingest(record(2, 500, "score 1-0", "sports"), ["game:1"]);
+    store.ingest(record(3, 1_000, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.flush();
+    store.finalize(game("game:1", 1_000), 1_000);
+    expect(store.readFinalized("game:1").map(row => [row.sequence, row.source])).toEqual([[1, "clob"], [2, "sports"]]);
+    store.close();
+  });
+
+  test("returns a run's records in capture order across a wall-clock backstep", async () => {
+    const path = await root();
+    const store = await open(path, () => 5_000, { tailWindowMs: 3_000, bufferMs: 1_000 });
+    store.ingest(record(1, 1_000, { asset_id: "yes", value: 1 }), ["game:1"]);
+    store.ingest(record(2, 1_200, { asset_id: "yes", value: 2 }), ["game:1"]);
+    store.ingest(record(3, 1_100, { asset_id: "yes", value: 3 }), ["game:1"]);
+    store.ingest({ ...record(1, 1_150, { asset_id: "yes", value: 4 }), runId: "run-0" }, ["game:1"]);
+    store.ingest({ ...record(2, 2_000, { asset_id: "yes", value: 5 }), runId: "run-0" }, ["game:1"]);
+    store.flush();
+    store.finalize(game("game:1", 3_000), 3_000);
+    // Runs follow their first receipt; inside a run the sequence decides and
+    // the original receipt times are kept.
+    expect(store.readFinalized("game:1").map(row => [row.runId, row.sequence, row.receivedAtMs])).toEqual([
+      ["run-1", 1, 1_000], ["run-1", 2, 1_200], ["run-1", 3, 1_100], ["run-0", 1, 1_150], ["run-0", 2, 2_000]
+    ]);
+    store.close();
+  });
+
+  test("a read-only store never writes to the database", async () => {
+    const path = await root();
+    const writer = await open(path, () => 400);
+    writer.ingest(record(1, 300, { asset_id: "yes", value: 1 }), ["game:1"]);
+    writer.flush();
+    writer.finalize(game("game:1", 400), 400);
+    writer.close();
+    const reader = await open(path, () => 400, { readOnly: true });
+    expect(reader.readConsistent(() => reader.readFinalized("game:1"))).toHaveLength(1);
+    expect(() => reader.ingest(record(2, 350, { asset_id: "yes", value: 2 }), ["game:1"])).toThrow(/COMPACT_TAIL_STORE_READ_ONLY/);
+    expect(() => reader.maintain(400)).toThrow(/readonly/i);
+    reader.close();
+    const raw = new DatabaseSync(join(path, "tail.sqlite"));
+    raw.prepare("UPDATE compact_meta SET value = '6' WHERE key = 'schema_version'").run();
+    raw.close();
+    // An older schema cannot be migrated without writing, so it is refused.
+    await expect(open(path, () => 400, { readOnly: true })).rejects.toThrow(/COMPACT_TAIL_SCHEMA_MISMATCH/);
   });
 
   test("trims the oldest matches to the byte cap instead of deleting the whole store", async () => {

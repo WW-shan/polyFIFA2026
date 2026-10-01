@@ -823,3 +823,74 @@ test("heartbeat advances supervisor freshness without rewriting unchanged state"
     expect(manager.state.snapshot().updatedAtMs).toBe(2000);
   } finally { await manager.stop(); }
 });
+
+test("a stalled finish lookup does not hold up the pulse, heartbeat or next lookup turn", async () => {
+  const path = await root(), config = continuousConfig({ dataRoot: join(path, "capture"), minFreeBytes: 100_000, pulseIntervalMs: 100_000 }, path);
+  let now = 1000, sink: RecordSink | undefined, runtime: CollectorRuntime | undefined; const requested: string[] = [];
+  const event = (id: string) => ({ id, slug: id, gameId: id, closed: true, markets: [{ id: `${id}-m`, conditionId: `${id}-c`, outcomes: ["Yes", "No"], clobTokenIds: [`${id}-yes`, `${id}-no`], closed: true }] });
+  const manager = new ContinuousCollector(config, { now: () => now, diskBytes: async () => 1_000_000, startServer: noServer,
+    createJournal: options => createJournal({ ...options, monotonicNs: () => BigInt(now) * 1_000_000n }),
+    // A proxy hiccup: the lookup hangs until its timeout or cancellation.
+    request: (url, options) => new Promise((_resolve, reject) => {
+      requested.push(decodeURIComponent(new URL(url).pathname.split("/").at(-1)!));
+      options?.signal?.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+    }),
+    createCollector: (options, deps) => (runtime = createCollector(options, { ...deps, discover: async () => [], request: async () => ({}), createStreams: options => { sink = options.journal; return emptyStreams(); } }))
+  });
+  try {
+    await manager.start(); await until(() => runtime?.status === "running");
+    sink!.record({ source: "gamma", kind: "event_metadata", data: { event: event("slow") } });
+    sink!.record({ source: "clob", kind: "ws_message", connectionId: "c", data: book("slow-yes", "0.5", "0.6", now, "slow") });
+    sink!.record({ source: "collector", kind: "event_retired", data: { eventId: "slow", finishedAtMs: null } });
+    for (let step = 0; step < 3; step++) {
+      now += config.finishFollowupIntervalMs;
+      const outcome = await Promise.race([manager.pulse().then(() => "done"), new Promise(resolve => setTimeout(resolve, 5_000, "blocked"))]);
+      expect(outcome).toBe("done");
+      expect(await readCaptureHeartbeat(config.dataRoot)).toMatchObject({ updatedAtMs: now });
+    }
+    // One lookup batch is in flight at a time; a hung batch is not stacked.
+    expect(requested).toEqual(["slow"]);
+  } finally { await manager.stop(); }
+}, 20_000);
+
+test.each([
+  { name: "a locked database", errcode: 5, errstr: "database is locked", mode: "collecting" },
+  { name: "a full database", errcode: 13, errstr: "database or disk is full", mode: "paused_disk" }
+])("compact storage failure from $name pauses for disk only when the disk is full", async ({ errcode, errstr, mode }) => {
+  const path = await root();
+  const config = continuousConfig({ dataRoot: join(path, "capture"), compactStorageEnabled: true,
+    minFreeBytes: 100_000, pulseIntervalMs: 100_000 }, path);
+  let runtime: CollectorRuntime | undefined;
+  const manager = new ContinuousCollector(config, { diskBytes: async () => 1_000_000_000, startServer: noServer,
+    createCollector: (options, deps) => (runtime = createCollector(options, { ...deps,
+      discover: async () => [], request: async () => ({}), createStreams: emptyStreams }))
+  });
+  try {
+    await manager.start(); await until(() => runtime?.status === "running");
+    const store = (manager as unknown as { compactStore: { flush(): void } }).compactStore;
+    const flush = store.flush.bind(store);
+    let failures = 1;
+    store.flush = () => {
+      if (failures-- > 0) throw Object.assign(new Error(errstr), { code: "ERR_SQLITE_ERROR", errcode, errstr });
+      flush();
+    };
+    await manager.pulse();
+    const status = manager.state.snapshot();
+    expect(status.mode).toBe(mode);
+    expect(status.errors).toContainEqual(expect.objectContaining({ scope: "compact_storage", message: errstr }));
+    expect(runtime?.status).toBe(mode === "collecting" ? "running" : "stopped");
+  } finally { await manager.stop(); }
+}, 10_000);
+
+test("compact metadata dedupe forgets the oldest events instead of growing forever", () => {
+  const manager = new ContinuousCollector(continuousConfig({ dataRoot: "/unused/capture", compactStorageEnabled: true }, "/unused"));
+  const persist = (manager as unknown as { shouldPersistCompactRecord(record: ReturnType<typeof journalRecord>): boolean })
+    .shouldPersistCompactRecord.bind(manager);
+  const metadata = (id: number) => journalRecord(id + 1, 1000, "gamma", "event_metadata", eventMetadata(0, { id: `event-${id}`, slug: `game-${id}` }));
+  for (let id = 0; id < 20_050; id++) expect(persist(metadata(id))).toBe(true);
+  const hashes = (manager as unknown as { compactMetadataHashes: Map<string, string> }).compactMetadataHashes;
+  expect(hashes.size).toBe(20_000);
+  expect(hashes.has("event-0")).toBe(false);
+  expect(persist(metadata(20_049))).toBe(false);
+  expect(persist(metadata(0))).toBe(true);
+});

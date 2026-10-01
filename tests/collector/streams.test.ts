@@ -400,6 +400,133 @@ describe("public collector streams", () => {
     }
   });
 
+  test("does not drop a live socket when its silence deadline fires only because the event loop stalled", async () => {
+    // Synchronous SQLite maintenance blocks the loop. When it resumes, expired
+    // timers run before the socket reads buffered during the stall, so the
+    // watchdog used to retire every healthy connection at once.
+    const server = createTcpServer((peer) => {
+      peer.on("error", () => {});
+      const ticker = setInterval(() => peer.write("x"), 20);
+      peer.once("close", () => clearInterval(ticker));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const sink = new MemorySink();
+    const peers: Duplex[] = [];
+    const streams = createPublicStreams({
+      journal: sink, connectSports: false, autoReconnect: false, inboundTimeoutMs: 300, heartbeatIntervalMs: 60_000,
+      socketFactory: () => {
+        const peer = connectTcp((server.address() as AddressInfo).port, "127.0.0.1");
+        peers.push(peer);
+        const listeners = new Map<string, Array<(event: StreamRecord) => void>>();
+        const emit = (type: string, event: StreamRecord) => { for (const listener of listeners.get(type) ?? []) listener(event); };
+        peer.on("connect", () => emit("open", {}));
+        peer.on("data", (chunk: Buffer) => emit("message", { data: chunk.toString() }));
+        peer.on("error", () => {});
+        peer.once("close", () => emit("close", { code: 1000, reason: "" }));
+        return {
+          addEventListener: (type, listener) => listeners.set(type, [...(listeners.get(type) ?? []), listener]),
+          send: () => {},
+          close: () => { peer.end(); peer.destroy(); }
+        };
+      }
+    });
+    try {
+      await streams.start(["token"]);
+      const opened = Date.now() + 2000;
+      while (streams.activeConnectionIds.length === 0 && Date.now() < opened) await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const blockedUntil = Date.now() + 1_200;
+      while (Date.now() < blockedUntil) { /* simulate a synchronous storage stall */ }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(sink.records.filter((record) => record.kind === "connection_gap")).toEqual([]);
+      expect(streams.activeConnectionIds).toEqual(["clob-0-e1"]);
+    } finally {
+      await streams.stop();
+      for (const peer of peers) peer.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test("extends a late silence deadline once but still retires a socket that stays silent", async () => {
+    vi.useFakeTimers();
+    let lagMs = 0;
+    const timers = {
+      setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms),
+      clearTimeout: (handle: unknown) => clearTimeout(handle as NodeJS.Timeout),
+      setInterval: (handler: () => void, ms: number) => setInterval(handler, ms),
+      clearInterval: (handle: unknown) => clearInterval(handle as NodeJS.Timeout),
+      now: () => Date.now() + lagMs
+    };
+    const sink = new MemorySink();
+    const socket = new ControlledSocket();
+    const streams = createPublicStreams({
+      journal: sink, connectSports: false, autoReconnect: false, inboundTimeoutMs: 30, heartbeatIntervalMs: 1_000,
+      timers, socketFactory: () => socket
+    });
+    await streams.start(["token"]);
+    socket.open();
+    try {
+      await vi.advanceTimersByTimeAsync(29);
+      lagMs = 5_000;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(streams.activeConnectionIds).toEqual(["clob-0-e1"]);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(streams.activeConnectionIds).toEqual([]);
+      expect(sink.records).toContainEqual(expect.objectContaining({
+        kind: "connection_gap", data: expect.objectContaining({ reason: "inbound_timeout" })
+      }));
+    } finally {
+      await streams.stop();
+    }
+  });
+
+  test("does not force-close or fail the runtime when the close deadline fires late after a stall", async () => {
+    vi.useFakeTimers();
+    let lagMs = 0;
+    const timers = {
+      setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms),
+      clearTimeout: (handle: unknown) => clearTimeout(handle as NodeJS.Timeout),
+      setInterval: (handler: () => void, ms: number) => setInterval(handler, ms),
+      clearInterval: (handle: unknown) => clearInterval(handle as NodeJS.Timeout),
+      now: () => Date.now() + lagMs
+    };
+    const fatal = vi.fn();
+    const sockets: DelayedCloseSocket[] = [];
+    const streams = createPublicStreams({
+      journal: new MemorySink(), connectSports: false, inboundTimeoutMs: 10, closeTimeoutMs: 20, reconnectDelayMs: 1_000,
+      timers, onFatal: fatal, socketFactory: () => { const socket = new DelayedCloseSocket(); sockets.push(socket); return socket; }
+    });
+    await streams.start(["token"]);
+    sockets[0]!.open();
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+      expect(sockets[0]!.closeRequests).toBe(1);
+      lagMs = 5_000;
+      await vi.advanceTimersByTimeAsync(20);
+      sockets[0]!.finishClose();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sockets[0]!.terminations).toBe(0);
+      expect(fatal).not.toHaveBeenCalled();
+      expect(streams.error).toBeUndefined();
+    } finally {
+      await streams.stop();
+    }
+  });
+
+  test("forgets the epoch counter of a retired CLOB shard", async () => {
+    const streams = createPublicStreams({
+      journal: new MemorySink(), connectSports: false, maxTokensPerSocket: 1, socketFactory: () => new ControlledSocket()
+    });
+    await streams.start(["a", "b"]);
+    await streams.setTokens(["b"]);
+    await streams.setTokens(["b", "c"]);
+    try {
+      expect([...(streams as unknown as { epochs: Map<string, number> }).epochs.keys()]).toEqual(["clob-1", "clob-2"]);
+    } finally {
+      await streams.stop();
+    }
+  });
+
   test("bounds exponential reconnect delays for repeated failed opening attempts", async () => {
     vi.useFakeTimers();
     const sink = new MemorySink();

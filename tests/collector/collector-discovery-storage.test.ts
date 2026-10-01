@@ -212,6 +212,113 @@ describe("compact discovery storage", () => {
     assertReference(records, ref!);
   });
 
+  test("preflights /books before opening sockets when requested", async () => {
+    const run = await fixture({
+      compactStorageEnabled: true,
+      compactAnchorSnapshots: true,
+      requireBookBeforeSubscription: true,
+      snapshotBatchSize: 50
+    }, {
+      request: async url => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/events") return [event()];
+        if (parsed.pathname === "/books") return [{ asset_id: "0001", bids: [{ price: "0.40", size: "10" }], asks: [{ price: "0.60", size: "10" }] }];
+        return { asset_id: parsed.searchParams.get("token_id"), bids: [], asks: [] };
+      }
+    });
+    const result = await run.runtime.run();
+    expect(result.status).toBe("stopped");
+    expect(run.starts).toEqual([["0001"]]);
+  });
+
+  test("snapshot-only mode keeps the websocket subscription empty", async () => {
+    const run = await fixture({
+      compactStorageEnabled: true,
+      compactAnchorSnapshots: true,
+      requireBookBeforeSubscription: true,
+      snapshotOnly: true,
+      snapshotBatchSize: 50
+    }, {
+      request: async url => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/events") return [event()];
+        if (parsed.pathname === "/books") return [{ asset_id: "0001", bids: [{ price: "0.40", size: "10" }], asks: [{ price: "0.60", size: "10" }] }];
+        return { asset_id: parsed.searchParams.get("token_id"), bids: [], asks: [] };
+      }
+    });
+    const result = await run.runtime.run();
+    expect(result.status).toBe("stopped");
+    expect(run.starts).toEqual([[]]);
+  });
+
+  test("excludes configured market types from websocket subscriptions", async () => {
+    const base = event();
+    const multiMarket = { ...base, markets: [
+      ...base.markets,
+      { id: "spread", slug: "match-spread", conditionId: "condition-spread",
+        question: "Match spread", sportsMarketType: "spreads", volume: 0,
+        outcomes: ["Player A", "Player B"], clobTokenIds: ["0003", "0004"] }
+    ] };
+    const run = await fixture({
+      compactStorageEnabled: true,
+      compactAnchorSnapshots: true,
+      requireBookBeforeSubscription: true,
+      excludedSubscriptionMarketTypes: ["moneyline"],
+      snapshotBatchSize: 50
+    }, {
+      request: async url => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/events") return [multiMarket];
+        if (parsed.pathname === "/books") return [
+          { asset_id: "0001", bids: [{ price: "0.40", size: "10" }], asks: [{ price: "0.60", size: "10" }] },
+          { asset_id: "0003", bids: [{ price: "0.40", size: "10" }], asks: [{ price: "0.60", size: "10" }] }
+        ];
+        return { asset_id: parsed.searchParams.get("token_id"), bids: [], asks: [] };
+      }
+    });
+    const result = await run.runtime.run();
+    expect(result.status).toBe("stopped");
+    expect(run.starts).toEqual([["0003"]]);
+  });
+
+  test("does not subscribe to a book with no resting quotes", async () => {
+    const run = await fixture({
+      compactStorageEnabled: true,
+      compactAnchorSnapshots: true,
+      requireBookBeforeSubscription: true,
+      snapshotBatchSize: 50
+    }, {
+      request: async url => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/events") return [event()];
+        if (parsed.pathname === "/books") return [{ asset_id: "0001", bids: [], asks: [] }];
+        return { asset_id: parsed.searchParams.get("token_id"), bids: [], asks: [] };
+      }
+    });
+    const result = await run.runtime.run();
+    expect(result.status).toBe("stopped");
+    expect(run.starts).toEqual([[]]);
+  });
+
+  test("does not subscribe to a one-sided book", async () => {
+    const run = await fixture({
+      compactStorageEnabled: true,
+      compactAnchorSnapshots: true,
+      requireBookBeforeSubscription: true,
+      snapshotBatchSize: 50
+    }, {
+      request: async url => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/events") return [event()];
+        if (parsed.pathname === "/books") return [{ asset_id: "0001", bids: [{ price: "0.40", size: "10" }], asks: [] }];
+        return { asset_id: parsed.searchParams.get("token_id"), bids: [], asks: [] };
+      }
+    });
+    const result = await run.runtime.run();
+    expect(result.status).toBe("stopped");
+    expect(run.starts).toEqual([[]]);
+  });
+
   test("correlates concurrent requests even when the transport reuses one object and URL", async () => {
     const response = { events: [], evidence: "same transport object" };
     const urls = ["https://gamma.fixture.test/events?profile=a", "https://gamma.fixture.test/events?profile=b", "https://gamma.fixture.test/events?profile=a"];
@@ -323,6 +430,18 @@ describe("compact discovery storage", () => {
       expect((refs[0]!.data as ReferencedPage).responseRef.runId).toBe(result.runId);
       assertReference(records, refs[0]!);
     }
+  });
+
+  test("keeps the transport cause behind undici's generic fetch failure", async () => {
+    const reset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    const run = await fixture({ compactDiscoveryPages: true }, {
+      request: async () => { throw new TypeError("fetch failed", { cause: reset }); }
+    });
+    const result = await run.runtime.run();
+    const { records } = await readJournalRecords(result.runDirectory);
+    expect(records.find(record => record.kind === "http_request")!.data).toMatchObject({
+      error: { name: "TypeError", message: "fetch failed", cause: "read ECONNRESET (ECONNRESET)" }
+    });
   });
 
   test("preserves the original HTTP error without inventing a successful page", async () => {

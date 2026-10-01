@@ -284,6 +284,41 @@ describe("continuous discovery", () => {
   });
 });
 
+describe("continuous discovery market-type filter", () => {
+  const typed = (id: string, type: string) => ({
+    id: `market-${id}`, conditionId: `condition-${id}`, slug: `market-${id}`, sportsMarketType: type,
+    outcomes: '["Yes","No"]', clobTokenIds: JSON.stringify([`${id}1`, `${id}2`]), outcomePrices: '["0.5","0.5"]'
+  });
+
+  test("keeps only a profile's market types across a game's base and related events", async () => {
+    const input = fixture({
+      "profile:100350": [[event("root", "g1", { markets: [typed("1", "moneyline"), typed("2", "totals")] })]],
+      "profile:864": [[event("tennis", "g2", { markets: [typed("3", "moneyline"), typed("4", "set_winner")] })]],
+      "related:g1": [{ events: [event("exact", "g1", { markets: [typed("5", "soccer_exact_score")] }),
+        event("draw", "g1", { markets: [typed("6", "moneyline")] })] }],
+      "related:g2": [{ events: [] }]
+    });
+    const filtered: readonly SportProfile[] = [{ name: "soccer", tagId: "100350", marketTypes: ["moneyline"] }, profiles[0]!];
+
+    const result = await discoverContinuousEvents(options, input.deps, filtered, input.onIssue);
+
+    expect(result.map(item => [item.eventId, item.markets.map(market => market.marketId)])).toEqual([
+      ["root", ["market-1"]], ["tennis", ["market-3", "market-4"]], ["draw", ["market-6"]]
+    ]);
+    expect(input.issues).toEqual([]);
+  });
+
+  test("a game found by an unfiltered profile keeps every market", async () => {
+    const root = event("root", "g1", { markets: [typed("1", "moneyline"), typed("2", "totals")] });
+    const input = fixture({ "profile:100350": [[root]], "profile:864": [[root]], "related:g1": [{ events: [] }] });
+    const both: readonly SportProfile[] = [{ name: "soccer", tagId: "100350", marketTypes: ["moneyline"] }, profiles[0]!];
+
+    const result = await discoverContinuousEvents(options, input.deps, both, input.onIssue);
+
+    expect(result[0]?.markets.map(market => market.marketId)).toEqual(["market-1", "market-2"]);
+  });
+});
+
 describe("continuous discovery identity integrity", () => {
   test("deduplicates matching identities while preserving the first fresh base metadata", async () => {
     const first = event("root", "a", { title: "first" });

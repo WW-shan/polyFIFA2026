@@ -60,6 +60,8 @@ export interface CollectorServiceStatus {
   stateAgeMs: number | null;
   lastRecordAtMs: number | null;
   dataAgeMs: number | null;
+  /** Age of the newest saved collector error; errors are history, not current health. */
+  lastErrorAgeMs?: number | null;
   stale: boolean;
   errors: string[];
 }
@@ -101,6 +103,13 @@ function hasCode(error: unknown, code: string): boolean {
 
 function safeText(text: string): string {
   return text.replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/]*@/gi, "$1[redacted]@");
+}
+
+function formatAge(ageMs: number): string {
+  const seconds = Math.max(0, Math.round(ageMs / 1000));
+  if (seconds < 120) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  return minutes < 120 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
 }
 
 function validPath(value: unknown): value is string {
@@ -408,7 +417,7 @@ export async function collectorServiceStatus(
     running: loaded === null ? null : job?.pid != null, pid: job?.pid ?? null, statePid: null,
     mode: null, stateIdentity: "unverified",
     dataRoot: definition.dataRoot, url: `http://127.0.0.1:${definition.port}`,
-    updatedAtMs: null, stateAgeMs: null, lastRecordAtMs: null, dataAgeMs: null, stale: true, errors
+    updatedAtMs: null, stateAgeMs: null, lastRecordAtMs: null, dataAgeMs: null, lastErrorAgeMs: null, stale: true, errors
   };
   try {
     const state = await readCaptureState(result.dataRoot);
@@ -458,9 +467,14 @@ export async function collectorServiceStatus(
     const dataStale = state.mode === "collecting" && (result.dataAgeMs === null || result.dataAgeMs > 60_000);
     if (dataStale) errors.push("CONTINUOUS_SERVICE_DATA_STALE: collecting without a recent journal record");
     result.stale = result.stateIdentity === "unverified" || dataStale;
+    // The collector keeps its last 50 errors for the life of the process, so an
+    // outage that ended long ago would otherwise read as ongoing. Date each one.
     for (const error of state.errors.slice(-50)) {
       if (typeof error?.scope !== "string" || typeof error.message !== "string") throw new Error();
-      errors.push(safeText(`${error.scope}: ${error.message}`).slice(0, 2000));
+      const dated = validTime(error.atMs);
+      if (dated) result.lastErrorAgeMs = Math.min(result.lastErrorAgeMs ?? Infinity, now - error.atMs);
+      const when = dated ? `${new Date(error.atMs).toISOString()} (${formatAge(now - error.atMs)} ago) ` : "";
+      errors.push(safeText(`${when}${error.scope}: ${error.message}`).slice(0, 2000));
     }
   } catch {
     result.stale = true;

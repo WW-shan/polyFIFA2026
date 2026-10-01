@@ -30,6 +30,11 @@ export interface StreamTimerApi {
   clearTimeout(handle: unknown): void;
   setInterval(handler: () => void, timeoutMs: number): unknown;
   clearInterval(handle: unknown): void;
+  /**
+   * Monotonic milliseconds. When present, a deadline that fires well after it
+   * was due is treated as event-loop lag rather than peer silence.
+   */
+  now?(): number;
 }
 
 export interface PublicStreamsOptions {
@@ -80,6 +85,9 @@ interface SocketConnection {
 
 const DEFAULT_CLOB_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const DEFAULT_SPORTS_URL = "wss://sports-api.polymarket.com/ws";
+// A timer this late was held up by a blocked event loop (synchronous storage
+// work), not by the peer. Ordinary scheduling jitter stays well below it.
+const EVENT_LOOP_LAG_TOLERANCE_MS = 500;
 
 function serializableStreamError(error: unknown): { name: string; message: string; code?: string } {
   const name = error instanceof Error && error.name ? error.name : "Error";
@@ -95,7 +103,8 @@ const defaultTimers: StreamTimerApi = {
   setTimeout: (handler, timeoutMs) => setTimeout(handler, timeoutMs),
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
   setInterval: (handler, timeoutMs) => setInterval(handler, timeoutMs),
-  clearInterval: (handle) => clearInterval(handle as NodeJS.Timeout)
+  clearInterval: (handle) => clearInterval(handle as NodeJS.Timeout),
+  now: () => performance.now()
 };
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
@@ -447,6 +456,9 @@ export class PublicStreams {
     if (connection) this.releaseConnection(connection);
     const index = this.shards.indexOf(channel);
     if (index >= 0) this.shards.splice(index, 1);
+    // Shard IDs are never reused, so a retired shard's epoch counter cannot
+    // protect a later connection ID. The sports key is reused across restarts.
+    if (channel.source === "clob") this.epochs.delete(`${channel.source}-${channel.id}`);
   }
 
   private clearHeartbeat(channel: ChannelState): void {
@@ -463,12 +475,24 @@ export class PublicStreams {
     }
   }
 
-  private armWatchdog(channel: ChannelState, connection: SocketConnection, reason: string, timeoutMs: number): void {
+  private armWatchdog(channel: ChannelState, connection: SocketConnection, reason: string, timeoutMs: number, extended = false): void {
     this.clearWatchdog(channel);
+    const armedAt = this.timers.now?.();
     channel.watchdog = this.timers.setTimeout(() => {
       channel.watchdog = undefined;
-      if (this.isCurrent(channel, connection)) this.retireConnection(channel, connection, reason);
+      if (!this.isCurrent(channel, connection)) return;
+      // After a stall, expired timers run before the socket reads buffered
+      // meanwhile, and our own pings could not be sent. The silence measured
+      // the collector, not the peer, so restart the clock once; a socket that
+      // is really dead is still retired one timeout later.
+      if (!extended && this.firedLate(armedAt, timeoutMs)) this.armWatchdog(channel, connection, reason, timeoutMs, true);
+      else this.retireConnection(channel, connection, reason);
     }, timeoutMs);
+  }
+
+  private firedLate(armedAt: number | undefined, timeoutMs: number): boolean {
+    const now = this.timers.now?.();
+    return armedAt !== undefined && now !== undefined && now - armedAt - timeoutMs >= EVENT_LOOP_LAG_TOLERANCE_MS;
   }
 
   private recordGap(channel: ChannelState, reason: string): void {
@@ -537,7 +561,18 @@ export class PublicStreams {
 
   private withCloseDeadline(work: Promise<void>, connectionId: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const timer = this.timers.setTimeout(() => reject(new Error(`STREAM_CLOSE_TIMEOUT: ${connectionId}`)), this.closeTimeoutMs);
+      let timer: unknown;
+      // Same lag rule as the watchdog: a close frame buffered during a stall
+      // is read only after the expired deadline runs, and a missed deadline
+      // escalates to a forced teardown or a fatal STREAM_CLOSE_TIMEOUT.
+      const arm = (extended: boolean): void => {
+        const armedAt = this.timers.now?.();
+        timer = this.timers.setTimeout(() => {
+          if (!extended && this.firedLate(armedAt, this.closeTimeoutMs)) arm(true);
+          else reject(new Error(`STREAM_CLOSE_TIMEOUT: ${connectionId}`));
+        }, this.closeTimeoutMs);
+      };
+      arm(false);
       void work.then(() => {
         this.timers.clearTimeout(timer);
         resolve();

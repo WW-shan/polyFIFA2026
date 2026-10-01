@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { setMaxListeners } from "node:events";
-import { fetchJson } from "../polymarket/http.js";
+import { describeErrorCause, fetchJson } from "../polymarket/http.js";
 import {
   collectableTokenIds,
   discoverSportsEvents,
@@ -60,6 +60,12 @@ export interface CollectorOptions {
   backgroundInitialSnapshots?: boolean;
   /** Keep raw market frames out of the NDJSON journal; the continuous wrapper owns compact storage. */
   compactStorageEnabled?: boolean;
+  /** In compact mode, probe /books before opening sockets and subscribe only to tokens with a live book. */
+  requireBookBeforeSubscription?: boolean;
+  /** Market types to keep in REST anchor sweeps but exclude from WebSocket subscriptions. */
+  excludedSubscriptionMarketTypes?: string[];
+  /** Disable CLOB market-stream subscriptions and collect quotes only through REST anchor sweeps. */
+  snapshotOnly?: boolean;
   /**
    * In compact mode, periodically fetch one full HTTP book per token to anchor
    * the incremental `price_change` stream. Without an anchor the SELL-side
@@ -83,6 +89,16 @@ export interface CollectorOptions {
    * before asking for it again.
    */
   absentBookCooldownMs?: number;
+}
+
+function bookHasQuotes(book: Record<string, unknown>): boolean {
+  // Quote-touch needs both sides: a one-sided book cannot define an entry
+  // spread or prove that a resting order was touched. One-sided and empty
+  // books are re-probed after the absence cooldown rather than subscribed.
+  return ["bids", "asks"].every(side => {
+    const levels = book[side];
+    return Array.isArray(levels) && levels.length > 0;
+  });
 }
 
 export interface CollectorDependencies {
@@ -174,6 +190,9 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
     snapshotBatchSize: positiveInterval(options.snapshotBatchSize, 1, "snapshotBatchSize"),
     backgroundInitialSnapshots: options.backgroundInitialSnapshots ?? false,
     compactStorageEnabled: options.compactStorageEnabled ?? false,
+    requireBookBeforeSubscription: options.requireBookBeforeSubscription ?? false,
+    excludedSubscriptionMarketTypes: [...(options.excludedSubscriptionMarketTypes ?? [])],
+    snapshotOnly: options.snapshotOnly ?? false,
     compactAnchorSnapshots: options.compactAnchorSnapshots ?? false,
     httpTimeoutMs: positiveInterval(options.httpTimeoutMs, 10_000, "httpTimeoutMs"),
     maxTokensPerSocket: positiveInterval(options.maxTokensPerSocket, 200, "maxTokensPerSocket"),
@@ -185,6 +204,10 @@ function effectiveOptions(options: CollectorOptions): EffectiveCollectorOptions 
   nonnegativeDuration(effective.durationSeconds);
   // Collector resource bound, not a claim about the server's maximum batch size.
   if (effective.snapshotBatchSize > 100) throw new RangeError("snapshotBatchSize must be at most 100");
+  if (effective.excludedSubscriptionMarketTypes.some(type => typeof type !== "string" || type.trim().length === 0)) {
+    throw new RangeError("excludedSubscriptionMarketTypes entries must be nonempty strings");
+  }
+  effective.excludedSubscriptionMarketTypes = [...new Set(effective.excludedSubscriptionMarketTypes.map(type => type.trim()))];
   for (const name of ["lookbackHours", "aheadHours"] as const) {
     if (!Number.isFinite(effective[name]) || effective[name] < 0) throw new RangeError(`${name} must be finite and nonnegative`);
   }
@@ -217,6 +240,13 @@ export class CollectorRuntime {
   private readonly absentBookRetryAtMs = new Map<string, number>();
   /** Absent tokens already reported once in this run, so one absence is not re-logged per pass. */
   private readonly reportedAbsentBookTokens = new Set<string>();
+  /** Tokens whose latest /books probe returned at least one live bid or ask. */
+  private readonly knownBookTokens = new Set<string>();
+  /** Tokens that received a successful /books response, including proven absences. */
+  private readonly bookProbedTokens = new Set<string>();
+  private readonly excludedSubscriptionMarketTypes: Set<string>;
+  private readonly marketTypeByToken = new Map<string, string>();
+  private bookPreflightComplete = false;
   private readonly lifecycle: EventLifecycle | undefined;
   private journal: CollectorJournalLike | undefined;
   private streams: CollectorStreamLike | undefined;
@@ -241,6 +271,7 @@ export class CollectorRuntime {
 
   constructor(options: CollectorOptions = {}, dependencies: CollectorDependencies = {}) {
     this.options = effectiveOptions(options);
+    this.excludedSubscriptionMarketTypes = new Set(this.options.excludedSubscriptionMarketTypes);
     this.lifecycle = options.postFinishRetentionMs === undefined ? undefined : new EventLifecycle(options.postFinishRetentionMs);
     // Each bounded HTTP worker and its transport may listen for cancellation.
     setMaxListeners(this.options.snapshotConcurrency * 3 + 10, this.cancellation.signal);
@@ -352,6 +383,16 @@ export class CollectorRuntime {
     await this.discoverOnce();
     if (!this.collecting) return;
     if (!this.journal) throw new Error("COLLECTOR_JOURNAL_MISSING");
+    if (this.options.requireBookBeforeSubscription) {
+      // A full-market discovery can contain many more tokens than the venue
+      // currently has order books for. Probe them once before opening sockets;
+      // this both supplies the initial anchors and keeps the WebSocket
+      // subscription bounded to markets that can actually produce quotes.
+      await this.snapshotOnce();
+      if (!this.collecting) return;
+      this.bookPreflightComplete = true;
+      this.desiredTokens = this.subscriptionTokens(this.desiredTokens);
+    }
     const streamOptions: PublicStreamsOptions = {
       journal: this.journal,
       clobUrl: this.options.clobWsUrl,
@@ -536,11 +577,44 @@ export class CollectorRuntime {
     await this.applySelection(selection ?? { events: [...next.values()], tokenIds, snapshotTokenIds: tokenIds, retired: [] }, true);
   }
 
+  /**
+   * Compact full-market operation (anchor sweeps, socket preflight and
+   * snapshot-only collection) treats a quote-less book as "nothing to keep":
+   * persisting one empty snapshot per token per pass is what blew up the
+   * compact WAL. Classic finite runs still journal every book response
+   * verbatim, including empty and one-sided ones.
+   */
+  private get skipQuoteLessBooks(): boolean {
+    return this.options.compactAnchorSnapshots || this.options.requireBookBeforeSubscription || this.options.snapshotOnly;
+  }
+
+  private subscriptionTokens(tokenIds: readonly string[]): string[] {
+    if (this.options.snapshotOnly) return [];
+    if (!this.options.requireBookBeforeSubscription || !this.bookPreflightComplete) return [...tokenIds];
+    // Keep never-probed tokens fail-open so a failed probe batch cannot silently
+    // remove a market. Only a successful probe that omitted the token is a
+    // positive proof that no book exists and should be excluded.
+    return tokenIds.filter(tokenId => {
+      if (this.bookProbedTokens.has(tokenId) && !this.knownBookTokens.has(tokenId)) return false;
+      const marketType = this.marketTypeByToken.get(tokenId);
+      return marketType === undefined || !this.excludedSubscriptionMarketTypes.has(marketType);
+    });
+  }
+
   private async applySelection(selection: EventLifecycleSelection, forceSubscriptionUpdate: boolean): Promise<void> {
-    const changed = this.desiredTokens.length !== selection.tokenIds.length || this.desiredTokens.some((token, index) => token !== selection.tokenIds[index]);
+    this.marketTypeByToken.clear();
+    for (const event of selection.events) {
+      for (const market of event.markets) {
+        const marketType = market.raw.sportsMarketType;
+        if (typeof marketType !== "string" || marketType.length === 0) continue;
+        for (const tokenId of market.tokenIds) this.marketTypeByToken.set(tokenId, marketType);
+      }
+    }
+    const selectedTokens = this.subscriptionTokens(selection.tokenIds);
+    const changed = this.desiredTokens.length !== selectedTokens.length || this.desiredTokens.some((token, index) => token !== selectedTokens[index]);
     this.activeEvents.clear();
     for (const event of selection.events) this.activeEvents.set(event.eventId, event);
-    this.desiredTokens = selection.tokenIds;
+    this.desiredTokens = selectedTokens;
     this.snapshotTokens = selection.snapshotTokenIds;
     this.snapshotTokenSet = new Set(this.snapshotTokens);
     // Absence bookkeeping only matters for tokens still in the anchor rotation;
@@ -743,13 +817,28 @@ export class CollectorRuntime {
     const nowMs = dateValue(this.now()).getTime();
     const newlyMissingTokenIds = missingTokenIds.filter(tokenId => !this.reportedAbsentBookTokens.has(tokenId));
     for (const tokenId of missingTokenIds) {
+      this.bookProbedTokens.add(tokenId);
+      this.knownBookTokens.delete(tokenId);
       this.reportedAbsentBookTokens.add(tokenId);
       this.absentBookRetryAtMs.set(tokenId, nowMs + this.options.absentBookCooldownMs);
     }
     for (const tokenId of returned.keys()) {
-      // A book that came back clears the earlier absence.
-      this.absentBookRetryAtMs.delete(tokenId);
-      this.reportedAbsentBookTokens.delete(tokenId);
+      if (!requested.has(tokenId)) continue;
+      const match = returned.get(tokenId);
+      const book = match?.length === 1 ? match[0]!.response : undefined;
+      const hasQuotes = book !== undefined && bookHasQuotes(book);
+      this.bookProbedTokens.add(tokenId);
+      if (hasQuotes || !this.skipQuoteLessBooks) {
+        // A live quote clears the earlier absence/empty-book backoff.
+        this.knownBookTokens.add(tokenId);
+        this.absentBookRetryAtMs.delete(tokenId);
+        this.reportedAbsentBookTokens.delete(tokenId);
+      } else {
+        // The orderbook exists but has no resting liquidity. Keep it out of
+        // the WebSocket subscription until the next cooldown retry.
+        this.knownBookTokens.delete(tokenId);
+        this.absentBookRetryAtMs.set(tokenId, nowMs + this.options.absentBookCooldownMs);
+      }
     }
     if (!Array.isArray(response) || newlyMissingTokenIds.length || duplicateTokenIds.length || unrequestedTokenIds.length || invalidResponseIndices.length) {
       await this.recordControlled({ source: "clob", kind: "book_snapshot_batch_error", data: {
@@ -763,6 +852,10 @@ export class CollectorRuntime {
       // No fallback GET burst, empty substitute, or verification is manufactured.
       if (matches?.length !== 1) continue;
       const match = matches[0]!;
+      // An empty book is not a quote anchor. Persisting one per token per pass
+      // is what made a full-market sweep blow up the compact WAL; skip it until
+      // the next liquidity retry.
+      if (this.skipQuoteLessBooks && !bookHasQuotes(match.response)) continue;
       await this.recordControlled({ source: "clob", kind: "book_snapshot", data: {
         tokenId, url, method, requestStartedAt, requestEndedAt, response: match.response,
         provenance: { batchId, responseIndex: match.responseIndex }
@@ -791,7 +884,20 @@ export class CollectorRuntime {
       return;
     }
     const requestEndedAt = dateValue(this.now()).toISOString();
-    await this.recordControlled({ source: "clob", kind: "book_snapshot", data: { tokenId, url, requestStartedAt, requestEndedAt, response } }, true);
+    this.bookProbedTokens.add(tokenId);
+    const book = typeof response === "object" && response !== null && !Array.isArray(response)
+      ? response as Record<string, unknown> : undefined;
+    const hasQuotes = book !== undefined && bookHasQuotes(book);
+    if (hasQuotes) {
+      this.knownBookTokens.add(tokenId);
+      this.absentBookRetryAtMs.delete(tokenId);
+    }
+    if (hasQuotes || !this.skipQuoteLessBooks) {
+      await this.recordControlled({ source: "clob", kind: "book_snapshot", data: { tokenId, url, requestStartedAt, requestEndedAt, response } }, true);
+    } else {
+      this.knownBookTokens.delete(tokenId);
+      this.absentBookRetryAtMs.set(tokenId, dateValue(this.now()).getTime() + this.options.absentBookCooldownMs);
+    }
   }
 
   private trackRequest<T>(request: Promise<T>): Promise<T> {
@@ -881,9 +987,13 @@ export class CollectorRuntime {
   }
 }
 
-function serializeError(error: unknown): { name: string; message: string } {
-  if (error instanceof Error) return { name: error.name, message: error.message };
-  return { name: "Error", message: String(error) };
+function serializeError(error: unknown): { name: string; message: string; code?: string; cause?: string } {
+  if (!(error instanceof Error)) return { name: "Error", message: String(error) };
+  const code = typeof (error as NodeJS.ErrnoException).code === "string" ? (error as NodeJS.ErrnoException).code : undefined;
+  // undici reports every transport failure as "fetch failed"; the reason
+  // (ECONNRESET, a refused proxy tunnel, ...) only lives on `cause`.
+  const cause = describeErrorCause(error);
+  return { name: error.name, message: error.message, ...(code === undefined ? {} : { code }), ...(cause ? { cause } : {}) };
 }
 
 export function createCollector(options: CollectorOptions = {}, dependencies: CollectorDependencies = {}): CollectorRuntime {

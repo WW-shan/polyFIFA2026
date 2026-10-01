@@ -126,6 +126,158 @@ describe("compact tail export", () => {
     store.close();
   });
 
+  test("a collector restart that reuses a connection id keeps the new run's books", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    const inRun = (runId: string, record: JournalRecord): JournalRecord => ({ ...record, runId });
+    const book = (tokenId: string, timestamp: string, hash: string) => ({ market: CONDITION, event_type: "book", asset_id: tokenId,
+      bids: [{ price: "0.5", size: "10" }], asks: [{ price: "0.6", size: "20" }], timestamp, hash });
+    // Connection ids are per-process counters, so the restarted collector opens
+    // `clob-0-e1` again after the old run closed its own `clob-0-e1`.
+    store.ingest(inRun("run-a", clob(1, START, book("yes", "1000", "a1"))), ["game:42"]);
+    store.ingest(inRun("run-a", lifecycle(2, START + 10_000, "connection_close", "clob-0-e1")), ["game:42"]);
+    store.ingest(inRun("run-b", clob(1, START + 20_000, book("yes", "2000", "b1"))), ["game:42"]);
+    store.ingest(inRun("run-b", clob(2, START + 100_000, { market: CONDITION, event_type: "price_change", timestamp: "3000",
+      price_changes: [{ asset_id: "yes", price: "0.6", size: "5", side: "SELL", hash: "b2", best_bid: "0.5", best_ask: "0.6" }] })), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    const yes = summary.tokens.find((token: { tokenId: string }) => token.tokenId === "yes");
+    // Only the ten seconds between the old close and the new book are lost.
+    expect(yes.validSeconds).toBeGreaterThan(165);
+    const seconds = (await readFile(join(result.archive.outputDirectory, "seconds.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const late = seconds.find((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 150);
+    expect(late).toMatchObject({ wholeSecondValid: true, connectionId: "run-b/clob-0-e1", asks: [{ price: "0.6", size: "5" }] });
+    store.close();
+  });
+
+  test("a stale HTTP anchor does not revert newer WebSocket deltas", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    store.ingest(clob(1, START, { market: CONDITION, event_type: "book", asset_id: "yes",
+      bids: [{ price: "0.5", size: "10" }], asks: [{ price: "0.6", size: "20" }], timestamp: "1000", hash: "h1" }), ["game:42"]);
+    store.ingest(clob(2, START + 10_000, { market: CONDITION, event_type: "price_change", timestamp: "1010",
+      price_changes: [{ asset_id: "yes", price: "0.6", size: "5", side: "SELL", hash: "h2", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    // REST answered after the delta arrived but describes the book before it.
+    store.ingest(anchor(3, START + 20_000, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1005", "h-rest"), ["game:42"]);
+    store.ingest(clob(4, START + 80_000, { market: CONDITION, event_type: "price_change", timestamp: "1020",
+      price_changes: [{ asset_id: "yes", price: "0.4", size: "1", side: "BUY", hash: "h3", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    // The snapshot still refreshes the book, but only brought forward by the
+    // delta it predates.
+    expect(result.anchorFrames).toBe(1);
+    const seconds = (await readFile(join(result.archive.outputDirectory, "seconds.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const afterAnchor = seconds.find((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 40);
+    expect(afterAnchor).toMatchObject({ wholeSecondValid: true, asks: [{ price: "0.6", size: "5" }], bookSourceAtMs: 1010 });
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    expect(summary.journalQuality.outOfOrderMessages).toBe(0);
+    store.close();
+  });
+
+  test("an anchor-seeded book keeps the REST source time", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    store.ingest(anchor(1, START, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1000", "h1"), ["game:42"]);
+    store.ingest(clob(2, START + 60_000, { market: CONDITION, event_type: "price_change", timestamp: "2000",
+      price_changes: [{ asset_id: "yes", price: "0.6", size: "5", side: "SELL", hash: "h2", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    const seconds = (await readFile(join(result.archive.outputDirectory, "seconds.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const seeded = seconds.find((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 10);
+    // Without the source time these seconds carry `missing-book-source-time`
+    // and skip the clock validity check entirely.
+    expect(seeded).toMatchObject({ wholeSecondValid: true, bookSourceAtMs: 1000 });
+    expect(seeded.reasons).not.toContain("missing-book-source-time");
+    store.close();
+  });
+
+  test("an anchor older than dropped deltas seeds the book only after re-applying them", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    // No book yet, so the replay has to drop this delta; the later snapshot
+    // predates it and would otherwise seed the book without it.
+    store.ingest(clob(1, START + 5_000, { market: CONDITION, event_type: "price_change", timestamp: "1010",
+      price_changes: [{ asset_id: "yes", price: "0.6", size: "5", side: "SELL", hash: "h2", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    store.ingest(anchor(2, START + 10_000, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }, { price: "0.7", size: "3" }], "1005", "h1"), ["game:42"]);
+    store.ingest(clob(3, START + 80_000, { market: CONDITION, event_type: "price_change", timestamp: "1020",
+      price_changes: [{ asset_id: "yes", price: "0.7", size: "0", side: "SELL", hash: "h3", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    expect(result.anchorFrames).toBe(1);
+    const seconds = (await readFile(join(result.archive.outputDirectory, "seconds.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const seeded = seconds.find((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 30);
+    expect(seeded).toMatchObject({ wholeSecondValid: true, bookSourceAtMs: 1010,
+      asks: [{ price: "0.6", size: "5" }, { price: "0.7", size: "3" }] });
+    const later = seconds.find((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 100);
+    expect(later).toMatchObject({ wholeSecondValid: true, asks: [{ price: "0.6", size: "5" }] });
+    store.close();
+  });
+
+  test("keeps capture order across a tolerated wall-clock backstep", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    store.ingest(clob(1, START, { market: CONDITION, event_type: "book", asset_id: "yes",
+      bids: [{ price: "0.5", size: "10" }], asks: [{ price: "0.6", size: "20" }], timestamp: "1000", hash: "h1" }), ["game:42"]);
+    store.ingest(clob(2, START + 60_000, { market: CONDITION, event_type: "price_change", timestamp: "1010",
+      price_changes: [{ asset_id: "yes", price: "0.6", size: "5", side: "SELL", hash: "h2", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    // The UTC clock stepped back 400ms between two consecutive frames.
+    store.ingest(clob(3, START + 59_600, { market: CONDITION, event_type: "price_change", timestamp: "1011",
+      price_changes: [{ asset_id: "yes", price: "0.6", size: "7", side: "SELL", hash: "h3", best_bid: "0.5", best_ask: "0.6" }] }), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive") });
+    const summary = JSON.parse(await readFile(join(result.archive.outputDirectory, "quality.json"), "utf8"));
+    expect(summary.clockIssues).toHaveLength(1);
+    expect(summary.clockIssues[0]).toMatchObject({ kind: "receipt-wall-clock-backstep", startAtMs: START + 59_600, endAtMs: START + 60_000 });
+    expect(summary.journalQuality.outOfOrderMessages).toBe(0);
+    const seconds = (await readFile(join(result.archive.outputDirectory, "seconds.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const later = seconds.find((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 100);
+    expect(later).toMatchObject({ wholeSecondValid: true, asks: [{ price: "0.6", size: "7" }] });
+    store.close();
+  });
+
+  test("an anchor follows the connection that last carried its token inside a batched message", async () => {
+    const path = await root();
+    const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
+      retentionMs: 3_600_000, maxBytes: 8 * 1024 ** 3, now: () => FINISH });
+    const START = FINISH - 181_000;
+    const book = (tokenId: string, hash: string) => ({ market: CONDITION, event_type: "book", asset_id: tokenId,
+      bids: [{ price: "0.5", size: "10" }], asks: [{ price: "0.6", size: "20" }], timestamp: "1001", hash });
+    store.ingest(clob(1, START, { ...book("yes", "h0"), timestamp: "1000" }, "clob-0-e1"), ["game:42"]);
+    store.ingest(clob(2, START + 1_000, [book("yes", "h1"), book("no", "h2")], "clob-0-e2"), ["game:42"]);
+    store.ingest(anchor(3, START + 30_000, "yes", [{ price: "0.5", size: "10" }], [{ price: "0.6", size: "20" }], "1001", "h1"), ["game:42"]);
+    store.ingest(lifecycle(4, START + 40_000, "connection_close", "clob-0-e1"), ["game:42"]);
+    store.flush();
+    store.finalize(game(), FINISH);
+
+    const result = await exportCompactMatch(store, "game:42", { outputDirectory: join(path, "archive"), maxFeedSilenceMs: 300_000 });
+    const seconds = (await readFile(join(result.archive.outputDirectory, "seconds.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const late = seconds.find((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 100);
+    // Seeding the stale `e1` book would make the token invalid once `e1` closed.
+    expect(late).toMatchObject({ wholeSecondValid: true, connectionId: "run-1/clob-0-e2" });
+    store.close();
+  });
+
   test("keeps a connection gap in the compact archive and invalidates later book seconds", async () => {
     const path = await root();
     const store = await openCompactTailStore({ dataRoot: path, tailWindowMs: 181_000, bufferMs: 30_000,
@@ -221,7 +373,7 @@ describe("compact tail export", () => {
     expect(yes.validSeconds).toBeGreaterThan(0);
     const seconds = (await readFile(join(result.archive.outputDirectory, "seconds.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
     expect(seconds.filter((row: { tokenId: string; secondIndex: number }) => row.tokenId === "yes" && row.secondIndex === 5)[0].connectionId)
-      .toBe("clob-0-e2");
+      .toBe("run-1/clob-0-e2");
     store.close();
   });
 

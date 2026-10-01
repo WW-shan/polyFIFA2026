@@ -5,6 +5,8 @@ import { validateProxyConfiguration } from "../polymarket/owned-transport.js";
 export interface SportProfile {
   name: string;
   tagId: string;
+  /** Collect only these `sportsMarketType` values for games this profile finds; omitted keeps every market. */
+  marketTypes?: string[];
 }
 
 export interface ContinuousConfig {
@@ -32,6 +34,12 @@ export interface ContinuousConfig {
   compressionTimeoutMs: number;
   singleMatchOnly: boolean;
   compactStorageEnabled: boolean;
+  /** In compact mode, fetch /books before opening sockets and subscribe only to tokens with a live book. */
+  requireBookBeforeSubscription: boolean;
+  /** Market types to keep in REST anchor sweeps but exclude from WebSocket subscriptions. */
+  excludedSubscriptionMarketTypes: string[];
+  /** Disable CLOB market-stream subscriptions and collect quotes only through REST anchor sweeps. */
+  snapshotOnly: boolean;
   compactAnchorSnapshots: boolean;
   tailWindowSeconds: number;
   tailBufferSeconds: number;
@@ -138,6 +146,9 @@ export function continuousConfig(
     compressionTimeoutMs: 120_000,
     singleMatchOnly: true,
     compactStorageEnabled: false,
+    requireBookBeforeSubscription: false,
+    excludedSubscriptionMarketTypes: [],
+    snapshotOnly: false,
     compactAnchorSnapshots: false,
     tailWindowSeconds: 181,
     tailBufferSeconds: 30,
@@ -169,6 +180,13 @@ export function continuousConfig(
   if (typeof config.compressionEnabled !== "boolean") invalid("compressionEnabled must be boolean");
   if (typeof config.singleMatchOnly !== "boolean") invalid("singleMatchOnly must be boolean");
   if (typeof config.compactStorageEnabled !== "boolean") invalid("compactStorageEnabled must be boolean");
+  if (typeof config.requireBookBeforeSubscription !== "boolean") invalid("requireBookBeforeSubscription must be boolean");
+  if (!Array.isArray(config.excludedSubscriptionMarketTypes)
+      || config.excludedSubscriptionMarketTypes.some(type => typeof type !== "string" || type.trim().length === 0)) {
+    invalid("excludedSubscriptionMarketTypes must be an array of nonempty strings");
+  }
+  config.excludedSubscriptionMarketTypes = [...new Set(config.excludedSubscriptionMarketTypes.map(type => type.trim()))];
+  if (typeof config.snapshotOnly !== "boolean") invalid("snapshotOnly must be boolean");
   if (typeof config.compactAnchorSnapshots !== "boolean") invalid("compactAnchorSnapshots must be boolean");
   if (config.compressionMaxSegments > 1024) invalid("compressionMaxSegments must be at most 1024");
   if (config.compressionTimeoutMs > 2_147_483_647) invalid("compressionTimeoutMs exceeds Node's timer limit");
@@ -202,7 +220,9 @@ export function continuousConfig(
     if (names.has(name) || tags.has(tagId)) invalid("profiles must have unique names and tagIds");
     names.add(name);
     tags.add(tagId);
-    return { name, tagId };
+    if (profile.marketTypes === undefined) return { name, tagId };
+    if (!Array.isArray(profile.marketTypes) || profile.marketTypes.length === 0) invalid("profiles.marketTypes must be a nonempty array");
+    return { name, tagId, marketTypes: profile.marketTypes.map(type => nonemptyString(type, "profiles.marketTypes").trim()) };
   });
 
   config.dataRoot = resolve(projectDirectory, pathString(config.dataRoot, "dataRoot"));

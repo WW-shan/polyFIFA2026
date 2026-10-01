@@ -15,6 +15,7 @@ import { acquireCaptureLock, availableDiskBytes, captureStateFingerprint, pruneR
   readCaptureState, writeCaptureHeartbeat, writeCaptureState } from "./continuous-storage.js";
 import type { JsonRequester, JournalRecord, RecordInput } from "./types.js";
 import { metadataFromRecord } from "./tail-context.js";
+import { objectValue } from "./replay-values.js";
 import { finishBoundaryDisputed, isTailFinishSource } from "./tail-types.js";
 import { CompactTailStore, openCompactTailStore } from "./continuous-tail-store.js";
 
@@ -28,6 +29,68 @@ export interface ContinuousDependencies {
   sealSnapshot?: typeof sealJournalSnapshot;
   now?: () => number;
   request?: JsonRequester;
+}
+
+// How long a pulse waits for its finish lookups before leaving them running.
+const FINISH_LOOKUP_PULSE_BUDGET_MS = 1_000;
+// Events whose last metadata hash is remembered for compact-mode dedupe.
+const COMPACT_METADATA_HASH_LIMIT = 20_000;
+
+/** ENOSPC or SQLite's SQLITE_FULL (including extended codes): the store cannot grow. */
+function isStorageFull(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  for (let value = error; value instanceof Error && !seen.has(value); value = (value as Error & { cause?: unknown }).cause) {
+    seen.add(value);
+    const { code, errcode } = value as Error & { code?: unknown; errcode?: unknown };
+    if (code === "ENOSPC" || code === "SQLITE_FULL") return true;
+    if (typeof errcode === "number" && (errcode & 0xff) === 13) return true;
+  }
+  return false;
+}
+
+function bestBookLevel(levels: unknown[], direction: "min" | "max"): Record<string, unknown> | undefined {
+  let best: Record<string, unknown> | undefined;
+  let bestPrice: number | undefined;
+  for (const value of levels) {
+    const level = objectValue(value);
+    if (!level) continue;
+    const price = Number(level.price);
+    if (!Number.isFinite(price)) continue;
+    if (bestPrice === undefined || (direction === "min" ? price < bestPrice : price > bestPrice)) {
+      best = level;
+      bestPrice = price;
+    }
+  }
+  return best;
+}
+
+/**
+ * Snapshot-only mode polls `/books` instead of subscribing to the full CLOB
+ * market stream. Keep one level per side so the quote-touch backtest retains
+ * the best bid/ask and size without persisting the multi-level ladder that
+ * made the all-market stream exceed the capture loop's budget.
+ */
+function compactSnapshotInput(input: RecordInput): RecordInput {
+  if (input.source !== "clob") return input;
+  const data = objectValue(input.data);
+  if (!data) return input;
+  if (input.kind === "book_snapshot_batch") {
+    if (!Array.isArray(data.response)) return input;
+    return { ...input, data: { ...data, response: { count: data.response.length } } };
+  }
+  if (input.kind !== "book_snapshot") return input;
+  const response = objectValue(data.response);
+  if (!response) return input;
+  const bids = Array.isArray(response.bids) ? response.bids : [];
+  const asks = Array.isArray(response.asks) ? response.asks : [];
+  if (bids.length <= 1 && asks.length <= 1) return input;
+  const bestBid = bestBookLevel(bids, "max");
+  const bestAsk = bestBookLevel(asks, "min");
+  return { ...input, data: { ...data, response: {
+    ...response,
+    bids: bestBid === undefined ? [] : [bestBid],
+    asks: bestAsk === undefined ? [] : [bestAsk]
+  } } };
 }
 
 export class ContinuousCollector {
@@ -49,6 +112,7 @@ export class ContinuousCollector {
   private startTask: Promise<void> | undefined;
   private stopTask: Promise<void> | undefined;
   private pulseTask: Promise<void> | undefined;
+  private finishTask: Promise<void> | undefined;
   private persistence: Promise<void> = Promise.resolve();
   private persistedFingerprint: string | undefined;
   private lastStateWriteAtMs: number | undefined;
@@ -144,7 +208,7 @@ export class ContinuousCollector {
     }, this.config.pulseIntervalMs);
   }
   private record(journal: CollectorJournal, input: RecordInput): JournalRecord {
-    const record = journal.record(input);
+    const record = journal.record(this.config.snapshotOnly ? compactSnapshotInput(input) : input);
     this.state.observe(record);
     if (this.compactStore) {
       if (record.source === "clob") {
@@ -217,6 +281,9 @@ export class ContinuousCollector {
       backgroundInitialSnapshots: true, snapshotBatchSize: 50, compactDiscoveryPages: true, pageSize: 10,
       absentBookCooldownMs: config.absentBookCooldownMs,
       compactStorageEnabled: config.compactStorageEnabled,
+      requireBookBeforeSubscription: config.requireBookBeforeSubscription,
+      excludedSubscriptionMarketTypes: config.excludedSubscriptionMarketTypes,
+      snapshotOnly: config.snapshotOnly,
       compactAnchorSnapshots: config.compactAnchorSnapshots
     }, dependencies);
     this.runtime = runtime;
@@ -271,28 +338,45 @@ export class ContinuousCollector {
       try {
         this.compactStore.flush();
         if (this.now() >= this.nextMaintenanceAtMs) {
-          this.compactStore.maintain(this.now());
-          // Compact mode keeps the book evidence in SQLite, so a sealed raw run
-          // is discovery/audit context rather than the record of the match:
-          // holding it for the final-result retention period is what filled the
-          // disk. The legacy path still needs the raw run to export.
-          const rawRetentionMs = this.config.compactStorageEnabled
-            ? this.config.rawRunRetentionHours * 3600_000
-            : this.config.tailRetentionDays * 24 * 3600_000;
-          await pruneRawRunDirectories(this.config.dataRoot, this.journal?.runId ?? null,
-            rawRetentionMs, this.now());
-          this.nextMaintenanceAtMs = this.now() + this.config.maintenanceIntervalMs;
+          if (this.config.requireBookBeforeSubscription && this.runtime?.status === "starting") {
+            // A book-presence preflight can legitimately take minutes. Running
+            // retention/vacuum/checkpoint against a multi-gigabyte compact store
+            // on the same event loop would block that preflight and make a
+            // healthy startup look stale. Defer the first pass until the
+            // capture loop has actually reached `running`.
+            this.nextMaintenanceAtMs = this.now() + this.config.maintenanceIntervalMs;
+          } else {
+            this.compactStore.maintain(this.now());
+            // Compact mode keeps the book evidence in SQLite, so a sealed raw
+            // run is discovery/audit context rather than the record of the
+            // match: holding it for the final-result retention period is what
+            // filled the disk. The legacy path still needs the raw run to export.
+            const rawRetentionMs = this.config.compactStorageEnabled
+              ? this.config.rawRunRetentionHours * 3600_000
+              : this.config.tailRetentionDays * 24 * 3600_000;
+            await pruneRawRunDirectories(this.config.dataRoot, this.journal?.runId ?? null,
+              rawRetentionMs, this.now());
+            this.nextMaintenanceAtMs = this.now() + this.config.maintenanceIntervalMs;
+          }
         }
         this.state.setCompactStorage(this.compactStore.snapshot());
       } catch (error) {
         this.state.issue("compact_storage", error, this.now());
-        this.pausedForDisk = true; this.state.mode = "paused_disk";
-        await this.runtime?.stop().catch(stopError => this.state.issue("capture", stopError));
-        await this.captureTask;
+        // Only a full disk/database is a disk pause. Anything else (SQLITE_BUSY,
+        // a transient I/O error) keeps capturing: a failed flush rolls back
+        // and keeps its rows pending, and maintenance stays due, so the next
+        // pulse retries both instead of stopping capture under a false label.
+        if (isStorageFull(error)) {
+          this.pausedForDisk = true; this.state.mode = "paused_disk";
+          await this.runtime?.stop().catch(stopError => this.state.issue("capture", stopError));
+          await this.captureTask;
+        }
       }
     }
     if (!this.pausedForDisk && this.journal && this.runtime?.status === "running") {
-      await this.refreshMissingFinish(this.journal);
+      // A prompt label still wins over the quiet-book fallback below and can
+      // archive this turn; a slow one finishes in the background.
+      await this.waitBriefly(this.beginFinishRefresh(this.journal), Math.min(FINISH_LOOKUP_PULSE_BUDGET_MS, this.config.pulseIntervalMs / 5));
       // A clock that never arrives must not cost the match. Games whose events
       // are retired and whose order book has been quiet past the grace period
       // fall back to their own last frame as the window end.
@@ -311,6 +395,23 @@ export class ContinuousCollector {
       else this.beginArchive(game, this.journal);
     }
     await this.persist();
+  }
+  /**
+   * Finish lookups are network calls that can each wait a full HTTP timeout
+   * behind a flaky proxy. Awaiting them held the heartbeat, state and archive
+   * turns for minutes and made a healthy supervisor look stale, so they run
+   * beside the pulse, one batch at a time.
+   */
+  private beginFinishRefresh(journal: CollectorJournal): Promise<void> {
+    this.finishTask ??= this.refreshMissingFinish(journal)
+      .catch(error => { if (!this.stopping) this.state.issue("finish_labels", error, this.now()); })
+      .finally(() => { this.finishTask = undefined; });
+    return this.finishTask;
+  }
+  private async waitBriefly(task: Promise<void>, timeoutMs: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([task, new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs); })]); }
+    finally { clearTimeout(timer); }
   }
   private beginCompression(): void {
     const controller = new AbortController();
@@ -349,7 +450,13 @@ export class ContinuousCollector {
         if (metadata) {
           const hash = createHash("sha256").update(JSON.stringify(metadata.raw)).digest("hex");
           const previous = this.compactMetadataHashes.get(metadata.eventId);
+          // Re-insert so the map stays in recency order, and forget the
+          // oldest events: a dropped hash only costs one duplicate record.
+          this.compactMetadataHashes.delete(metadata.eventId);
           this.compactMetadataHashes.set(metadata.eventId, hash);
+          if (this.compactMetadataHashes.size > COMPACT_METADATA_HASH_LIMIT) {
+            this.compactMetadataHashes.delete(this.compactMetadataHashes.keys().next().value!);
+          }
           if (previous === hash) return false;
         }
       }
@@ -583,6 +690,8 @@ export class ContinuousCollector {
       const response = await request(url, { timeoutMs: this.config.httpTimeoutMs, signal: this.cancellation.signal });
       if (this.stopping || this.journal !== journal) return;
       await journal.flush();
+      // The lookup runs beside the pulse, which may have retired this run.
+      if (this.stopping || this.journal !== journal) return;
       this.record(journal, { source: "gamma", kind: "http_request", data: { url, requestStartedAt, requestEndedAt: new Date(this.now()).toISOString(), response } });
       const at = this.now(), metadata = metadataFromRecord({ schemaVersion: 1, runId: journal.runId, sequence: 1,
         receivedAtMs: at, receivedAt: new Date(at).toISOString(), monotonicNs: "0", source: "gamma", kind: "event_metadata", data: { event: response } });
@@ -624,6 +733,7 @@ export class ContinuousCollector {
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.archiveCancellation?.abort(new Error("CONTINUOUS_STOPPED"));
     this.compressionCancellation?.abort(new Error("CONTINUOUS_STOPPED"));
+    await this.finishTask;
     await this.runtime?.stop().catch(error => this.state.issue("capture", error));
     await this.captureTask;
     await this.archiveTask;

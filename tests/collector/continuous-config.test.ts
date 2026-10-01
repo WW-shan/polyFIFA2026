@@ -41,6 +41,9 @@ describe("continuous configuration", () => {
       compressionTimeoutMs: 120_000,
       singleMatchOnly: true,
       compactStorageEnabled: false,
+      requireBookBeforeSubscription: false,
+      excludedSubscriptionMarketTypes: [],
+      snapshotOnly: false,
       compactAnchorSnapshots: false,
       tailWindowSeconds: 181,
       tailBufferSeconds: 30,
@@ -80,7 +83,7 @@ describe("continuous configuration", () => {
       lookbackHours: 0.25, aheadHours: 0, retryDelayMs: 5, exportTimeoutMs: 6,
       compressionEnabled: true, compressionIntervalMs: 7, compressionMaxSegments: 3, compressionTimeoutMs: 8,
       singleMatchOnly: false,
-      compactStorageEnabled: true, compactAnchorSnapshots: false, tailWindowSeconds: 181, tailBufferSeconds: 31, tailRetentionDays: 7,
+      compactStorageEnabled: true, requireBookBeforeSubscription: true, excludedSubscriptionMarketTypes: ["moneyline"], snapshotOnly: true, compactAnchorSnapshots: false, tailWindowSeconds: 181, tailBufferSeconds: 31, tailRetentionDays: 7,
       maxTailStoreBytes: 123456, rawRunRetentionHours: 3, maintenanceIntervalMs: 8,
       pendingFinishRetentionMs: 900_000, finishFollowupIntervalMs: 15_000, finishFollowupBatchSize: 8, finishAnchorGraceMs: 300_000,
       absentBookCooldownMs: 300_000,
@@ -102,6 +105,15 @@ describe("continuous configuration", () => {
     });
     expect(result.profiles).not.toBe(input.profiles);
     expect(result.profiles[0]).not.toBe(input.profiles[0]);
+  });
+
+  test("accepts an optional per-profile market-type filter and rejects empty entries", () => {
+    const result = continuousConfig({ profiles: [{ name: "soccer", tagId: "100350", marketTypes: [" moneyline "] }, { name: "tennis", tagId: "864" }] }, project);
+    expect(result.profiles).toEqual([{ name: "soccer", tagId: "100350", marketTypes: ["moneyline"] }, { name: "tennis", tagId: "864" }]);
+    for (const marketTypes of [[], [""], "moneyline", [1]]) {
+      expect(() => continuousConfig({ profiles: [{ name: "soccer", tagId: "100350", marketTypes }] } as unknown as Partial<ContinuousConfig>, project))
+        .toThrow("CONTINUOUS_CONFIG_INVALID");
+    }
   });
 
   test("ignores undefined overrides", () => {
@@ -132,6 +144,12 @@ describe("continuous configuration", () => {
     }
     for (const value of [0, 1, "true", null]) {
       expect(() => continuousConfig({ compactStorageEnabled: value } as unknown as Partial<ContinuousConfig>, project)).toThrow("compactStorageEnabled");
+      expect(() => continuousConfig({ requireBookBeforeSubscription: value } as unknown as Partial<ContinuousConfig>, project)).toThrow("requireBookBeforeSubscription");
+      expect(() => continuousConfig({ snapshotOnly: value } as unknown as Partial<ContinuousConfig>, project)).toThrow("snapshotOnly");
+    }
+    expect(continuousConfig({ excludedSubscriptionMarketTypes: [" moneyline ", "moneyline"] }, project).excludedSubscriptionMarketTypes).toEqual(["moneyline"]);
+    for (const value of [null, "moneyline", {}, [""], [1]]) {
+      expect(() => continuousConfig({ excludedSubscriptionMarketTypes: value } as unknown as Partial<ContinuousConfig>, project)).toThrow("excludedSubscriptionMarketTypes");
     }
   });
 

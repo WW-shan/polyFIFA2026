@@ -2,19 +2,31 @@
   "dataRoot": "data/collector/continuous",
   "profiles": [
     {
-      "name": "tennis",
-      "tagId": "864"
+      "name": "soccer",
+      "tagId": "100350"
     },
     {
-      "name": "table-tennis",
-      "tagId": "103767"
+      "name": "nfl",
+      "tagId": "450"
+    },
+    {
+      "name": "nba",
+      "tagId": "745"
+    },
+    {
+      "name": "nhl",
+      "tagId": "899"
+    },
+    {
+      "name": "tennis",
+      "tagId": "864"
     }
   ],
   "proxyUrl": "http://127.0.0.1:10808",
   "lookbackHours": 6,
   "aheadHours": 2,
   "discoveryIntervalMs": 30000,
-  "snapshotIntervalMs": 60000,
+  "snapshotIntervalMs": 10000,
   "httpTimeoutMs": 30000,
   "postFinishRetentionMs": 30000,
   "minFreeBytes": 21474836480,
@@ -24,13 +36,18 @@
   "singleMatchOnly": true,
   "port": 8765,
   "compactStorageEnabled": true,
+  "requireBookBeforeSubscription": true,
+  "excludedSubscriptionMarketTypes": [
+    "moneyline"
+  ],
+  "snapshotOnly": true,
   "compactAnchorSnapshots": true,
   "tailWindowSeconds": 181,
   "tailBufferSeconds": 30,
   "tailRetentionDays": 90,
   "maxTailStoreBytes": 34359738368,
   "rawRunRetentionHours": 24,
-  "maintenanceIntervalMs": 60000,
+  "maintenanceIntervalMs": 21600000,
   "pendingFinishRetentionMs": 900000,
   "finishFollowupIntervalMs": 15000,
   "finishFollowupBatchSize": 8,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { describeError } from "../polymarket/http.js";
 import { metadataFromRecord, observationsFromRecord, windowKeyForIdentity } from "./tail-context.js";
 import { objectValue } from "./replay-values.js";
 import { activeSnapshotTokens, isTerminalClearFrame } from "./book-evidence.js";
@@ -276,7 +277,8 @@ function recordIssueMessage(record: JournalRecord): string {
     const error = objectValue(data?.error);
     const batchId = typeof data?.batchId === "string" ? `${data.batchId}: ` : "";
     return `${batchId}${typeof error?.name === "string" ? error.name : "Error"}: ${
-      typeof error?.message === "string" ? error.message : "request failed"}`;
+      typeof error?.message === "string" ? error.message : "request failed"}${
+      typeof error?.cause === "string" ? `: ${error.cause}` : ""}`;
   }
   if (record.kind === "socket_error") {
     const message = typeof data?.message === "string" && data.message.trim().length > 0
@@ -298,7 +300,9 @@ function recordIssueMessage(record: JournalRecord): string {
     return counts.length === 0 ? code : `${code}: ${counts.join(", ")}`;
   }
   const nested = objectValue(data?.error);
-  if (typeof nested?.message === "string") return `${typeof nested.name === "string" ? nested.name : "Error"}: ${nested.message}`;
+  if (typeof nested?.message === "string") {
+    return `${typeof nested.name === "string" ? nested.name : "Error"}: ${nested.message}${typeof nested.cause === "string" ? `: ${nested.cause}` : ""}`;
+  }
   if (typeof data?.message === "string") return data.message;
   if (record.data instanceof Error) return `${record.data.name}: ${record.data.message}`;
   if (typeof record.data === "string") return record.data;
@@ -335,7 +339,9 @@ export class ContinuousState {
     this.runId = runId; this.runDirectory = runDirectory; this.rawBytes = 0; this.connections.clear();
   }
   issue(scope: string, error: unknown, atMs = Date.now()): void {
-    this.errors.push({ scope, atMs, message: (error instanceof Error ? error.message : String(error)).slice(0, 2000) });
+    // Keep the cause chain: a bare "fetch failed" hides whether it was a reset,
+    // a proxy refusal or a timeout.
+    this.errors.push({ scope, atMs, message: (error instanceof Error ? describeError(error) : String(error)).slice(0, 2000) });
     if (this.errors.length > 50) this.errors.shift();
   }
   setCompactStorage(status: CompactTailStoreStatus): void { this.compactStorage = structuredClone(status); }

@@ -1,3 +1,4 @@
+import { describeError } from "../polymarket/http.js";
 import { discoverSportsEvents, normalizeCollectorEvent, type CatalogDependencies, type CatalogOptions } from "./catalog.js";
 import type { SportProfile } from "./continuous-config.js";
 import { classifyMatchScope } from "./match-scope.js";
@@ -86,27 +87,6 @@ function profileDependencies(deps: CatalogDependencies): CatalogDependencies {
   };
 }
 
-function issueMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const name = error instanceof Error ? error.name : "Error";
-  const parts = [message.trim() || (name && name !== "Error" ? name : "request failed")];
-  const seen = new Set<unknown>([error]);
-  let cause = error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
-  for (let depth = 0; cause !== undefined && depth < 4 && !seen.has(cause); depth += 1) {
-    seen.add(cause);
-    if (cause instanceof Error) {
-      const causeMessage = cause.message.trim();
-      const code = typeof (cause as NodeJS.ErrnoException).code === "string" ? (cause as NodeJS.ErrnoException).code : undefined;
-      if (causeMessage || code) parts.push(`${causeMessage || cause.name}${code ? ` (${code})` : ""}`);
-      cause = (cause as Error & { cause?: unknown }).cause;
-    } else {
-      parts.push(String(cause));
-      cause = undefined;
-    }
-  }
-  return parts.join(": ").replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/]*@/gi, "$1[redacted]@").slice(0, 2000);
-}
-
 function singleMatchEvents(events: readonly CollectorEvent[], onIssue: (issue: DiscoveryIssue) => void): CollectorEvent[] {
   const scopes = new Map(events.map(event => [event.eventId, classifyMatchScope(event)]));
   const admitted = new Set<string>();
@@ -142,6 +122,28 @@ function singleMatchEvents(events: readonly CollectorEvent[], onIssue: (issue: D
   });
 }
 
+/** gameId -> allowed market types, or null once any unfiltered profile found the game. */
+type GameMarketFilter = Map<string, Set<string> | null>;
+
+function noteProfileGames(filter: GameMarketFilter, events: readonly CollectorEvent[], profile: SportProfile): void {
+  for (const event of events) {
+    if (event.gameId === null) continue;
+    const current = filter.get(event.gameId);
+    if (current === null) continue;
+    if (!profile.marketTypes) { filter.set(event.gameId, null); continue; }
+    filter.set(event.gameId, new Set([...(current ?? []), ...profile.marketTypes]));
+  }
+}
+
+function applyMarketFilter(events: CollectorEvent[], filter: GameMarketFilter): CollectorEvent[] {
+  return events.flatMap(event => {
+    const allowed = event.gameId === null ? undefined : filter.get(event.gameId);
+    if (!allowed) return [event];
+    const markets = event.markets.filter(market => allowed.has(String(market.raw.sportsMarketType ?? "")));
+    return markets.length ? [markets.length === event.markets.length ? event : { ...event, markets }] : [];
+  });
+}
+
 export async function discoverContinuousEvents(
   options: CatalogOptions,
   deps: CatalogDependencies,
@@ -150,6 +152,7 @@ export async function discoverContinuousEvents(
 ): Promise<CollectorEvent[]> {
   // Every invocation contains only this sweep's completed, fresh responses.
   const fresh = new EventIndex();
+  const marketFilter: GameMarketFilter = new Map();
   let successfulProfiles = 0;
   for (const profile of profiles) {
     const profileOptions = { ...options, tagId: profile.tagId, sports: [], dateWindow: "game-start" as const };
@@ -157,9 +160,10 @@ export async function discoverContinuousEvents(
       try {
         const roots = await discoverSportsEvents(profileOptions, profileDependencies(deps));
         fresh.merge(roots);
+        noteProfileGames(marketFilter, roots, profile);
         successfulProfiles += 1;
       } catch (error) {
-        onIssue({ scope: "profile", key: profile.name, message: issueMessage(error) });
+        onIssue({ scope: "profile", key: profile.name, message: describeError(error) });
       }
       continue;
     }
@@ -181,9 +185,10 @@ export async function discoverContinuousEvents(
     for (const half of halves) {
       if (half.status === "fulfilled") {
         fresh.merge(half.value);
+        noteProfileGames(marketFilter, half.value, profile);
         profileSucceeded = true;
       } else {
-        onIssue({ scope: "profile", key: profile.name, message: issueMessage(half.reason) });
+        onIssue({ scope: "profile", key: profile.name, message: describeError(half.reason) });
       }
     }
     if (profileSucceeded) successfulProfiles += 1;
@@ -209,11 +214,12 @@ export async function discoverContinuousEvents(
       try {
         fresh.merge(result.value);
       } catch (error) {
-        onIssue({ scope: "related", key: gameEntries[index]![0], message: issueMessage(error) });
+        onIssue({ scope: "related", key: gameEntries[index]![0], message: describeError(error) });
       }
     } else {
-      onIssue({ scope: "related", key: gameEntries[index]![0], message: issueMessage(result.reason) });
+      onIssue({ scope: "related", key: gameEntries[index]![0], message: describeError(result.reason) });
     }
   }
-  return options.singleMatchOnly ? singleMatchEvents(fresh.events, onIssue) : fresh.events;
+  // Filter after scope classification, which reads the full market list.
+  return applyMarketFilter(options.singleMatchOnly ? singleMatchEvents(fresh.events, onIssue) : fresh.events, marketFilter);
 }

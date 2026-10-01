@@ -102,8 +102,10 @@ export async function runStorageCli(args: readonly string[], options: { signal?:
       if (limit !== undefined && (!/^[1-9]\d*$/.test(limitText!) || !Number.isSafeInteger(limit))) throw new Error("STORAGE_CLI_INVALID: --limit must be a positive integer");
       options.signal?.throwIfAborted();
       const resolvedDataRoot = await existingCompactDataRoot(dataRoot);
+      // The collector may be writing this database right now. A read-write open
+      // would set its pragmas and rewrite the schema version under it.
       const store = await openCompactTailStore({ dataRoot: resolvedDataRoot, tailWindowMs: 181_000, bufferMs: 30_000,
-        retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3 });
+        retentionMs: 30 * 24 * 3600_000, maxBytes: 8 * 1024 ** 3, readOnly: true });
       try {
         const requested = values.get("--game-key");
         const targets = requested ?? store.listFinalizedMatches().map(match => match.gameKey).slice(0, limit ?? undefined);

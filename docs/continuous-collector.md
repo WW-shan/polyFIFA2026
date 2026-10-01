@@ -23,7 +23,7 @@ npm run collect:stop
 
 前台调试用 `npm run collect:continuous`，退出该终端会停止前台实例。不要与后台实例重复运行；数据目录的独占锁会拒绝重复写入。
 
-配置：[collector.config.json](../collector.config.json)。当前默认网球 `864`、乒乓球 `103767`，按比赛开赛时间范围发现新事件，包含低／零成交量、双方方向、关联子盘口；之后持续跟踪已发现的事件。其他球类可加入已核验的 Gamma 标签。代理 `http://127.0.0.1:10808` 是本机配置，不是通用互联网地址。换机器应调整代理、存储目录及运行方式。
+配置：[collector.config.json](../collector.config.json)。当前采集足球 `100350`、NFL `450`、NBA `745`、NHL `899` 和网球 `864`。每个 profile 已省略 `marketTypes`，因此保留事件下全部盘口，包括胜负、让分、大小、盘胜者等；乒乓球通过网球 tag 发现，不再单独配置。全盘口会显著增加订阅 token、原始落盘和 compact staging 开销。`requireBookBeforeSubscription: true` 会在打开 CLOB WebSocket 前先用 `/books` 探测一次订单簿，只订阅实际有 book 的 token；没有 book 的 token 仍保留在 REST anchor 轮换中，冷却后再探测。`excludedSubscriptionMarketTypes` 默认排除 `moneyline`，因为它的更新频率最高且不是本次研究的价差目标；moneyline 仍通过 REST anchor 采样。当前进一步启用了 `snapshotOnly: true`：不订阅 CLOB 全深度 market stream，只按 `snapshotIntervalMs`（当前 10 秒）用 `/books` 采样，并把每个 token 的响应压缩成最优买价/卖价一层后写入 compact store。这是为了在“所有盘口”规模下让 `quote-touch-assumed` 回测仍能持续采集；没有双边报价的盘口会进入冷却并在之后重试。发现仍按比赛开赛时间范围进行，包括低／零成交量、双方方向和关联子盘口，之后持续跟踪已发现的事件。其他球类可加入已核验的 Gamma 标签。代理 `http://127.0.0.1:10808` 是本机配置，不是通用互联网地址。换机器应调整代理、存储目录及运行方式。
 
 配置修改后先 `collect:stop` 再 `collect:start`。改变数据目录不会自动迁移旧文件。macOS 开机登录后服务可启动；本机保持空闲不休眠，但合盖、关机、注销或网络中断仍会造成缺口。这些缺口不能用插值伪装成完整行情。
 
@@ -500,7 +500,7 @@ Gamma 的 busy tag（尤其 tennis tag 864）在默认 `limit=100` 下单页可�
 
 边界：`kickstart` 重新执行的是**已加载**的 plist 定义，所以 `restart` 会重新读取 `collector.config.json`（采集器每次启动都读它），但不会改写 plist 本身。改变 plist 级别的选项（`--keep-awake`、`--project-dir`、`--config`）仍然要先 `collect:stop` 再 `collect:start`，与 `start` 对已加载服务保持幂等不改写的行为一致。
 
-守护的卡死判定同时看两路时间：`state.json`/HTTP 的 `updatedAtMs`（进程还活着吗）和 `lastRecordAtMs`（还有没有数据进来）。任一超过 300 秒、或 `starting` 停留超过 900 秒，就触发一次重启；`restart_collector` 自带 300 秒冷却，避免刷屏式重启。
+守护的卡死判定同时看两路时间：`state.json`/HTTP 的 `updatedAtMs`（进程还活着吗）和 `lastRecordAtMs`（还有没有数据进来）。`updatedAtMs` 超过 300 秒、`collecting` 模式下 `lastRecordAtMs` 超过 300 秒（`paused_disk` 是有意停流，不算），或连续停留在 `starting` 超过 900 秒（按守护观察到的进入该模式的时间计，状态文件新鲜也照样计时），就触发一次重启；`restart_collector` 自带 300 秒冷却，避免刷屏式重启。`low_disk`、`mode_not_collecting`、`staging_empty` 等持续性告警在条件出现时写一条，之后最多每 300 秒重复一次，避免把重启记录挤出轮转日志。`tools/collector-live-watch.py` 同样遵守 `.collector-stopped`，补救命令也是 `collect:restart`。
 
 同时补上此前"看得见却不说"的静默故障：
 

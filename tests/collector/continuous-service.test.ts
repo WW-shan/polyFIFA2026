@@ -613,6 +613,24 @@ describe("read-only continuous service status", () => {
 });
 
 
+describe("collector error history", () => {
+  test("dates each saved collector error so an old outage does not read as current", async () => {
+    const input = await fixture();
+    input.deps.now = () => 1_800_000;
+    await startCollectorService(input.options, input.deps);
+    await saveState(input, { updatedAtMs: 1_795_000, lastRecordAtMs: 1_799_000, errors: [
+      { atMs: 300_000, scope: "finish_labels", message: "fetch failed: other side closed (UND_ERR_SOCKET)" },
+      { atMs: 1_790_000, scope: "socket_error", message: "Error: proxy tunnel reset (ECONNRESET)" }
+    ] });
+    const result = await collectorServiceStatus(input.options, input.deps);
+    expect(result.errors).toEqual([
+      "1970-01-01T00:05:00.000Z (25m ago) finish_labels: fetch failed: other side closed (UND_ERR_SOCKET)",
+      "1970-01-01T00:29:50.000Z (10s ago) socket_error: Error: proxy tunnel reset (ECONNRESET)"
+    ]);
+    expect(result.lastErrorAgeMs).toBe(10_000);
+  });
+});
+
 describe("receipt freshness is distinct from service process identity", () => {
   test.each([null, 40_000])("marks a matching live PID stale without recent receipts: %s", async lastRecordAtMs => {
     const input = await fixture();

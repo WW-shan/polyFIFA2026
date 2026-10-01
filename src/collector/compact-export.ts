@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { exportTail } from "./tail-export.js";
 import type { TailExportResult } from "./tail-export.js";
-import { objectValue } from "./replay-values.js";
+import { decimal, frameType, objectValue, timestamp } from "./replay-values.js";
 import type { CompactStoredRecord, CompactTailStore } from "./continuous-tail-store.js";
 import { isFallbackFinishSource, isTailFinishSource } from "./tail-types.js";
 import type { JournalRecord } from "./types.js";
@@ -85,8 +85,14 @@ function eventDocument(metadata: Record<string, unknown>, finishedAtMs: number,
  * few minutes, by which time the subscription's original `book` push is long
  * pruned, so without this conversion a finalized match replays to zero valid
  * seconds no matter how complete its anchors are.
+ *
+ * The REST `timestamp` is returned separately rather than copied into the
+ * frame: it is the time of the book's last change, in the same clock domain as
+ * the WebSocket event times, but a snapshot can still be older than deltas the
+ * stream already delivered, or newer than deltas still in flight. Whether it
+ * may be applied, and with which source time, depends on the stream around it.
  */
-function anchorBookFrame(record: CompactStoredRecord): Record<string, unknown> | undefined {
+function anchorBookFrame(record: CompactStoredRecord): { frame: Record<string, unknown>; sourceTime: bigint | undefined } | undefined {
   const data = objectValue(record.data);
   const response = objectValue(data?.response);
   if (!data || !response) return undefined;
@@ -94,28 +100,22 @@ function anchorBookFrame(record: CompactStoredRecord): Record<string, unknown> |
     : typeof data.tokenId === "string" ? data.tokenId : undefined;
   if (!assetId || !Array.isArray(response.bids) || !Array.isArray(response.asks)) return undefined;
   const frame: Record<string, unknown> = { event_type: "book", asset_id: assetId, bids: response.bids, asks: response.asks };
-  // `market` and `hash` identify the depth this snapshot carries. The REST
-  // `timestamp` is deliberately dropped: it is the exchange's REST clock,
-  // measured ~1s ahead of our receipt while live WebSocket event times ran
-  // ~3s behind it. Copying it into the synthetic frame put the replay's
-  // per-token ordering watermark into a foreign clock domain, so the next
-  // live delta looked stale (`out_of_order_delta`) and the token stayed
-  // invalid (`snapshot_required` for every following delta) until a full
-  // WebSocket book happened to arrive - tens of seconds of lost coverage per
-  // anchor. The anchor's own time stays on the `book_snapshot` evidence row.
+  // `market` and `hash` identify the depth this snapshot carries.
   for (const from of ["market", "hash"] as const) {
     if (response[from] !== undefined) frame[from] = response[from];
   }
-  return frame;
+  return { frame, sourceTime: timestamp(response.timestamp) };
+}
+
+/** Every object frame of a stored CLOB message, which may batch several. */
+function clobFrames(data: unknown): Record<string, unknown>[] {
+  return (Array.isArray(data) ? data : [data]).map(objectValue)
+    .filter((frame): frame is Record<string, unknown> => frame !== undefined);
 }
 
 function clobFrameTokens(data: unknown): string[] {
-  const parsed = objectValue(data);
-  const frames = Array.isArray(parsed) ? parsed : [parsed];
   const tokens = new Set<string>();
-  for (const value of frames) {
-    const frame = objectValue(value);
-    if (!frame) continue;
+  for (const frame of clobFrames(data)) {
     if (typeof frame.asset_id === "string") tokens.add(frame.asset_id);
     if (Array.isArray(frame.price_changes)) for (const change of frame.price_changes) {
       const tokenId = objectValue(change)?.asset_id;
@@ -124,6 +124,91 @@ function clobFrameTokens(data: unknown): string[] {
   }
   return [...tokens];
 }
+
+interface DepthChange { sourceTime: bigint; side: "bids" | "asks"; price: string; size: string }
+interface DepthAssertion { tokenId: string; sourceTime: bigint | undefined; book: boolean; change?: DepthChange }
+
+/**
+ * The per-token source times a stored CLOB message asserts for the order book,
+ * mirroring which fields `replay.ts` orders books and deltas by.
+ */
+function depthAssertions(data: unknown): DepthAssertion[] {
+  const assertions: DepthAssertion[] = [];
+  for (const frame of clobFrames(data)) {
+    const type = frameType(frame);
+    if ((type === "book" || (!type && frame.bids !== undefined && frame.asks !== undefined)) && typeof frame.asset_id === "string") {
+      assertions.push({ tokenId: frame.asset_id, sourceTime: timestamp(frame.timestamp), book: true });
+    } else if (type === "price_change" && Array.isArray(frame.price_changes)) {
+      for (const item of frame.price_changes) {
+        const change = objectValue(item);
+        if (typeof change?.asset_id !== "string") continue;
+        const sourceTime = timestamp(change.timestamp ?? frame.timestamp);
+        const side = String(change.side ?? "").toUpperCase();
+        const assertion: DepthAssertion = { tokenId: change.asset_id, sourceTime, book: false };
+        if (sourceTime !== undefined && ["BUY", "SELL", "BID", "ASK"].includes(side)
+          && typeof change.price === "string" && typeof change.size === "string") {
+          assertion.change = { sourceTime, side: side === "BUY" || side === "BID" ? "bids" : "asks", price: change.price, size: change.size };
+        }
+        assertions.push(assertion);
+      }
+    }
+  }
+  return assertions;
+}
+
+/** Recent deltas kept per book, bounded so a silent anchor pass cannot grow them without limit. */
+const MAX_PENDING_CHANGES = 4_096;
+const PENDING_CHANGE_SPAN = 300_000n;
+
+/**
+ * What the replay will know about one connection's book for one token when an
+ * anchor arrives.
+ *
+ * `watermark` is the newest source time the stream asserted. Recent deltas
+ * are kept too, so a snapshot that is older than the stream can be brought
+ * forward to it instead of reverting it; `forgottenThrough` is the newest
+ * source time among the deltas no longer kept.
+ */
+interface DepthState { seeded: boolean; watermark?: bigint; pending: DepthChange[]; forgottenThrough?: bigint }
+
+/**
+ * A snapshot's depth advanced by every retained delta at or after its source
+ * time, or undefined when a level cannot be read.
+ *
+ * Deltas carry absolute level sizes, so re-applying those with the snapshot's
+ * own timestamp is harmless even if the snapshot already contained them.
+ */
+function advancedBook(frame: Record<string, unknown>, changes: readonly DepthChange[], from: bigint): { bids: unknown[]; asks: unknown[] } | undefined {
+  const sides = { bids: new Map<string, unknown>(), asks: new Map<string, unknown>() };
+  for (const side of ["bids", "asks"] as const) {
+    for (const item of frame[side] as unknown[]) {
+      const price = decimal(objectValue(item)?.price, true);
+      if (!price) return undefined;
+      sides[side].set(price.key, item);
+    }
+  }
+  for (const change of changes) {
+    if (change.sourceTime < from) continue;
+    const price = decimal(change.price, true), size = decimal(change.size);
+    if (!price || !size) return undefined;
+    if (size.key === "0") sides[change.side].delete(price.key);
+    else sides[change.side].set(price.key, { price: change.price, size: change.size });
+  }
+  return { bids: [...sides.bids.values()], asks: [...sides.asks.values()] };
+}
+
+/**
+ * Connection ids are per-process counters (`clob-7-e1`) that every collector
+ * run starts again, so a tail spanning a restart holds two unrelated
+ * connections under one id. Without the run prefix the old run's
+ * `connection_close` permanently closes the id and the replay rejects every
+ * book the new run delivers on it.
+ */
+function runConnection(record: CompactStoredRecord): string | undefined {
+  return record.connectionId === undefined ? undefined : `${record.runId}/${record.connectionId}`;
+}
+
+const CLOSING_KINDS = ["connection_close", "connection_gap", "connection_timeout", "heartbeat_timeout"];
 
 /**
  * Rebuild a replayable journal for one finalized compact match.
@@ -142,71 +227,177 @@ export async function exportCompactMatch(store: CompactTailStore, gameKey: strin
   }
   const windowSeconds = holdingWindowSeconds + ENTRY_REFERENCE_SECONDS;
   if (!Number.isFinite(maxFeedSilenceMs) || maxFeedSilenceMs <= 0) throw new Error("COMPACT_EXPORT_OPTIONS_INVALID: maxFeedSilenceMs");
-  const coverage = store.readMatchCoverage(gameKey);
+  // One read snapshot: the collector keeps committing while an export runs,
+  // and coverage, identity and frames must describe the same finalized tail.
+  const { coverage, storedMetadata, records } = store.readConsistent(() => ({
+    coverage: store.readMatchCoverage(gameKey),
+    storedMetadata: store.readMatchMetadata(gameKey),
+    records: store.readFinalized(gameKey)
+  }));
   if (!coverage) throw new Error("COMPACT_EXPORT_UNKNOWN_MATCH: " + gameKey);
-  const metadata = store.readMatchMetadata(gameKey) ?? options.metadataOverride ?? null;
+  const metadata = storedMetadata ?? options.metadataOverride ?? null;
   if (!metadata) throw new Error("COMPACT_EXPORT_NO_METADATA: " + gameKey);
-  const records = store.readFinalized(gameKey);
   if (records.length === 0) throw new Error("COMPACT_EXPORT_EMPTY: " + gameKey);
 
   const runId = safeRunId(gameKey);
   const firstMs = records[0]!.receivedAtMs;
   let sequence = 0;
+  let monotonicNs = 0n;
   const lines: string[] = [];
   const emit = (source: JournalRecord["source"], kind: string, receivedAtMs: number, data: unknown, connectionId?: string): void => {
     sequence += 1;
+    // Records keep their original receipt times, which a tolerated wall-clock
+    // backstep can move backwards; the monotonic clock never does, so the
+    // catalog can flag the backstep instead of the journal being unreadable.
+    const candidate = BigInt(receivedAtMs - firstMs) * 1_000_000n + BigInt(sequence);
+    monotonicNs = candidate > monotonicNs ? candidate : monotonicNs + 1n;
     const envelope: Record<string, unknown> = { schemaVersion: 1, runId, sequence,
       receivedAt: new Date(receivedAtMs).toISOString(), receivedAtMs,
-      monotonicNs: String((receivedAtMs - firstMs) * 1_000_000 + sequence), source, kind, data };
+      monotonicNs: String(monotonicNs), source, kind, data };
     if (connectionId !== undefined) envelope.connectionId = connectionId;
     lines.push(JSON.stringify(envelope));
   };
 
-  const observedConnection = records.map(record => record.kind === "ws_message" ? record.connectionId : undefined)
-    .find((value): value is string => value !== undefined);
-  const fallbackConnection = observedConnection ?? SYNTHETIC_CONNECTION;
+  // Where each record's run next delivers WebSocket depth, and the source time
+  // of every later depth frame per connection and token. An anchor that
+  // arrives before any live frame seeds the connection its deltas will land
+  // on, and one whose REST time is ahead of deltas still in flight must not
+  // stamp that time onto the book, or each of those deltas looks out of order.
+  const nextRunConnection: Array<string | undefined> = new Array(records.length);
+  const upcoming = new Map<string, Array<{ index: number; sourceTime: bigint }>>();
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index]!;
+    const later = records[index + 1];
+    const connection = record.source === "clob" && record.kind === "ws_message" ? runConnection(record) : undefined;
+    nextRunConnection[index] = connection ?? (later?.runId === record.runId ? nextRunConnection[index + 1] : undefined);
+  }
+  records.forEach((record, index) => {
+    const connection = runConnection(record);
+    if (record.source !== "clob" || record.kind !== "ws_message" || connection === undefined) return;
+    for (const { tokenId, sourceTime } of depthAssertions(record.data)) {
+      if (sourceTime === undefined) continue;
+      const key = connection + "\n" + tokenId;
+      const list = upcoming.get(key) ?? [];
+      list.push({ index, sourceTime });
+      upcoming.set(key, list);
+    }
+  });
+  const cursors = new Map<string, number>();
+  const nextDepthTime = (connection: string, tokenId: string, index: number): bigint | undefined => {
+    const key = connection + "\n" + tokenId;
+    const list = upcoming.get(key);
+    if (list === undefined) return undefined;
+    let cursor = cursors.get(key) ?? 0;
+    while (cursor < list.length && list[cursor]!.index <= index) cursor++;
+    cursors.set(key, cursor);
+    return list[cursor]?.sourceTime;
+  };
+
   const activeConnections = new Set<string>();
   const lastConnectionByToken = new Map<string, string>();
+  const depth = new Map<string, Map<string, DepthState>>();
+  const depthState = (connection: string, tokenId: string): DepthState => {
+    const states = depth.get(connection) ?? new Map<string, DepthState>();
+    depth.set(connection, states);
+    const state = states.get(tokenId) ?? { seeded: false, pending: [] };
+    states.set(tokenId, state);
+    return state;
+  };
   let lastClobConnection: string | undefined;
-  let sawLifecycle = false;
+  let currentRun: string | undefined;
 
   emit("collector", "session_start", firstMs, { config: { runId }, status: "starting", startedAt: new Date(firstMs).toISOString() });
   emit("gamma", "event_metadata", firstMs, { event: eventDocument(metadata, coverage.finishedAtMs, coverage.finishAnchor) });
 
   let anchorFrames = 0;
-  for (const record of records) {
-    if (record.source === "collector" && record.connectionId) {
-      sawLifecycle = true;
-      if (record.kind === "connection_open") activeConnections.add(record.connectionId);
-      else if (["connection_close", "connection_gap", "connection_timeout", "heartbeat_timeout"].includes(record.kind)) activeConnections.delete(record.connectionId);
+  for (const [index, record] of records.entries()) {
+    if (record.runId !== currentRun) {
+      // The process that owned the previous run's sockets is gone; none of
+      // them can carry a book for this run.
+      currentRun = record.runId;
+      activeConnections.clear();
+      lastClobConnection = undefined;
+      lastConnectionByToken.clear();
     }
-    if (record.source === "clob" && record.kind === "ws_message" && record.connectionId) {
-      activeConnections.add(record.connectionId);
-      lastClobConnection = record.connectionId;
-      for (const tokenId of clobFrameTokens(record.data)) lastConnectionByToken.set(tokenId, record.connectionId);
+    const connection = runConnection(record);
+    if (record.source === "collector" && connection !== undefined) {
+      if (record.kind === "connection_open") { activeConnections.add(connection); depth.delete(connection); }
+      else if (CLOSING_KINDS.includes(record.kind)) { activeConnections.delete(connection); depth.delete(connection); }
+    }
+    if (record.source === "clob" && record.kind === "ws_message" && connection !== undefined) {
+      activeConnections.add(connection);
+      lastClobConnection = connection;
+      for (const tokenId of clobFrameTokens(record.data)) lastConnectionByToken.set(tokenId, connection);
+      for (const { tokenId, sourceTime, book, change } of depthAssertions(record.data)) {
+        const state = depthState(connection, tokenId);
+        if (book) state.seeded = true;
+        if (sourceTime !== undefined && (state.watermark === undefined || sourceTime > state.watermark)) state.watermark = sourceTime;
+        if (book) continue;
+        // An unordered or unreadable delta cannot be re-applied later.
+        if (change === undefined) { state.forgottenThrough = state.watermark ?? 0n; continue; }
+        state.pending.push(change);
+        while (state.pending.length > MAX_PENDING_CHANGES || state.pending[0]!.sourceTime < state.watermark! - PENDING_CHANGE_SPAN) {
+          const forgotten = state.pending.shift()!.sourceTime;
+          if (state.forgottenThrough === undefined || forgotten > state.forgottenThrough) state.forgottenThrough = forgotten;
+        }
+      }
     }
     if (record.kind === "book_snapshot") {
-      const frame = anchorBookFrame(record);
-      if (frame === undefined) continue;
-      const tokenId = typeof frame.asset_id === "string" ? frame.asset_id : undefined;
-      const preferred = tokenId === undefined ? undefined : lastConnectionByToken.get(tokenId);
-      const activeLast = [...activeConnections].at(-1);
-      const anchorConnection = preferred !== undefined && (!sawLifecycle || activeConnections.has(preferred)) ? preferred
-        : lastClobConnection !== undefined && (!sawLifecycle || activeConnections.has(lastClobConnection)) ? lastClobConnection
-        : sawLifecycle ? activeLast ?? SYNTHETIC_CONNECTION : fallbackConnection;
-      // Keep the anchor as audit evidence, then seed the active connection's book.
-      emit("clob", "book_snapshot", record.receivedAtMs, record.data);
+      const anchor = anchorBookFrame(record);
+      if (anchor === undefined) continue;
+      const tokenId = anchor.frame.asset_id as string;
+      const preferred = lastConnectionByToken.get(tokenId);
+      const anchorConnection = preferred !== undefined && activeConnections.has(preferred) ? preferred
+        : lastClobConnection !== undefined && activeConnections.has(lastClobConnection) ? lastClobConnection
+        : [...activeConnections].at(-1) ?? nextRunConnection[index] ?? SYNTHETIC_CONNECTION;
+      const state = depthState(anchorConnection, tokenId);
+      const { sourceTime } = anchor;
+      // The anchor stays audit evidence whether or not it seeds a book. It is
+      // emitted *after* the frame it produces: in a snapshot-only tail the
+      // snapshot is the only depth evidence, so the audit can only compare the
+      // reconstructed book with the very snapshot that carried it. Recording
+      // the evidence first left every audit "not comparable" and excluded every
+      // trial from the backtest.
+      const evidence = (): void => { emit("clob", "book_snapshot", record.receivedAtMs, record.data); };
+      // REST can answer ~seconds after the stream moved on. Replaying such a
+      // snapshot as a full book reverts every delta newer than it, so a
+      // snapshot older than the book's watermark is applied only once those
+      // deltas are re-applied on top of it, stamped with the stream's own
+      // time. That still repairs a live book the snapshot audit disproved, and
+      // seeds one whose deltas the replay had to drop for want of a book.
+      if (sourceTime !== undefined && state.watermark !== undefined && sourceTime < state.watermark) {
+        if (state.forgottenThrough !== undefined && state.forgottenThrough >= sourceTime) { evidence(); continue; }
+        const advanced = advancedBook(anchor.frame, state.pending, sourceTime);
+        if (advanced === undefined) { evidence(); continue; }
+        // The snapshot's hash names its own state, not the advanced one.
+        const { hash: _stale, ...identity } = anchor.frame;
+        emit("clob", "ws_message", record.receivedAtMs, { ...identity, ...advanced, timestamp: String(state.watermark) }, anchorConnection);
+        state.seeded = true;
+        anchorFrames += 1;
+        evidence();
+        continue;
+      }
+      const following = sourceTime === undefined ? undefined : nextDepthTime(anchorConnection, tokenId, index);
+      const ordered = sourceTime !== undefined && (following === undefined || following >= sourceTime);
+      // Without a source time that orders against the stream the snapshot
+      // cannot prove it is newer than a live book, so it only seeds a book the
+      // connection does not have yet.
+      if (!ordered && state.seeded) { evidence(); continue; }
+      const frame = ordered ? { ...anchor.frame, timestamp: String(sourceTime) } : anchor.frame;
       emit("clob", "ws_message", record.receivedAtMs, frame, anchorConnection);
+      state.seeded = true;
+      if (ordered && (state.watermark === undefined || sourceTime! > state.watermark)) state.watermark = sourceTime;
       anchorFrames += 1;
+      evidence();
       continue;
     }
-    emit(record.source, record.kind, record.receivedAtMs, record.data, record.connectionId);
+    emit(record.source, record.kind, record.receivedAtMs, record.data, connection);
   }
   // A repaired `book-quiet` boundary can precede the terminal clearing frame
   // that is still retained as evidence. The journal must remain monotonic, so
   // close the run after every emitted record while the finish fact continues
   // to define the replay window end.
-  const sessionEndAtMs = Math.max(coverage.finishedAtMs, records.at(-1)?.receivedAtMs ?? coverage.finishedAtMs);
+  const sessionEndAtMs = records.reduce((latest, record) => Math.max(latest, record.receivedAtMs), coverage.finishedAtMs);
   emit("collector", "session_end", sessionEndAtMs, { status: "stopped", endedAt: new Date(sessionEndAtMs).toISOString() });
 
   const workRoot = options.workDirectory === undefined

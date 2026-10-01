@@ -384,6 +384,19 @@ describe("persistent continuous capture observations", () => {
       .toEqual(["book_snapshot_batch_error", "book_snapshot_batch_error"]);
   });
 
+  test("keeps the transport cause of a generic fetch failure in recorded issues", () => {
+    const state = new ContinuousState("/capture", 8765);
+    const tunnel = Object.assign(new Error("Proxy response (502) !== 200 when HTTP Tunneling"), { code: "UND_ERR_PRX_CONN" });
+    state.issue("finish_labels", new TypeError("fetch failed", { cause: tunnel }), 1_000);
+    state.observe(journalRecord(2, 2_000, "clob", "http_error", {
+      batchId: "run:books:8", error: { name: "TypeError", message: "fetch failed", cause: "other side closed (UND_ERR_SOCKET)" }
+    }));
+    expect(state.snapshot().errors).toEqual([
+      { atMs: 1_000, scope: "finish_labels", message: "fetch failed: Proxy response (502) !== 200 when HTTP Tunneling (UND_ERR_PRX_CONN)" },
+      { atMs: 2_000, scope: "http_error", message: "run:books:8: TypeError: fetch failed: other side closed (UND_ERR_SOCKET)" }
+    ]);
+  });
+
   test("summarizes transport failures without dumping request payloads or duplicate discovery records", () => {
     const state = new ContinuousState("/capture", 8765);
     state.observe(journalRecord(1, 1_000, "clob", "http_error", {

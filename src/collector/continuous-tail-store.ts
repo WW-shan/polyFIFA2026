@@ -58,6 +58,11 @@ export interface CompactTailStoreOptions {
    * continuous window. Defaults to `DEFAULT_MAX_FEED_SILENCE_MS`.
    */
   maxFeedSilenceMs?: number;
+  /**
+   * Open for reading only: no pragmas, no schema migration, no writes. Export
+   * tooling reads the live collector's database and must not change it.
+   */
+  readOnly?: boolean;
   now?: () => number;
 }
 
@@ -104,6 +109,25 @@ export interface CompactStoredRecord {
   connectionId?: string;
 }
 
+/**
+ * Cap SQLite applies to the write-ahead log after a completed checkpoint.
+ * Without an explicit limit a WAL that once grew during a burst keeps its
+ * high-water mark forever, because SQLite only returns the space to the file
+ * system on an explicit TRUNCATE checkpoint or when its last connection closes.
+ */
+export const WAL_SIZE_LIMIT_BYTES = 64 * 1024 ** 2;
+/** Attempt a truncating checkpoint when the WAL file exceeds this size. */
+const WAL_TRUNCATE_THRESHOLD_BYTES = 256 * 1024 ** 2;
+/** Routine truncating-checkpoint cadence; a blocked attempt retries next pass. */
+const WAL_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
+/**
+ * `COUNT(*) FROM tail_records` scans the whole composite primary key (about
+ * five seconds on the September 2026 store) and runs on the collector's only
+ * thread, so the status snapshot reuses a recent count instead of rescanning
+ * on every maintenance pass.
+ */
+const FINALIZED_COUNT_TTL_MS = 5 * 60_000;
+
 export interface CompactTailStoreStatus {
   databasePath: string;
   databaseBytes: number;
@@ -123,6 +147,12 @@ export interface CompactTailStoreStatus {
   retentionMs: number;
   maxBytes: number;
   pendingFinishMs: number;
+  /** Size of the `-wal` file, the part of the store the byte cap does not see. */
+  walBytes: number;
+  /** SQLite `journal_size_limit`; -1 means the WAL is never trimmed by SQLite. */
+  walLimitBytes: number;
+  /** True when the last truncating checkpoint could not run because of a reader. */
+  walCheckpointBusy: boolean;
 }
 
 interface PendingRecord {
@@ -213,28 +243,37 @@ export class CompactTailStore {
   private readonly redundantKeepAliveMs: number;
   private readonly maxFeedSilenceMs: number;
   private readonly now: () => number;
+  private readonly readOnly: boolean;
   private readonly pending: PendingRecord[] = [];
-  private readonly lastHashByGame = new Map<string, { hash: string; atMs: number }>();
   /**
-   * Range over which collapsed frames prove the order book never moved.
+   * Last stored payload per game and stream. Sports and CLOB frames interleave
+   * freely, so one shared chain let a repeated score collapse as if it were a
+   * repeated book, and a score between two identical books broke their chain.
+   */
+  private readonly lastHashByGame = new Map<string, Map<JournalRecord["source"], { hash: string; atMs: number }>>();
+  /**
+   * Ranges over which collapsed order-book frames prove the book never moved.
    *
    * `redundantFor` only drops a frame that is byte-identical to the one stored
-   * immediately before it, so a dropped frame at `T` proves the game's payload
-   * held its value on `[P, T]` where `P` is that earlier stored receipt. The
-   * chains are contiguous - each stored frame that ends a chain starts the next
-   * - so the union of every chain for a game is the single interval
-   * `[dedupCoveredFromMs, dedupCoveredThroughMs]`. That is what lets
+   * immediately before it on the same stream, so a dropped frame at `T` proves
+   * the game's CLOB payload held its value on `[P, T]` where `P` is that
+   * earlier stored receipt. A keep-alive rewrite of the same bytes continues
+   * the chain; any different frame ends it. Separate chains are kept as
+   * separate intervals: merging them into one span would claim the book was
+   * proven across the unproven stretch between them. That is what lets
    * `windowCoverage` tell a genuine hole in the final window apart from a front
    * the keep-alive simply did not re-write.
    */
-  private readonly dedupCoveredFromMs = new Map<string, number>();
-  private readonly dedupCoveredThroughMs = new Map<string, number>();
+  private readonly dedupCovered = new Map<string, Array<{ fromMs: number; throughMs: number }>>();
   private lastMaintenanceAtMs: number | null = null;
   private lastMaintenanceDeletedMatches = 0;
   private lastMaintenanceDeletedRecords = 0;
   private lastProtectedGames = 0;
   private lastVacuumAtMs = 0;
   private lastCheckpointAtMs = 0;
+  private walCheckpointBusy = false;
+  private cachedFinalizedRecords: number | null = null;
+  private cachedFinalizedRecordsAtMs = 0;
   private closed = false;
   /**
    * Games whose finish is known but whose tail has not been copied to
@@ -255,6 +294,17 @@ export class CompactTailStore {
     this.redundantKeepAliveMs = positiveInteger(options.redundantKeepAliveMs ?? DEFAULT_REDUNDANT_KEEP_ALIVE_MS, "redundantKeepAliveMs");
     this.maxFeedSilenceMs = positiveInteger(options.maxFeedSilenceMs ?? DEFAULT_MAX_FEED_SILENCE_MS, "maxFeedSilenceMs");
     this.now = options.now ?? Date.now;
+    this.readOnly = options.readOnly === true;
+    if (this.readOnly) {
+      this.db = new DatabaseSync(this.databasePath, { timeout: 5_000, defensive: true, readOnly: true });
+      const row = this.db.prepare("SELECT value FROM compact_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
+      // Without a migration a reader can only trust the schema it was written for.
+      if (Number(row?.value) !== SCHEMA_VERSION) {
+        this.db.close();
+        throw new Error(`COMPACT_TAIL_SCHEMA_MISMATCH: expected ${SCHEMA_VERSION}, found ${row?.value ?? "none"}; open it read-write once to migrate`);
+      }
+      return;
+    }
     this.db = new DatabaseSync(this.databasePath, { timeout: 5_000, defensive: true });
     this.db.exec(`
       PRAGMA foreign_keys = ON;
@@ -267,6 +317,9 @@ export class CompactTailStore {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
       PRAGMA auto_vacuum = INCREMENTAL;
+      -- Bound the WAL after a completed checkpoint. A long-lived reader can
+      -- still starve checkpoints; the maintenance pass below reports that.
+      PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES};
       CREATE TABLE IF NOT EXISTS compact_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS payloads (
         hash TEXT PRIMARY KEY,
@@ -489,27 +542,50 @@ export class CompactTailStore {
    * True when this payload repeats the game's last one soon enough that
    * writing it again would only add redundancy.
    */
-  private redundantFor(gameKey: string, hash: string, atMs: number): boolean {
-    const previous = this.lastHashByGame.get(gameKey);
-    return previous !== undefined && previous.hash === hash && atMs - previous.atMs < this.redundantKeepAliveMs;
+  private redundantFor(gameKey: string, record: JournalRecord, hash: string): boolean {
+    const previous = this.lastHashByGame.get(gameKey)?.get(record.source);
+    const redundant = previous !== undefined && previous.hash === hash && record.receivedAtMs - previous.atMs < this.redundantKeepAliveMs;
+    // A collapsed frame, and equally a keep-alive rewrite of the same bytes,
+    // proves the stream held that payload since the previous copy.
+    if (previous !== undefined && previous.hash === hash) this.rememberDedup(gameKey, record, previous.atMs);
+    return redundant;
   }
 
-  private rememberHash(gameKey: string, hash: string, atMs: number): void {
-    this.lastHashByGame.set(gameKey, { hash, atMs });
+  private rememberHash(gameKey: string, record: JournalRecord, hash: string): void {
+    const streams = this.lastHashByGame.get(gameKey) ?? new Map<JournalRecord["source"], { hash: string; atMs: number }>();
+    streams.set(record.source, { hash, atMs: record.receivedAtMs });
+    this.lastHashByGame.set(gameKey, streams);
   }
 
-  /** Extend the interval a collapsed frame proves the book was unchanged over. */
-  private rememberDedup(gameKey: string, atMs: number): void {
-    const matchedAtMs = this.lastHashByGame.get(gameKey)?.atMs;
-    if (matchedAtMs === undefined) return;
-    const from = this.dedupCoveredFromMs.get(gameKey);
-    if (from === undefined || matchedAtMs < from) this.dedupCoveredFromMs.set(gameKey, matchedAtMs);
-    const through = this.dedupCoveredThroughMs.get(gameKey);
-    if (through === undefined || atMs > through) this.dedupCoveredThroughMs.set(gameKey, atMs);
+  private forgetChains(gameKey: string): void {
+    this.lastHashByGame.delete(gameKey);
+    this.dedupCovered.delete(gameKey);
+  }
+
+  /**
+   * Extend the interval an unchanged order-book frame proves the book held
+   * over, or start a new one when the previous chain was broken.
+   *
+   * Only CLOB depth frames count: a repeated score proves the Sports feed was
+   * alive, not that the order book was.
+   */
+  private rememberDedup(gameKey: string, record: JournalRecord, matchedAtMs: number): void {
+    if (record.source !== "clob" || (record.kind !== "ws_message" && record.kind !== "book_snapshot")) return;
+    const intervals = this.dedupCovered.get(gameKey) ?? [];
+    const last = intervals.at(-1);
+    if (last !== undefined && last.throughMs >= matchedAtMs) last.throughMs = Math.max(last.throughMs, record.receivedAtMs);
+    else intervals.push({ fromMs: matchedAtMs, throughMs: record.receivedAtMs });
+    // Only a window that can still be finalized needs its proof, and the
+    // oldest such floor is bounded exactly like a finalize pin.
+    const horizonMs = record.receivedAtMs - Math.max(this.pendingFinishMs, 6 * 3600_000) - 2 * this.tailWindowMs;
+    while (intervals.length > 1 && intervals[0]!.throughMs < horizonMs) intervals.shift();
+    this.dedupCovered.set(gameKey, intervals);
   }
 
   ingest(record: JournalRecord, gameKeys: readonly string[]): void {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
+    // Refuse at the buffer: a queued row could never be flushed, not even by `close`.
+    if (this.readOnly) throw new Error("COMPACT_TAIL_STORE_READ_ONLY");
     if (!this.isCaptureRecord(record)) return;
     const payload = serializedPayload(record);
     const hash = payloadHash(payload);
@@ -519,15 +595,10 @@ export class CompactTailStore {
       if (lifecycle) {
         // A reconnect/gap breaks the chain of identical payloads. Keeping the
         // old chain would let coverage claim continuity across missing data.
-        this.lastHashByGame.delete(gameKey);
-        this.dedupCoveredFromMs.delete(gameKey);
-        this.dedupCoveredThroughMs.delete(gameKey);
+        this.forgetChains(gameKey);
       }
-      if (this.redundantFor(gameKey, hash, record.receivedAtMs)) {
-        this.rememberDedup(gameKey, record.receivedAtMs);
-        continue;
-      }
-      this.rememberHash(gameKey, hash, record.receivedAtMs);
+      if (this.redundantFor(gameKey, record, hash)) continue;
+      this.rememberHash(gameKey, record, hash);
       this.pending.push({ gameKey, record, frameIndex: 0, hash, payload: compressed, kind: record.kind });
     }
     if (this.pending.length >= 256) this.flush();
@@ -541,14 +612,13 @@ export class CompactTailStore {
    */
   ingestFrame(record: JournalRecord, gameKey: string, frame: unknown, frameIndex: number, kind = record.kind): void {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
+    if (this.readOnly) throw new Error("COMPACT_TAIL_STORE_READ_ONLY");
     const payload = JSON.stringify({ source: record.source, kind, connectionId: record.connectionId ?? null,
       data: JSON.stringify(frame), frameIndex });
     const hash = payloadHash(payload);
-    if (this.redundantFor(gameKey, hash, record.receivedAtMs)) {
-      this.rememberDedup(gameKey, record.receivedAtMs);
-      return;
-    }
-    this.rememberHash(gameKey, hash, record.receivedAtMs);
+    const framed = kind === record.kind ? record : { ...record, kind };
+    if (this.redundantFor(gameKey, framed, hash)) return;
+    this.rememberHash(gameKey, framed, hash);
     this.pending.push({ gameKey, record, frameIndex, hash, payload: payloadBlob(payload), kind });
     if (this.pending.length >= 256) this.flush();
   }
@@ -650,10 +720,9 @@ export class CompactTailStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    this.lastHashByGame.delete(game.key);
-    this.dedupCoveredFromMs.delete(game.key);
-    this.dedupCoveredThroughMs.delete(game.key);
+    this.forgetChains(game.key);
     this.pendingFinalize.delete(game.key);
+    this.cachedFinalizedRecords = null;
     this.cleanupOrphanPayloads(removedHashes.map(row => row.payload_hash));
     return { records: availableCount, ...coverage };
   }
@@ -698,10 +767,8 @@ export class CompactTailStore {
     // The book is known at the floor when a chain of identical payloads spans
     // it: the frame stored before the floor and the collapsed frame after it
     // carry the same bytes, so nothing moved in between.
-    const dedupFrom = this.dedupCoveredFromMs.get(gameKey);
-    const dedupThrough = this.dedupCoveredThroughMs.get(gameKey);
-    const provenByDedup = dedupFrom !== undefined && dedupThrough !== undefined
-      && dedupFrom <= start && dedupThrough >= start;
+    const provenByDedup = (this.dedupCovered.get(gameKey) ?? [])
+      .some(interval => interval.fromMs <= start && interval.throughMs >= start);
     // A full-depth anchor at or before the floor is only useful when the deltas
     // that moved the ladder between the anchor and the floor were retained too.
     // `largestGapMs` below proves that: an anchor with a hole after it cannot
@@ -864,12 +931,19 @@ export class CompactTailStore {
     }
     // Keep the write-ahead log bounded. PASSIVE never waits for readers, so it
     // is safe on every pass; TRUNCATE additionally returns the file to the OS,
-    // which does need every reader to finish and therefore runs rarely.
+    // which does need every reader to finish. A blocked attempt is retried on
+    // the next pass and reported in the status snapshot: silently ignoring the
+    // busy result let one production WAL hold a 7.8 GB high-water mark.
     this.db.exec("PRAGMA wal_checkpoint(PASSIVE)");
-    if (nowMs - this.lastCheckpointAtMs >= 10 * 60_000) {
-      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-      this.lastCheckpointAtMs = nowMs;
+    const walBytes = this.walBytes();
+    if (nowMs - this.lastCheckpointAtMs >= WAL_CHECKPOINT_INTERVAL_MS
+        || walBytes > WAL_TRUNCATE_THRESHOLD_BYTES
+        || this.walCheckpointBusy) {
+      const row = this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy?: number } | undefined;
+      this.walCheckpointBusy = row?.busy === 1;
+      if (!this.walCheckpointBusy) this.lastCheckpointAtMs = nowMs;
     }
+    if (deletedMatches > 0 || deletedRecords > 0) this.cachedFinalizedRecords = null;
     this.lastMaintenanceAtMs = nowMs;
     this.lastMaintenanceDeletedMatches = deletedMatches;
     this.lastMaintenanceDeletedRecords = deletedRecords;
@@ -970,6 +1044,28 @@ export class CompactTailStore {
    */
   private databaseBytes(): number {
     try { return statSync(this.databasePath).size; } catch { return 0; }
+  }
+
+  private walBytes(): number {
+    try { return statSync(`${this.databasePath}-wal`).size; } catch { return 0; }
+  }
+
+  private walLimitBytes(): number {
+    try {
+      const row = this.db.prepare("PRAGMA journal_size_limit").get() as { journal_size_limit?: number } | undefined;
+      return typeof row?.journal_size_limit === "number" ? row.journal_size_limit : -1;
+    } catch {
+      return -1;
+    }
+  }
+
+  private finalizedRecordCount(): number {
+    const nowMs = this.now();
+    if (this.cachedFinalizedRecords === null || nowMs - this.cachedFinalizedRecordsAtMs >= FINALIZED_COUNT_TTL_MS) {
+      this.cachedFinalizedRecords = tableCount(this.db, "tail_records");
+      this.cachedFinalizedRecordsAtMs = nowMs;
+    }
+    return this.cachedFinalizedRecords;
   }
 
   /**
@@ -1173,12 +1269,37 @@ export class CompactTailStore {
       largestGapMs: row.largest_gap_ms ?? 0, finishAnchor: row.finish_anchor ?? null }));
   }
 
+  /**
+   * Run several reads against one database snapshot, so a collector committing
+   * in between cannot pair one finalization's coverage with another's frames.
+   */
+  readConsistent<T>(read: () => T): T {
+    if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
+    this.flush();
+    this.db.exec("BEGIN");
+    try {
+      const result = read();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   readFinalized(gameKey: string): CompactStoredRecord[] {
     if (this.closed) throw new Error("COMPACT_TAIL_STORE_CLOSED");
     this.flush();
+    // Capture order is the run's own sequence, not its wall clock: the
+    // collector tolerates small UTC backsteps, and sorting on receipt time
+    // would silently reorder the deltas around one. Runs follow each other by
+    // their first receipt; original receipt times are kept so the exporter can
+    // still flag the backstep.
     const rows = this.db.prepare(`SELECT r.game_key, r.run_id, r.sequence, r.frame_index, r.received_at_ms, r.source, r.kind, p.payload
-      FROM tail_records r JOIN payloads p ON p.hash = r.payload_hash WHERE r.game_key = ?
-      ORDER BY r.received_at_ms ASC, r.run_id ASC, r.sequence ASC, r.frame_index ASC`).all(gameKey) as unknown as SqlRow[];
+      FROM tail_records r JOIN payloads p ON p.hash = r.payload_hash
+      JOIN (SELECT run_id, MIN(received_at_ms) AS first_at FROM tail_records WHERE game_key = ? GROUP BY run_id) f ON f.run_id = r.run_id
+      WHERE r.game_key = ?
+      ORDER BY f.first_at ASC, r.run_id ASC, r.sequence ASC, r.frame_index ASC`).all(gameKey, gameKey) as unknown as SqlRow[];
     return rows.map(row => {
       const payload = decodePayload(row.payload);
       return { gameKey: row.game_key, runId: row.run_id, sequence: row.sequence, frameIndex: row.frame_index,
@@ -1194,7 +1315,7 @@ export class CompactTailStore {
       databaseBytes: this.databaseBytes(),
       stagingRecords: tableCount(this.db, "staging_records"),
       finalizedMatches: tableCount(this.db, "matches"),
-      finalizedRecords: tableCount(this.db, "tail_records"),
+      finalizedRecords: this.finalizedRecordCount(),
       pendingRecords: this.pending.length,
       lastMaintenanceAtMs: this.lastMaintenanceAtMs,
       lastMaintenanceDeletedMatches: this.lastMaintenanceDeletedMatches,
@@ -1202,7 +1323,10 @@ export class CompactTailStore {
       stagingProtectedGames: this.lastProtectedGames,
       retentionMs: this.retentionMs,
       maxBytes: this.maxBytes,
-      pendingFinishMs: this.pendingFinishMs
+      pendingFinishMs: this.pendingFinishMs,
+      walBytes: this.walBytes(),
+      walLimitBytes: this.walLimitBytes(),
+      walCheckpointBusy: this.walCheckpointBusy
     };
   }
 
@@ -1216,13 +1340,14 @@ export class CompactTailStore {
 
 export async function openCompactTailStore(options: CompactTailStoreOptions): Promise<CompactTailStore> {
   const dataRoot = resolve(options.dataRoot);
-  await mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  if (!options.readOnly) await mkdir(dataRoot, { recursive: true, mode: 0o700 });
   await stat(dataRoot);
   return new CompactTailStore(join(dataRoot, DATABASE_NAME), {
     tailWindowMs: options.tailWindowMs, bufferMs: options.bufferMs, retentionMs: options.retentionMs,
     maxBytes: options.maxBytes, ...(options.pendingFinishMs === undefined ? {} : { pendingFinishMs: options.pendingFinishMs }),
     ...(options.redundantKeepAliveMs === undefined ? {} : { redundantKeepAliveMs: options.redundantKeepAliveMs }),
     ...(options.maxFeedSilenceMs === undefined ? {} : { maxFeedSilenceMs: options.maxFeedSilenceMs }),
+    ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
     ...(options.now === undefined ? {} : { now: options.now })
   });
 }
