@@ -28,10 +28,14 @@ import urllib.error
 import urllib.request
 from collections import deque
 
-from collector_watch_utils import resolve_npm
+from collector_watch_utils import npm_env, resolve_npm
 
 MAX_LOG_BYTES = 4 * 1024 * 1024
 KEEP_LOG_LINES = 4000
+# A condition that persists (low disk, a paused collector, an empty staging
+# table) is reported when it starts and then at most this often. Logging it on
+# every 5-second cycle pushed restart history out of the rotated log.
+REPEAT_ALERT_MS = 300_000
 
 
 def now_ms() -> int:
@@ -87,10 +91,19 @@ class LogFile:
         record = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "level": level, "event": event}
         record.update(fields)
         line = json.dumps(record, ensure_ascii=False, default=str)
-        self._rotate_if_needed()
-        with open(self.path, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-        print(line, flush=True)
+        # A full disk or a removed logs directory must not take the watcher
+        # down: the line still reaches stdout and the next cycle retries.
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._rotate_if_needed()
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
+        try:
+            print(line, flush=True)
+        except OSError:
+            pass
         return record
 
     def _rotate_if_needed(self) -> None:
@@ -108,7 +121,8 @@ class LogFile:
 class HealthWatch:
     def __init__(self, data_root: str, port: int, log: LogFile, heartbeat_s: float,
                  empty_archive_grace_s: int, silent_match_alert_s: int,
-                 project: str = "/Users/ww/Project/polyFIFA2026", auto_restart: bool = True) -> None:
+                 project: str = "/Users/ww/Project/polyFIFA2026", auto_restart: bool = True,
+                 count_refresh_s: float = 300.0) -> None:
         self.project = project
         self.auto_restart = auto_restart
         self.data_root = data_root
@@ -136,10 +150,24 @@ class HealthWatch:
         # when the watcher came up could never be restarted; count failures
         # instead of relying on having observed one healthy cycle first.
         self.consecutive_failures = 0
+        # Multi-million-row counts are refreshed on this cadence, not every
+        # cycle: holding a read transaction open for the whole sweep blocked
+        # the collector's WAL checkpoint in production.
+        self.count_refresh_s = count_refresh_s
+        self.last_count_refresh_at: float | None = None
+        self.cached_tail_records: int | None = None
         self.deleted_matches = 0
         self.empty_archive_counts: deque = deque()
         self.stop_marker = os.path.join(data_root, ".collector-stopped")
         self.intentionally_stopped = False
+        # Time in the current mode, as observed by this watcher. Keyed on the
+        # process identity too, so a restarted collector that comes back in
+        # `starting` gets a fresh clock instead of inheriting the old one.
+        self.mode_key: tuple | None = None
+        self.mode_since_ms = 0
+        self.watch_started_at_ms: int | None = None
+        # event -> (episode start ms, last logged ms) for persistent conditions.
+        self.repeating_alerts: dict[str, tuple[int, int]] = {}
 
     # ---------------------------------------------------------------- sources
     def api_status(self) -> dict:
@@ -170,22 +198,56 @@ class HealthWatch:
     def db(self) -> sqlite3.Connection:
         return sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=10)
 
-    def db_metrics(self, connection: sqlite3.Connection) -> dict:
+    def db_metrics(self, connection: sqlite3.Connection, *, refresh_counts: bool = False) -> dict:
+        """Read the cheap health metrics; refresh the expensive counts rarely.
+
+        ``COUNT(*) FROM payloads`` measured 38 s and a full ``tail_records``
+        scan 5 s on the 2026-09 store. Running them every cycle kept a read
+        transaction open almost continuously, which stopped the collector
+        from ever completing a WAL checkpoint: the write-ahead log grew to
+        7.8 GB and could not be truncated. Keep this sweep small; the
+        expensive counts are refreshed on ``count_refresh_s`` and per-match
+        counts are read lazily through the indexed game key.
+        """
         metrics = {}
         for name, sql in (
             ("matches", "SELECT COUNT(*) FROM matches"),
-            ("tailRecords", "SELECT COUNT(*) FROM tail_records"),
             ("stagingRecords", "SELECT COUNT(*) FROM staging_records"),
             ("stagingGames", "SELECT COUNT(DISTINCT game_key) FROM staging_records"),
-            ("payloads", "SELECT COUNT(*) FROM payloads"),
             ("stagingOldestMs", "SELECT MIN(received_at_ms) FROM staging_records"),
         ):
             row = connection.execute(sql).fetchone()
             metrics[name] = row[0] if row else None
         metrics["matchKeys"] = {row[0] for row in connection.execute("SELECT game_key FROM matches")}
-        metrics["recordsPerMatch"] = dict(connection.execute(
-            "SELECT game_key, COUNT(*) FROM tail_records GROUP BY game_key"))
+        metrics["recordsPerMatch"] = {}
+        if refresh_counts:
+            row = connection.execute("SELECT COUNT(*) FROM tail_records").fetchone()
+            self.cached_tail_records = row[0] if row else None
+        metrics["tailRecords"] = self.cached_tail_records
         return metrics
+
+    def record_counts(self, keys: Iterable[str]) -> dict[str, int]:
+        """Per-match record counts through the (game_key, ...) primary key."""
+        wanted = [key for key in dict.fromkeys(keys) if key]
+        if not wanted:
+            return {}
+        counts: dict[str, int] = {}
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self.db()
+            for key in wanted:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM tail_records WHERE game_key = ?", (key,)).fetchone()
+                counts[key] = int(row[0]) if row else 0
+        except sqlite3.Error:
+            return counts
+        finally:
+            if connection is not None:
+                connection.close()
+        return counts
+
+    def record_count(self, key: str) -> int:
+        return self.record_counts([key]).get(key, 0)
 
     def staging_snapshot(self, connection: sqlite3.Connection) -> dict:
         rows = connection.execute(
@@ -206,7 +268,12 @@ class HealthWatch:
             connection: sqlite3.Connection | None = None
             try:
                 connection = self.db()
-                return self.db_metrics(connection), self.staging_snapshot(connection)
+                refresh = (self.last_count_refresh_at is None
+                           or time.time() - self.last_count_refresh_at >= self.count_refresh_s)
+                metrics = self.db_metrics(connection, refresh_counts=refresh)
+                if refresh:
+                    self.last_count_refresh_at = time.time()
+                return metrics, self.staging_snapshot(connection)
             except sqlite3.OperationalError as error:
                 last_error = error
                 if attempt + 1 < attempts:
@@ -225,14 +292,34 @@ class HealthWatch:
         self.last_restart_at = time.time()
         self.log.write("action", "restart_collector", reason=reason)
         try:
-            result = subprocess.run([resolve_npm(), "run", "collect:restart"], cwd=self.project,
-                                    capture_output=True, text=True, timeout=180)
-            self.log.write("action", "restart_collector_done", code=result.returncode,
-                     tail=(result.stdout or result.stderr or "").strip()[-400:])
+            npm = resolve_npm()
+            result = subprocess.run([npm, "run", "collect:restart"], cwd=self.project,
+                                    capture_output=True, text=True, timeout=180,
+                                    env=npm_env(npm))
+            tail = (result.stdout or result.stderr or "").strip()[-400:]
+            # A non-zero exit is how a restart silently failed for weeks: the
+            # neutral "done" line hid `env: node: No such file or directory`.
+            level = "action" if result.returncode == 0 else "alert"
+            event = "restart_collector_done" if result.returncode == 0 else "restart_collector_failed"
+            self.log.write(level, event, code=result.returncode, tail=tail)
         except (OSError, subprocess.SubprocessError) as error:
             self.log.write("error", "restart_collector_failed", error=str(error))
 
     # ------------------------------------------------------------------ checks
+    def condition_alert(self, event: str, active: bool, **fields: object) -> None:
+        """Report a persistent condition once per episode, then at a bounded rate."""
+        if not active:
+            self.repeating_alerts.pop(event, None)
+            return
+        current = now_ms()
+        first_ms, last_ms = self.repeating_alerts.get(event, (current, None))
+        if last_ms is not None and current - last_ms < REPEAT_ALERT_MS:
+            return
+        self.repeating_alerts[event] = (first_ms, current)
+        if current > first_ms:
+            fields["ongoingSeconds"] = round((current - first_ms) / 1000)
+        self.log.write("alert", event, **fields)
+
     def check_archives(self, status: dict, metrics: dict, snapshot: dict) -> list[dict]:
         alerts = []
         for game in status.get("games", []):
@@ -248,7 +335,7 @@ class HealthWatch:
             if not self.started:
                 continue
             self.last_archive_at_ms = now_ms()
-            records = metrics["recordsPerMatch"].get(key, 0)
+            records = self.record_count(key)
             in_matches = key in metrics["matchKeys"]
             base = {"game": key, "title": str(game.get("title"))[:48], "sport": game.get("sport"),
                     "records": records, "inMatches": in_matches, "attempt": archive.get("attempt"),
@@ -306,6 +393,14 @@ class HealthWatch:
                            note="collect:stop records an intentional stop; the watchdog will not restart it")
         stale = state_age_ms > stale_after_ms and not stopped
         mode = status.get("mode")
+        if self.watch_started_at_ms is None:
+            self.watch_started_at_ms = now_ms()
+        mode_key = (status.get("instanceId"), status.get("pid"), mode)
+        if mode_key != self.mode_key:
+            self.mode_key = mode_key
+            self.mode_since_ms = now_ms()
+            self.repeating_alerts.pop("mode_not_collecting", None)
+        mode_age_ms = now_ms() - self.mode_since_ms
         last_record_at_ms = status.get("lastRecordAtMs")
         data_age_ms = now_ms() - last_record_at_ms if _valid_timestamp(last_record_at_ms) else None
         self.last_data_age_ms = data_age_ms
@@ -314,10 +409,10 @@ class HealthWatch:
         if stale:
             snapshot["stale"] = True
             snapshot["stateAgeMs"] = state_age_ms
-            self.log.write("alert", "status_stale", **snapshot)
+        self.condition_alert("status_stale", stale, **snapshot)
         if data_stale:
             snapshot["dataAgeMs"] = data_age_ms
-            self.log.write("alert", "data_stale", **snapshot)
+        self.condition_alert("data_stale", data_stale, **snapshot)
         errors = status.get("errors")
         if isinstance(errors, list):
             cutoff_ms = now_ms() - 15 * 60_000
@@ -346,14 +441,16 @@ class HealthWatch:
                     self.log.write("alert", "collector_error", scope=scope[:128], atMs=at_ms, message=message[:2000])
         # A fresh process legitimately reports `starting` with no subscriptions
         # yet, so only a stuck or degraded mode is an alert. An intentional stop
-        # is not an alert either.
-        if self.started and not stopped and mode != "collecting" and (mode != "starting" or state_age_ms > 120_000):
-            snapshot["mode"] = mode
-            self.log.write("alert", "mode_not_collecting", **snapshot)
-        if mode == "collecting" and (metrics.get("stagingRecords") or 0) == 0:
-            self.log.write("alert", "staging_empty", **snapshot)
-        if mode == "collecting" and status.get("desiredTokens", 0) == 0:
-            self.log.write("alert", "no_desired_tokens", **snapshot)
+        # is not an alert either. A fresh state file says nothing about how long
+        # the collector has been starting, so the grace uses time in the mode.
+        not_collecting = (self.started and not stopped and mode != "collecting"
+                          and (mode != "starting" or mode_age_ms > 120_000))
+        self.condition_alert("mode_not_collecting", not_collecting, mode=mode,
+                             modeSeconds=round(mode_age_ms / 1000), **snapshot)
+        self.condition_alert("staging_empty", mode == "collecting" and (metrics.get("stagingRecords") or 0) == 0,
+                             **snapshot)
+        self.condition_alert("no_desired_tokens", mode == "collecting" and status.get("desiredTokens", 0) == 0,
+                             **snapshot)
         compact = status.get("compactStorage") or {}
         deleted = compact.get("lastMaintenanceDeletedMatches") or 0
         if deleted > self.deleted_matches:
@@ -362,24 +459,34 @@ class HealthWatch:
                            note="retention/size pressure removed finished matches from the backtest store")
         # A publisher that stops progressing while claiming to collect, or that
         # never leaves `starting`, is restarted instead of waiting for a human.
+        # Missing records only count while collecting: `paused_disk` stops the
+        # streams on purpose and a restart cannot free any disk.
         stuck_ms = 300_000
+        no_records = mode == "collecting" and (
+            data_age_ms > stuck_ms if data_age_ms is not None else mode_age_ms > stuck_ms)
+        stuck_starting = mode == "starting" and mode_age_ms > 900_000
         if self.started and self.auto_restart and not stopped and (
-                state_age_ms > stuck_ms or (data_age_ms is not None and data_age_ms > stuck_ms)
-                or (mode == "starting" and state_age_ms > 900_000)):
+                state_age_ms > stuck_ms or no_records or stuck_starting):
             reason = f"state age {round(state_age_ms/1000)}s in mode {mode}"
-            if data_age_ms is not None and data_age_ms > stuck_ms:
-                reason += f"; no records for {round(data_age_ms/1000)}s"
+            if no_records:
+                reason += f"; no records for {round((data_age_ms if data_age_ms is not None else mode_age_ms)/1000)}s"
+            if stuck_starting:
+                reason += f"; starting for {round(mode_age_ms/1000)}s"
             self.restart_collector(reason)
         new_matches = metrics["matchKeys"] - self.matches_seen
         if self.started:
             for key in sorted(new_matches):
                 self.last_match_at_ms = now_ms()
                 self.log.write("info", "match_finalized", game=key,
-                               records=metrics["recordsPerMatch"].get(key, 0))
+                               records=self.record_count(key))
         self.matches_seen |= metrics["matchKeys"]
-        if self.started and self.last_match_at_ms is not None and self.last_archive_at_ms is not None:
-            silent_ms = now_ms() - self.last_match_at_ms
-            if self.last_archive_at_ms > self.last_match_at_ms and silent_ms > self.silent_match_alert_s * 1000:
+        # Before the first finalized match the watcher's own start is the
+        # baseline; otherwise a store that never finalizes anything would
+        # never raise this alert at all.
+        last_match_at_ms = self.last_match_at_ms if self.last_match_at_ms is not None else self.watch_started_at_ms
+        if self.started and self.last_archive_at_ms is not None:
+            silent_ms = now_ms() - last_match_at_ms
+            if self.last_archive_at_ms > last_match_at_ms and silent_ms > self.silent_match_alert_s * 1000:
                 self.log.write("alert", "archives_without_new_matches",
                                silentSeconds=round(silent_ms / 1000),
                                archivesSeen=len(self.empty_archive_counts))
@@ -388,8 +495,7 @@ class HealthWatch:
         while self.empty_archive_counts and self.empty_archive_counts[0] < cutoff:
             self.empty_archive_counts.popleft()
         free = status.get("freeBytes")
-        if isinstance(free, int) and free < 20 * 1024 ** 3:
-            self.log.write("alert", "low_disk", freeBytes=free)
+        self.condition_alert("low_disk", isinstance(free, int) and free < 20 * 1024 ** 3, freeBytes=free)
 
     def prune_runtime_state(self, status: dict, metrics: dict) -> None:
         """Forget per-game bookkeeping once the collector no longer reports it."""
@@ -442,15 +548,20 @@ class HealthWatch:
                         backtestStoreCapGbytes=round(((status.get("compactStorage") or {}).get("maxBytes") or 0) / 1024 ** 3, 1),
                         runId=str(status.get("runId"))[:20])
             except Exception as error:  # noqa: BLE001 - the watcher must never die
-                line = f"{type(error).__name__}: {error}"
-                if line != self.last_error_line:
-                    self.last_error_line = line
-                    self.log.write("error", "watch_cycle_failed", error=line)
                 self.consecutive_failures += 1
-                if (self.consecutive_failures >= 3 and self.auto_restart and not self.stop_requested()
-                        and time.time() - self.last_restart_at > 300):
-                    self.restart_collector(
-                        f"status API and state file unreadable for {self.consecutive_failures} cycles")
+                # The handler itself must not escape the loop either (for
+                # example a log that cannot be written).
+                try:
+                    line = f"{type(error).__name__}: {error}"
+                    if line != self.last_error_line:
+                        self.last_error_line = line
+                        self.log.write("error", "watch_cycle_failed", error=line)
+                    if (self.consecutive_failures >= 3 and self.auto_restart and not self.stop_requested()
+                            and time.time() - self.last_restart_at > 300):
+                        self.restart_collector(
+                            f"status API and state file unreadable for {self.consecutive_failures} cycles")
+                except Exception:  # noqa: BLE001
+                    pass
             time.sleep(interval_s)
 
 
@@ -459,8 +570,14 @@ def main() -> int:
     parser.add_argument("--data-root", default="data/collector/continuous")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--interval", type=float, default=15.0)
+    parser.add_argument("--db-count-interval", type=float, default=300.0,
+                        help="seconds between expensive tail/payload count refreshes")
     parser.add_argument("--heartbeat", type=float, default=300.0)
-    parser.add_argument("--empty-archive-grace", type=int, default=600)
+    # The collector finalizes the match row before it marks the archive
+    # complete, so there is no window to wait out; kept so existing command
+    # lines keep parsing.
+    parser.add_argument("--empty-archive-grace", type=int, default=600,
+                        help="accepted for compatibility; unused")
     parser.add_argument("--silent-match-alert", type=int, default=1800)
     parser.add_argument("--project", default="/Users/ww/Project/polyFIFA2026")
     parser.add_argument("--no-restart", action="store_true")
@@ -471,7 +588,8 @@ def main() -> int:
     log = LogFile(log_path)
     watch = HealthWatch(options.data_root, options.port, log, options.heartbeat,
                         options.empty_archive_grace, options.silent_match_alert,
-                        options.project, not options.no_restart)
+                        options.project, not options.no_restart,
+                        count_refresh_s=options.db_count_interval)
     if options.once:
         status = watch.api_status()  # noqa: F841 - read once for a single report
         metrics, snapshot = watch.read_db_metrics()
@@ -481,7 +599,7 @@ def main() -> int:
             "matches": metrics["matches"], "tailRecords": metrics["tailRecords"],
             "stagingRecords": metrics["stagingRecords"], "stagingGames": metrics["stagingGames"],
             "matchKeys": sorted(metrics["matchKeys"]),
-            "recordsPerMatch": metrics["recordsPerMatch"],
+            "recordsPerMatch": watch.record_counts(sorted(metrics["matchKeys"])),
             "stagingTop": sorted(((k, v["records"]) for k, v in snapshot.items()),
                                  key=lambda item: -item[1])[:10],
         }, ensure_ascii=False, indent=2))

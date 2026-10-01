@@ -72,3 +72,42 @@ except FileNotFoundError as error:
   expect(stdout.trim()).toContain("FileNotFoundError");
   expect(stdout.trim()).toContain("npm executable not found");
 });
+
+test("npm_env gives the spawned npm a PATH that can find node", async () => {
+  const { stdout } = await runPython(utilityScript(`
+import os, subprocess, tempfile
+root = tempfile.mkdtemp()
+bin_dir = os.path.join(root, "bin")
+os.mkdir(bin_dir)
+npm = os.path.join(bin_dir, "npm")
+with open(npm, "w") as handle:
+    handle.write("#!/usr/bin/env node\\n")
+os.chmod(npm, 0o755)
+node = os.path.join(bin_dir, "node")
+with open(node, "w") as handle:
+    handle.write("#!/bin/sh\\nprintf 'fake-node %s\\\\n' \\"$*\\"\\n")
+os.chmod(node, 0o755)
+launchd_env = {"PATH": "/usr/bin:/bin"}
+bare = subprocess.run([npm, "--version"], env=launchd_env, capture_output=True, text=True)
+print("bare", bare.returncode, bare.stderr.strip())
+fixed = utils.npm_env(npm, launchd_env)
+print("path", fixed["PATH"])
+ran = subprocess.run([npm, "--version"], env=fixed, capture_output=True, text=True)
+print("ran", ran.returncode, ran.stdout.strip())
+`));
+  const [bare, path, ran] = stdout.trim().split("\n");
+  expect(bare).toMatch(/^bare 127 env: node: No such file or directory$/);
+  expect(path).toContain("bin:/usr/bin:/bin");
+  expect(ran).toMatch(/^ran 0 fake-node /);
+});
+
+test("npm_env keeps an existing npm directory in place instead of duplicating it", async () => {
+  const { stdout } = await runPython(utilityScript(`
+print(utils.npm_env("/opt/homebrew/bin/npm", {"PATH": "/opt/homebrew/bin:/usr/bin:/bin"})["PATH"])
+print(utils.npm_env("/opt/homebrew/bin/npm", {})["PATH"])
+`));
+  expect(stdout.trim().split("\n")).toEqual([
+    "/opt/homebrew/bin:/usr/bin:/bin",
+    "/opt/homebrew/bin"
+  ]);
+});

@@ -10,8 +10,11 @@ previously went unnoticed:
 * a match was archived without a window;
 * the store started deleting finished matches (retention/size pressure).
 
-Remediation is limited to re-running the idempotent ``npm run collect:start``,
-which reinstalls and reloads the LaunchAgent. Every action is logged.
+Remediation is limited to ``npm run collect:restart``: it kickstarts a loaded
+but hung LaunchAgent and falls back to the install/start path when the job is
+not loaded (``collect:start`` alone is a no-op, ``already_running``, for a
+loaded job). Nothing is done while the ``.collector-stopped`` marker left by
+``collect:stop`` exists. Every action is logged.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 
-from collector_watch_utils import resolve_npm
+from collector_watch_utils import npm_env, resolve_npm
 
 MAX_LOG_BYTES = 2 * 1024 * 1024
 KEEP_LOG_LINES = 2000
@@ -56,6 +59,8 @@ class LiveWatch:
         self.auto_restart = auto_restart
         self.db_path = os.path.join(data_root, "tail.sqlite")
         self.state_path = os.path.join(data_root, "state.json")
+        self.stop_marker = os.path.join(data_root, ".collector-stopped")
+        self.intentionally_stopped = False
         self.archives: dict[str, str] = {}
         self.started = False
         self.last_records = 0
@@ -120,8 +125,17 @@ class LiveWatch:
         self.last_alerts[event] = time.time()
         self.log("alert", event, **fields)
 
+    def stop_requested(self) -> bool:
+        """True while ``collect:stop`` has recorded an intentional stop."""
+        return os.path.exists(self.stop_marker)
+
     # ------------------------------------------------------------ remediation
     def restart_collector(self, reason: str) -> None:
+        # Both start and restart clear the marker, so acting here would undo
+        # the operator's stop (and break the documented repair-tail workflow).
+        if self.stop_requested():
+            self.alert("restart_suppressed_stopped", 600, reason=reason)
+            return
         if not self.auto_restart:
             self.log("alert", "restart_skipped", reason=reason)
             return
@@ -130,10 +144,16 @@ class LiveWatch:
         self.last_restart_at = time.time()
         self.log("action", "restart_collector", reason=reason)
         try:
-            result = subprocess.run([resolve_npm(), "run", "collect:start"], cwd=self.project,
-                                    capture_output=True, text=True, timeout=120)
-            self.log("action", "restart_collector_done", code=result.returncode,
-                     tail=(result.stdout or result.stderr or "").strip()[-400:])
+            npm = resolve_npm()
+            result = subprocess.run([npm, "run", "collect:restart"], cwd=self.project,
+                                    capture_output=True, text=True, timeout=180,
+                                    env=npm_env(npm))
+            tail = (result.stdout or result.stderr or "").strip()[-400:]
+            # See the health watcher: `env: node: No such file or directory`
+            # used to be filed away as a neutral, successful-looking action.
+            level = "action" if result.returncode == 0 else "alert"
+            event = "restart_collector_done" if result.returncode == 0 else "restart_collector_failed"
+            self.log(level, event, code=result.returncode, tail=tail)
         except (OSError, subprocess.SubprocessError) as error:
             self.log("error", "restart_collector_failed", error=str(error))
 
@@ -192,10 +212,17 @@ class LiveWatch:
             self.matches_seen |= metrics["matchKeys"]
 
         # conditions
+        stopped = self.stop_requested()
+        if stopped != self.intentionally_stopped:
+            self.intentionally_stopped = stopped
+            self.log("info", "stop_marker_changed", intentionallyStopped=stopped)
+        # An intentional stop is expected to go quiet: no stale/no-status
+        # alerts, and restart_collector refuses to act on it anyway.
         if status is None:
-            self.alert("no_status", 60)
-            if time.time() - self.last_records_at > self.restart_after_s:
-                self.restart_collector("no status from the collector API or state file")
+            if not stopped:
+                self.alert("no_status", 60)
+                if time.time() - self.last_records_at > self.restart_after_s:
+                    self.restart_collector("no status from the collector API or state file")
         else:
             if mode == "collecting" and silent_s > self.stuck_records_s:
                 self.alert("no_new_records", 120, silentSeconds=round(silent_s), mode=mode, tokens=tokens)
@@ -203,7 +230,7 @@ class LiveWatch:
                     self.restart_collector(f"no new records for {round(silent_s)}s")
             if mode == "starting" and silent_s > 480:
                 self.restart_collector(f"stuck in starting for {round(silent_s)}s")
-            if state_age_ms is not None and state_age_ms > self.stuck_state_s * 1000:
+            if not stopped and state_age_ms is not None and state_age_ms > self.stuck_state_s * 1000:
                 self.alert("state_stale", 120, stateAgeMs=state_age_ms, mode=mode)
                 if state_age_ms > self.restart_after_s * 1000:
                     self.restart_collector(f"state not published for {round(state_age_ms/1000)}s")

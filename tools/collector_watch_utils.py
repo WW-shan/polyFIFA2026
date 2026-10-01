@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 DEFAULT_NPM_PATHS = (
     "/opt/homebrew/bin/npm",
@@ -70,3 +70,26 @@ def resolve_npm(
     raise FileNotFoundError(
         "npm executable not found; set POLY_NPM or add npm to PATH"
     )
+
+
+def npm_env(
+    npm_path: str,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return an environment in which ``npm_path`` can actually run.
+
+    npm's launcher is a ``#!/usr/bin/env node`` script, so resolving an absolute
+    npm path is not enough: ``env`` still has to find ``node`` on ``PATH``.  A
+    LaunchAgent starts with the bare system PATH, which is why every watchdog
+    restart used to end with ``env: node: No such file or directory`` and exit
+    127.  npm always ships beside its node, so prepending npm's own directory
+    repairs the lookup without hard-coding a Homebrew prefix.
+    """
+
+    env = dict(os.environ if base_env is None else base_env)
+    directory = os.path.dirname(os.path.abspath(npm_path))
+    entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    if directory not in entries:
+        entries.insert(0, directory)
+    env["PATH"] = os.pathsep.join(entries)
+    return env
