@@ -64,6 +64,7 @@ export interface ResearchSelection {
   marketTypes: string[];
   maxEvents: number;
   requireFinish: boolean;
+  finishLookbackSeconds?: number;
   catalogPages: number;
   catalogRows: number;
   skippedNonMatches: number;

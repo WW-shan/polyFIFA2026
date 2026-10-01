@@ -52,6 +52,7 @@ function parseDownload(args: readonly string[]): ParsedResearchArgs {
       case "--proxy-url": options.proxyUrl = value(args, index++); break;
       case "--gamma-base-url": options.gammaBaseUrl = value(args, index++); break;
       case "--data-base-url": options.dataBaseUrl = value(args, index++); break;
+      case "--finish-lookback-seconds": options.finishLookbackSeconds = number(value(args, index++), flag, true); break;
       case "--require-finish": options.requireFinish = true; break;
       default: invalid(`unknown download argument ${flag}`);
     }
@@ -106,7 +107,7 @@ const HELP = `Public-data research only; no keys, live orders or execution impor
 download --output-dir PATH [--sport tennis|table-tennis|cs2|dota2|valorant] [--tag-id ID]
   [--max-events 30] [--max-catalog-pages 5] [--require-finish] [--market-types CSV]
   [--event-slugs CSV] [--trade-page-size 1000] [--max-trade-pages 11]
-  [--concurrency 4] [--timeout-ms 15000] [--proxy-url URL]
+  [--concurrency 4] [--timeout-ms 15000] [--proxy-url URL] [--finish-lookback-seconds N]
 backtest --input dataset.json --output-dir PATH
   [--prices 0.5,0.6,0.7,0.8,0.9,0.95,0.97,0.99] [--windows 60,180,300,480]
   [--shares 10] [--entry-min-price 0.9] [--max-entry-age-seconds 120]

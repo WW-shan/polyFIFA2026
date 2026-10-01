@@ -162,6 +162,9 @@ function trialFor(event: ResearchEvent, market: ResearchMarket, trades: readonly
       trial.entryAtMs = reference.atMs + 1000;
       // A fixed expiry, not advance knowledge of the eventual finish.
       trial.expiryAtMs = trial.entryAtMs + window * 1000;
+      // The finish only labels the sample: an order that would first be placed
+      // once the match is over is not a pre-finish opportunity.
+      if (event.finishMs !== null && trial.entryAtMs >= event.finishMs) trial.exclusions.push("entry-after-finish");
     }
   }
   if (!reference) { trial.exclusions.push("missing-entry-reference"); return trial; }

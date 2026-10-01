@@ -20,6 +20,8 @@ export interface ResearchDownloadOptions {
   requireFinish?: boolean; eventSlugs?: string[]; marketTypes?: string[]; concurrency?: number;
   tradePageSize?: number; maxTradePages?: number; proxyUrl?: string; timeoutMs?: number;
   gammaBaseUrl?: string; dataBaseUrl?: string;
+  /** Fetch only trades from this many seconds before the recorded finish; unfinished events get no window. */
+  finishLookbackSeconds?: number;
 }
 export interface ResearchDownloadResult { datasetPath: string; eventCount: number; marketCount: number; tradeCount: number; incompleteMarkets: number }
 const SPORT_TAGS: Record<string, string> = { tennis: "864", "table-tennis": "103767", cs2: "100780", dota2: "102366", valorant: "101672" };
@@ -159,6 +161,7 @@ export async function downloadResearchDataset(options: ResearchDownloadOptions, 
   const pageSize = positive(options.tradePageSize, 1000, "tradePageSize", 10_000);
   const maxPages = positive(options.maxTradePages, 11, "maxTradePages");
   const timeoutMs = positive(options.timeoutMs, 15_000, "timeoutMs", 300_000);
+  const lookbackMs = options.finishLookbackSeconds === undefined ? null : positive(options.finishLookbackSeconds, 0, "finishLookbackSeconds", 86_400) * 1000;
   if (!options.outputDirectory?.trim()) throw invalid("outputDirectory is required");
   const tagId = options.tagId ?? SPORT_TAGS[options.sport];
   if (!tagId?.trim()) throw invalid("unknown sport; supply tagId explicitly");
@@ -187,7 +190,7 @@ export async function downloadResearchDataset(options: ResearchDownloadOptions, 
     }
   };
   const selection: ResearchSelection = { sport: options.sport, tagId, eventSlugs: [...new Set(options.eventSlugs ?? [])], marketTypes: [...new Set(options.marketTypes ?? [])],
-    maxEvents, requireFinish: options.requireFinish ?? false, catalogPages: 0, catalogRows: 0, skippedNonMatches: 0, skippedMissingFinish: 0, catalogTruncated: false };
+    maxEvents, requireFinish: options.requireFinish ?? false, ...(lookbackMs !== null ? { finishLookbackSeconds: lookbackMs / 1000 } : {}), catalogPages: 0, catalogRows: 0, skippedNonMatches: 0, skippedMissingFinish: 0, catalogTruncated: false };
   try {
     const events = await discover(options, selection, recorded);
     const jobs = events.flatMap(event => event.markets.map(market => ({ event, market })));
@@ -198,9 +201,15 @@ export async function downloadResearchDataset(options: ResearchDownloadOptions, 
       while (next < jobs.length) {
         const { event, market } = jobs[next++]!;
         const until = Math.min(now(), (event.finishMs ?? now()) + 15 * 60_000);
-        const from = Math.max(0, (event.startMs ?? ((event.finishMs ?? now()) - 6 * 60 * 60_000)) - 5 * 60_000);
-        if (from > until) {
-          market.coverage = { status: "error", reason: "invalid-event-time-range", fromMs: from, toMs: until,
+        const from = lookbackMs !== null && event.finishMs !== null ? Math.max(0, event.finishMs - lookbackMs)
+          : Math.max(0, (event.startMs ?? ((event.finishMs ?? now()) - 6 * 60 * 60_000)) - 5 * 60_000);
+        if (lookbackMs !== null && event.finishMs === null) {
+          market.coverage = { status: "error", reason: "missing-finish-for-lookback", fromMs: from, toMs: until,
+            pages: 0, rawRows: 0, invalidRows: 0, duplicateRows: 0, oldestMs: null, newestMs: null };
+        } else if (from > until) {
+          // Gamma can list a start after the finish (rescheduled or walkover); record an empty
+          // window rather than an inverted interval that invalidates the whole dataset.
+          market.coverage = { status: "error", reason: "invalid-event-time-range", fromMs: until, toMs: until,
             pages: 0, rawRows: 0, invalidRows: 0, duplicateRows: 0, oldestMs: null, newestMs: null };
         } else {
           const result = await fetchMarketTrades(market, from, until, recorded, { pageSize, maxPages, ...(options.dataBaseUrl ? { baseUrl: options.dataBaseUrl } : {}) });

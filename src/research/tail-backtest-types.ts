@@ -62,7 +62,7 @@ export type TailBacktestExclusion =
   | "token-window-incomplete" | "snapshot-audit-not-passed" | "no-active-book-seconds"
   | "holding-window-not-covered" | "holding-data-incomplete" | "clock-affected-data"
   | "context-not-fresh" | "archive-count-mismatch" | "change-count-mismatch"
-  | "inconsistent-book-evidence" | "journal-data-incomplete";
+  | "inconsistent-book-evidence" | "journal-data-incomplete" | "trade-feed-not-captured";
 
 export interface TailEntryReference {
   tokenId: string;
@@ -215,7 +215,7 @@ export interface TailBacktestSummary {
   sources: number;
   eligibleTrials: number;
   excludedTrials: number;
-  /** Eligible, positively filled trials without settlement, not unresolved zero-fills. */
+  /** Eligible trials without settlement, including unresolved zero-fills. */
   unresolvedTrials: number;
   pnlEligibleTrials: number;
   priceCompleteTrials: number;

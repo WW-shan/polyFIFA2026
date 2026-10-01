@@ -5,6 +5,8 @@ describe("research CLI", () => {
   test("parses bounded historical downloads independently of all live trading settings", () => {
     expect(parseResearchCliArgs(["download", "--sport", "tennis", "--max-events", "30", "--output-dir", "data/research/run", "--require-finish", "--market-types", "moneyline,tennis_match_totals"]))
       .toEqual({ command: "download", options: { sport: "tennis", maxEvents: 30, outputDirectory: "data/research/run", requireFinish: true, marketTypes: ["moneyline", "tennis_match_totals"] } });
+    expect(parseResearchCliArgs(["download", "--output-dir", "run", "--finish-lookback-seconds", "900"]))
+      .toEqual({ command: "download", options: { sport: "tennis", outputDirectory: "run", finishLookbackSeconds: 900 } });
   });
   test("parses a tunable resting price grid instead of hardcoding .7", () => {
     expect(parseResearchCliArgs(["backtest", "--input", "input.json", "--output-dir", "report", "--prices", ".5,.7,.85", "--windows", "60,300", "--shares", "100", "--entry-min-price", ".92", "--entry-mode", "price-trigger", "--fill-model", "sell-at-or-below", "--queue-ahead-shares", "20"]))

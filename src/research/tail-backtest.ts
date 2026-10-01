@@ -65,7 +65,9 @@ function exactAmounts(trial: TailBacktestTrial, filled: bigint): ExactAmounts {
   const costProduct = filled * units(trial.bidPrice);
   const cost = costProduct * COST_SCALE_FACTOR;
   const fee = costProduct * units(trial.makerFeeBps, NUMBER_SCALE);
-  const payout = filled === 0n ? 0n : trial.payoutPerShare === null ? null
+  // Settlement, not the fill outcome, decides whether PnL is known: an
+  // unresolved zero-fill must leave the denominator just like an unresolved fill.
+  const payout = trial.payoutPerShare === null ? null : filled === 0n ? 0n
     : filled * units(trial.payoutPerShare, NUMBER_SCALE) * PAYOUT_SCALE_FACTOR;
   return { filled, cost, fee, payout, pnl: payout === null ? null : payout - cost - fee };
 }
@@ -132,6 +134,8 @@ interface IndexedSource {
   windows: IndexedWindow[];
   countMismatch: boolean;
   journalIncomplete: boolean;
+  /** Any trade print was captured, so an absent SELL print is evidence rather than a missing feed. */
+  tradeFeedObserved: boolean;
 }
 interface Registry {
   sources: Set<string>;
@@ -387,7 +391,8 @@ function indexSource(input: TailBacktestInput, registry: Registry): IndexedSourc
   }
   validateSettlements(input, allTokens, allMarkets);
   return { input, windows: [...windowMap.values()], countMismatch: summary.seconds !== input.seconds.length || summary.changes !== input.changes.length,
-    journalIncomplete: journal.malformedLines > 0 || journal.incompleteFinalLines > 0 || summary.warnings.some(warning => warning === "damaged-journal-lines" || warning === "collector-session-failed") };
+    journalIncomplete: journal.malformedLines > 0 || journal.incompleteFinalLines > 0 || summary.warnings.some(warning => warning === "damaged-journal-lines" || warning === "collector-session-failed"),
+    tradeFeedObserved: input.changes.some(change => change.kind === "trade") };
 }
 
 function changeOrder(a: TailBookChange, b: TailBookChange): number {
@@ -594,6 +599,9 @@ function trialFor(source: IndexedSource, indexed: IndexedWindow, outcomes: Index
   if (reference?.bestAsk != null && comparePrice(bidPrice, reference.bestAsk) >= 0) addExclusion(trial, "limit-not-below-entry-ask");
   if (source.countMismatch) addExclusion(trial, "archive-count-mismatch");
   if (source.journalIncomplete) addExclusion(trial, "journal-data-incomplete");
+  // Volume fills come only from SELL prints. An archive without a single print
+  // cannot tell "nobody sold through" from "the trade feed was not recorded".
+  if (options.fillModel === "sell-through-volume" && !source.tradeFeedObserved) addExclusion(trial, "trade-feed-not-captured");
   // All outcome references are supported by their archive quality; holding coverage below concerns the selected token.
   for (const outcome of outcomes) {
     const quality = outcome.quality, observed = observedQuality(outcome, indexed, source);
@@ -782,11 +790,11 @@ export function backtestTailArchives(inputs: readonly TailBacktestInput[], input
         "Archive-wide token coverage is allowed to be incomplete outside the selected holding window by explicit opt-in. Each priced trial still requires complete second-by-second coverage across its entire holding window, and aggregate token counters must agree with the recorded rows."
       ] : []),
       "All fills are hypothetical. Quote-touch-assumed assigns the full requested size to a valid ask or direct SELL touch; it assumes execution without proof of queue position, available depth or latency. Fixed queue-ahead applies only to sell-through-volume.",
-      "Sell-through-volume uses direct SELL prints strictly below the limit, subtracts fixed queue-ahead once and caps at requested shares. BUY and equal-price prints supply no strict-through volume; this is not proof of execution.",
+      "Sell-through-volume uses direct SELL prints strictly below the limit, subtracts fixed queue-ahead once and caps at requested shares. BUY and equal-price prints supply no strict-through volume; this is not proof of execution. Archives without any captured trade print are excluded under this model rather than read as zero fills.",
       "Entries use retrospective actual match finish and a complete book second known before entry. Match finish is not an observed per-set finish or a live prediction of when the match ends.",
       "Parameter alternatives, overlapping windows and same-game markets are not independent portfolio trades. Do not add their scenario profits as a portfolio return.",
       "A small or tiny in-sample result is not proof of optimal future expectation. Recorded market discovery, receipt timing and hypothetical fills limit the inference.",
-      "Price coverage and context freshness are separate. Excluded trials have null modeled amounts; unresolved modeled fills have null PnL and are omitted from profit/return denominators. Complete zero-fills contribute zero PnL.",
+      "Price coverage and context freshness are separate. Excluded trials have null modeled amounts; trials in unresolved markets, filled or not, have null PnL and are omitted from profit/return denominators. Settled complete zero-fills contribute zero PnL.",
       "Cost, fee, payout and PnL use exact decimal netting and aggregation at the resting limit and configured notional maker fee. Only numeric output amounts are rounded to 15 significant digits; fill classifications use exact net amounts. Raw price strings are preserved."
     ]
   };

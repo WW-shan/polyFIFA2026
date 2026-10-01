@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { downloadResearchDataset, fetchMarketTrades, type ResearchRequestRecord } from "../../src/research/download.js";
 import { normalizeResearchEvent } from "../../src/research/history.js";
+import { backtestDataset } from "../../src/research/backtest.js";
 
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -149,6 +150,40 @@ describe("reproducible research cache", () => {
     const dataset = JSON.parse(await readFile(result.datasetPath, "utf8"));
     expect(dataset.events).toHaveLength(1);
     expect(dataset.selection).toMatchObject({ skippedNonMatches: 1, skippedMissingFinish: 1, catalogTruncated: false });
+  });
+  test("a finish lookback narrows each trade window to the end of the match and requires a finish", async () => {
+    const outputDirectory = await directory();
+    const windows: Array<[string, string]> = [];
+    const unknown = { ...rawEvent, id: "2", slug: "itf-a-b-2026-09-11", finishedTimestamp: undefined,
+      markets: [{ ...rawEvent.markets[0], id: "m2", conditionId: "condition-2", clobTokenIds: ["300", "400"] }] };
+    const result = await downloadResearchDataset({ outputDirectory, sport: "tennis", finishLookbackSeconds: 900 }, {
+      request: async url => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/events") return [rawEvent, unknown];
+        windows.push([parsed.searchParams.get("start")!, parsed.searchParams.get("end")!]);
+        return [];
+      },
+      now: () => Date.parse("2026-09-11T14:00:00Z")
+    });
+    const finish = Date.parse("2026-09-11T12:00:00Z") / 1000;
+    expect(windows).toEqual([[String(finish - 900), String(finish + 900)]]);
+    const dataset = JSON.parse(await readFile(result.datasetPath, "utf8"));
+    expect(dataset.selection.finishLookbackSeconds).toBe(900);
+    expect(dataset.events[1].markets[0].coverage).toMatchObject({ status: "error", reason: "missing-finish-for-lookback" });
+    expect(result.incompleteMarkets).toBe(1);
+  });
+  test("a start listed after the finish is an error window the backtest still accepts", async () => {
+    const outputDirectory = await directory();
+    const rescheduled = { ...rawEvent, startTime: "2026-09-11T13:00:00Z" };
+    const result = await downloadResearchDataset({ outputDirectory, sport: "tennis" }, {
+      request: async url => new URL(url).pathname === "/events" ? [rescheduled] : [],
+      now: () => Date.parse("2026-09-11T14:00:00Z")
+    });
+    const dataset = JSON.parse(await readFile(result.datasetPath, "utf8"));
+    const coverage = dataset.events[0].markets[0].coverage;
+    expect(coverage).toMatchObject({ status: "error", reason: "invalid-event-time-range", pages: 0 });
+    expect(coverage.fromMs).toBeLessThanOrEqual(coverage.toMs);
+    expect(() => backtestDataset(dataset)).not.toThrow();
   });
   test("checks options before creating files or starting network requests", async () => {
     const outputDirectory = await directory();

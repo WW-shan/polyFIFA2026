@@ -159,6 +159,16 @@ describe("price-trigger entries", () => {
     expect(after.tokenId).toBe(before.tokenId);
     expect(after.expiryAtMs).toBe(before.expiryAtMs);
   });
+  test("a trigger whose entry falls at or after the recorded finish is excluded, not traded", () => {
+    const config = { ...options, entryMode: "price-trigger" as const, windowsSeconds: [60] };
+    const late = backtestDataset(dataset([trade("ref", finish + 5_000, .95), trade("dip", finish + 10_000, .69, 3)]), config);
+    expect(late.trials[0]).toMatchObject({ entryAtMs: finish + 6_000, simulatedFilledShares: 0, simulatedPnl: null });
+    expect(late.trials[0]?.exclusions).toContain("entry-after-finish");
+    expect(late.summaries[0]).toMatchObject({ eligibleTrials: 0, excludedTrials: 1, exclusions: { "entry-after-finish": 1 } });
+    // An order placed before the finish may still rest across it.
+    const early = backtestDataset(dataset([trade("ref", finish - 30_000, .95), trade("dip", finish + 10_000, .69, 3)]), config);
+    expect(early.trials[0]).toMatchObject({ exclusions: [], expiryAtMs: finish + 31_000, simulatedFilledShares: 3 });
+  });
 });
 
 describe("research input validation", () => {

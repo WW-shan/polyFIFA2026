@@ -199,11 +199,12 @@ describe("known empty entry ask depth", () => {
   });
 
   test.each(["quote-touch-assumed", "sell-through-volume"] as const)("a complete no-touch interval is an observed zero fill under %s", fillModel => {
-    const data = archive(); delete data.settlements;
+    // A BUY print cannot touch or fill, but shows the trade feed was captured.
+    const data = withChanges(archive(), [trade(1, entry + 100, "0.96", "1", "BUY")]);
     for (const row of data.seconds.filter(row => row.tokenId === "A")) setBook(row, "0.95", null);
     const result = backtestTailArchives([data], { ...options, fillModel });
     expect(result.trials[0]).toMatchObject({ eligible: true, exclusions: [], tokenId: "A", referenceBid: "0.95", referenceAsk: null,
-      touched: false, modeledFilledShares: 0, modeledCost: 0, modeledPnl: 0, settlement: null, pnlEligible: true });
+      touched: false, modeledFilledShares: 0, modeledCost: 0, modeledPnl: 0, pnlEligible: true });
     expect(result.summaries[0]).toMatchObject({ eligibleTrials: 1, excludedTrials: 0, zeroFillTrials: 1, pnlTrialDenominator: 1 });
   });
 
@@ -244,7 +245,8 @@ describe("known empty entry ask depth", () => {
 
 describe("touch evidence and strict SELL volume", () => {
   test("sees an intra-second ask dip and rebound that the second's closing quote hides", () => {
-    const data = withChanges(archive(), [book(1, entry + 100, "0.60", "0.65"), book(2, entry + 900, "0.95", "0.97")]);
+    const data = withChanges(archive(), [book(1, entry + 100, "0.60", "0.65"), book(2, entry + 900, "0.95", "0.97"),
+      trade(3, entry + 950, "0.96", "1", "BUY")]);
     const trial = backtestTailArchives([data], options).trials[0]!;
     expect(trial).toMatchObject({ touchBookChangeCount: 1, touchSecondCount: 0, touchTradeCount: 0, sellThroughShares: 0,
       firstTouchAtMs: entry + 100, modeledFilledShares: 5,
@@ -498,11 +500,34 @@ describe("coverage, exclusions and outcome accounting", () => {
       pnlTrialDenominator: 0, filledCapitalDenominator: 0, unresolvedFilledCost: 3.5 });
   });
 
-  test("complete zero-fill observations need no settlement", () => {
+  test("an unresolved market leaves the PnL denominator whether or not the order filled", () => {
+    // Keeping unresolved zero-fills while dropping unresolved fills would let
+    // the fill outcome decide which trials enter the denominator.
     const data = archive(); delete data.settlements;
     const result = backtestTailArchives([data], options);
+    expect(result.trials[0]).toMatchObject({ eligible: true, modeledFilledShares: 0, modeledCost: 0, modeledFee: 0,
+      modeledPayout: null, modeledPnl: null, pnlEligible: false });
+    expect(result.summaries[0]).toMatchObject({ unresolvedTrials: 1, zeroFillTrials: 1, pnlEligibleTrials: 0, pnlTrialDenominator: 0,
+      modeledPnl: null, pnlPerTrial: null, returnOnFilledCapital: null });
+  });
+
+  test("resolved zero-fill observations still contribute zero PnL", () => {
+    const result = backtestTailArchives([archive()], options);
     expect(result.trials[0]).toMatchObject({ modeledFilledShares: 0, modeledCost: 0, modeledFee: 0, modeledPnl: 0, pnlEligible: true });
     expect(result.summaries[0]).toMatchObject({ unresolvedTrials: 0, zeroFillTrials: 1, pnlEligibleTrials: 1, pnlPerTrial: 0, returnOnFilledCapital: null });
+  });
+
+  test("sell-through-volume cannot confirm a zero fill in an archive without a captured trade feed", () => {
+    const volume = { ...options, fillModel: "sell-through-volume" as const };
+    const silent = backtestTailArchives([archive()], volume);
+    expect(silent.trials[0]).toMatchObject({ eligible: false, pnlEligible: false, modeledFilledShares: null, modeledPnl: null });
+    expect(silent.trials[0]?.exclusions).toEqual(["trade-feed-not-captured"]);
+    expect(silent.summaries[0]).toMatchObject({ eligibleTrials: 0, excludedTrials: 1, zeroFillTrials: 0, pnlTrialDenominator: 0 });
+    // Book-only evidence still decides the touch model.
+    expect(backtestTailArchives([archive()], options).trials[0]).toMatchObject({ eligible: true, modeledFilledShares: 0 });
+    // Any captured print, even one that cannot fill this order, shows the feed was recorded.
+    const recorded = withChanges(archive(), [trade(1, entry + 100, "0.96", "1", "BUY")]);
+    expect(backtestTailArchives([recorded], volume).trials[0]).toMatchObject({ eligible: true, exclusions: [], modeledFilledShares: 0, modeledPnl: 0 });
   });
 
   test("uses explicit profit denominators and never pools parameter alternatives as portfolio trades", () => {
