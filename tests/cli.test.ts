@@ -500,6 +500,174 @@ describe("CLI", () => {
     ]);
   });
 
+  test.each([
+    [{ error: "timeout of 10000ms exceeded" }],
+    [{ error: "Unauthorized/Invalid api key", status: 401 }],
+    [{ canceled: [], not_canceled: { "resting-1": "order already matched" } }]
+  ])("--cancel-order keeps the reservation when the venue does not confirm %j", async (response) => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-cancel-unconfirmed-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([{
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-1",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    }]));
+
+    const result = await runCli([
+      "--mode", "live",
+      "--event-slug", "fifwc-esp-ksa-2026-06-21",
+      "--cancel-order", "resting-1",
+      "--ledger-file", ledgerFile
+    ], {}, { cancelLiveOrder: async () => response });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("LIVE_CANCEL_NOT_CONFIRMED");
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+      expect.objectContaining({ orderId: "resting-1", status: "posted", reservedNotional: 97 })
+    ]);
+  });
+
+  test.each(["ORDER_STATUS_CANCELED", "ORDER_STATUS_CANCELED_MARKET_RESOLVED", "ORDER_STATUS_INVALID", "CANCELED_MARKET_RESOLVED"])(
+    "live passes release a resting reservation closed as %s",
+    async (status) => {
+      const dir = await mkdtemp(join(tmpdir(), "poly-cli-reconcile-prefixed-"));
+      const ledgerFile = join(dir, "ledger.json");
+      await writeFile(ledgerFile, JSON.stringify([{ ...{
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-1",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    }, eventSlug: "fifwc-esp-ksa-2026-06-21", orderId: "closed-resting" }]));
+
+      await runCli([
+        "--mode", "live",
+        "--match-file", "tests/fixtures/matches/spain-5-0.json",
+        "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+        "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+        "--stake", "97",
+        "--ledger-file", ledgerFile
+      ], {}, { getLiveOrder: async (_config, orderId) => ({ id: orderId, status }) });
+
+      expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+        expect.objectContaining({ orderId: "closed-resting", status: "canceled", reservedNotional: 0 })
+      ]);
+    }
+  );
+
+  test("live passes keep an unmatched (accepted, delayed) order reserved", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-reconcile-unmatched-"));
+    const ledgerFile = join(dir, "ledger.json");
+    await writeFile(ledgerFile, JSON.stringify([{ ...{
+      timestamp: "2026-09-23T10:00:00.000Z",
+      mode: "live",
+      status: "posted",
+      eventSlug: "event-1",
+      marketSlug: "market-1",
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      orderId: "resting-1",
+      price: 0.7,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 97
+    }, eventSlug: "fifwc-esp-ksa-2026-06-21", orderId: "delayed" }]));
+
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ], {}, { getLiveOrder: async (_config, orderId) => ({ id: orderId, status: "UNMATCHED" }) });
+
+    expect(JSON.parse(result.stdout)).toMatchObject({ reason: "DUPLICATE_TRADE" });
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+      expect.objectContaining({ orderId: "delayed", status: "posted", reservedNotional: 97 })
+    ]);
+  });
+
+  test("live passes write the submission to the ledger before the executor runs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-write-ahead-"));
+    const ledgerFile = join(dir, "ledger.json");
+    let duringExecution: unknown;
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ], {}, {
+      executeLive: async (decision) => {
+        duringExecution = JSON.parse(await readFile(ledgerFile, "utf8"));
+        return {
+          mode: "live", status: "filled", orderId: "real-order", tokenId: decision.tokenId, price: decision.bestAsk,
+          shares: decision.shares, notional: decision.notional, fee: 0, estimatedPayout: decision.shares, estimatedProfit: 0
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(duringExecution).toEqual([
+      expect.objectContaining({ orderId: expect.stringMatching(/^pending-submission-/), status: "posted", reservedNotional: 97 })
+    ]);
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([
+      expect.objectContaining({ orderId: "real-order", status: "filled" })
+    ]);
+  });
+
+  test("live passes drop the write-ahead entry when the executor refuses before submitting", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-write-ahead-refused-"));
+    const ledgerFile = join(dir, "ledger.json");
+    const result = await runCli([
+      "--mode", "live",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--ledger-file", ledgerFile
+    ], {}, {
+      executeLive: async () => { throw new Error("client unavailable"); }
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(await readFile(ledgerFile, "utf8"))).toEqual([]);
+  });
+
+  test("rejects an unknown option instead of silently using a default", async () => {
+    const result = await runCli([
+      "--mode", "paper",
+      "--match-file", "tests/fixtures/matches/spain-5-0.json",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--min-net-return", "0.05"
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Unknown option: --min-net-return");
+  });
+
   test("live mode without credentials returns LIVE_CREDENTIALS_MISSING", async () => {
     const result = await runCli([
       "--mode", "live",
@@ -865,6 +1033,43 @@ describe("CLI", () => {
     });
   });
 
+  test("watch mode keeps watching after a transient match-state fetch failure", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let calls = 0;
+    const result = await runCli([
+      "--mode", "paper",
+      "--watch", "true",
+      "--event-slug", "fifwc-esp-ksa-2026-06-21",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--interval-ms", "0",
+      "--max-iterations", "2",
+      "--stake", "97"
+    ], {}, {
+      fetchMatchState: async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError("fetch failed");
+        return {
+          ...liveMatch,
+          eventSlug: "fifwc-esp-ksa-2026-06-21",
+          homeTeam: "Spain",
+          awayTeam: "Saudi Arabia",
+          homeGoals: 5,
+          awayGoals: 0,
+          minute: 93,
+          remainingSeconds: 120,
+          remainingSecondsSource: "365scores_added_time_precise_game_time"
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(calls).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "filled", action: "BUY" });
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("WATCH_PASS_FAILED"));
+    errors.mockRestore();
+  });
+
   test("worldcup watch discovers live event slugs before identifying a trade", async () => {
     async function* updates(): AsyncIterable<MatchState> {
       yield {
@@ -960,6 +1165,43 @@ describe("CLI", () => {
         }
       }
     });
+  });
+
+  test.each(["paper", "live"] as const)("%s single pass only buys a locked over when a fake-goal guard can run", async (mode) => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-unguarded-locked-"));
+    const eventSlug = "fifwc-unguarded-locked-2026-07-02";
+    const matchFile = join(dir, "match.json");
+    const marketsFile = join(dir, "markets.json");
+    const orderbookFile = join(dir, "orderbook.json");
+    await writeFile(matchFile, JSON.stringify({
+      eventSlug, homeTeam: "Home", awayTeam: "Away", homeGoals: 1, awayGoals: 0,
+      minute: 20, period: "1H", isLive: true, elapsedSeconds: 20 * 60
+    } satisfies MatchState));
+    await writeFile(marketsFile, JSON.stringify([totalMarket(eventSlug, "Home", "Away", 0.5, "unguarded-under")]));
+    await writeFile(orderbookFile, JSON.stringify({ tokenId: "unguarded-under-over", bids: [], asks: [{ price: 0.97, size: 100 }] }));
+    let executed = false;
+
+    const result = await runCli([
+      "--mode", mode,
+      "--match-file", matchFile,
+      "--markets-file", marketsFile,
+      "--orderbook-file", orderbookFile,
+      "--stake", "50",
+      "--ledger-file", join(dir, "ledger.json")
+    ], {}, {
+      executeLive: async () => {
+        executed = true;
+        throw new Error("unguarded locked buy reached the live executor");
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    if (mode === "paper") {
+      expect(JSON.parse(result.stdout)).toMatchObject({ status: "filled", strategy: "total_over_locked" });
+    } else {
+      expect(JSON.parse(result.stdout)).toMatchObject({ status: "no_trade", reason: "MATCH_NOT_LATE_ENOUGH" });
+      expect(executed).toBe(false);
+    }
   });
 
   test("worldcup watch buys locked overs immediately from score updates without waiting for remaining time", async () => {
@@ -2749,6 +2991,70 @@ describe("CLI", () => {
         }
       }
     });
+  });
+
+  test("worldcup watch keeps clock-polling a match after a transient balance read failure", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-cli-watch-transient-"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let balanceReads = 0;
+    let executions = 0;
+    async function* updates(): AsyncIterable<MatchState> {
+      yield {
+        eventSlug: "fifwc-esp-ksa-2026-06-21",
+        homeTeam: "Spain",
+        awayTeam: "Saudi Arabia",
+        homeGoals: 5,
+        awayGoals: 0,
+        minute: 90,
+        period: "2H",
+        isLive: true,
+        elapsedSeconds: 90 * 60
+      };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const result = await runCli([
+      "--mode", "live",
+      "--watch", "true",
+      "--worldcup", "true",
+      "--markets-file", "tests/fixtures/markets/spain-spreads.json",
+      "--orderbook-file", "tests/fixtures/orderbooks/spain-2p5-ask-097.json",
+      "--stake", "97",
+      "--interval-ms", "0",
+      "--max-iterations", "2",
+      "--ledger-file", join(dir, "ledger.json")
+    ], {
+      POLY_DEPOSIT_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001",
+      POLY_AUTO_REDEEM: "false",
+      POLY_DEPTH_AUDIT_ENABLED: "false"
+    }, {
+      fetchWorldCupEventRefs: async () => [{ eventSlug: "fifwc-esp-ksa-2026-06-21", homeTeam: "Spain", awayTeam: "Saudi Arabia" }],
+      watchSportsUpdates: async () => updates(),
+      fetchMatchState: async () => { throw new Error("page unavailable"); },
+      fetchVerifiedClock: async () => ({
+        remainingSeconds: 120,
+        remainingSecondsSource: "365scores_added_time_precise_game_time"
+      }),
+      readPusdBalance: async () => {
+        balanceReads += 1;
+        if (balanceReads === 1) throw new Error("rpc timeout");
+        return 1000;
+      },
+      executeLive: async (decision) => {
+        executions += 1;
+        return {
+          mode: "live", status: "filled", orderId: "live-after-retry", tokenId: decision.tokenId, price: decision.bestAsk,
+          shares: decision.shares, notional: decision.notional, fee: decision.estimatedFee,
+          estimatedPayout: decision.shares, estimatedProfit: decision.shares - decision.notional - decision.estimatedFee
+        };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(balanceReads).toBe(2);
+    expect(executions).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "watch_complete", last: { status: "filled" } });
+    errors.mockRestore();
   });
 
   test("worldcup watch does not let a slow interval delay verified 365Scores clock polling near the entry window", async () => {

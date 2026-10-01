@@ -1385,7 +1385,7 @@ function isKnownOrderId(orderId: string): boolean {
   return orderId !== "live-order-unknown" && orderId.trim().length > 0;
 }
 
-function isCancelConfirmed(orderId: string, cancelResponse: unknown): boolean {
+export function isCancelConfirmed(orderId: string, cancelResponse: unknown): boolean {
   if (!isKnownOrderId(orderId) || !isRecord(cancelResponse)) return false;
   if (cancelResponse.success === false || errorFieldMessage(cancelResponse.errorMsg) || errorFieldMessage(cancelResponse.error)) return false;
 

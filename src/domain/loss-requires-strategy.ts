@@ -52,7 +52,8 @@ function candidatesForMarket(match: MatchState, market: StrategyMarket, includeL
 function isLiveMatch(match: MatchState): boolean {
   return match.isLive
     && match.ended !== true
-    && (match.period === "1H" || match.period === "HT" || match.period === "2H" || match.period === "ET");
+    // Markets settle on 90 minutes plus stoppage; an extra-time goal cannot lock one.
+    && (match.period === "1H" || match.period === "HT" || match.period === "2H");
 }
 
 function moneylineCandidates(match: MatchState, market: StrategyMarket): SelectedStrategyMarket[] {

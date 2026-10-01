@@ -87,6 +87,8 @@ async function watchScenario(scenario: Scenario = {}) {
       return [];
     });
     vi.spyOn(LiveLedger.prototype, "recordResult").mockResolvedValue(undefined);
+    vi.spyOn(LiveLedger.prototype, "recordPendingSubmission").mockResolvedValue("pending-submission-test");
+    vi.spyOn(LiveLedger.prototype, "discardPendingSubmission").mockResolvedValue(undefined);
   }
   const deps: CliDependencies = {
     fetchWorldCupEventRefs: async () => [{ eventSlug }],

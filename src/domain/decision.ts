@@ -137,10 +137,17 @@ export function buildRestingBidDecision(
   }
 
   let crossedBook = false;
+  let lockedBelowFloor: number | undefined;
   for (const candidate of candidates) {
     const orderbook = orderbooks.find((book) => book.tokenId === candidate.tokenId);
     if (!orderbook) continue;
     const bestAsk = sortedPositiveAsks(orderbook.asks)[0]?.price;
+    // A locked outcome the market still prices below the floor signals a stale
+    // or reversed score; the taker path refuses it and so must a resting bid.
+    if (candidate.locked === true && (bestAsk === undefined || bestAsk < LOCKED_ENTRY_PRICE_FLOOR)) {
+      lockedBelowFloor = bestAsk ?? 0;
+      continue;
+    }
     // A bid at or above the best ask would take instead of rest; the taker path
     // owns that case, so this builder refuses to construct a crossing order.
     if (bestAsk !== undefined && options.price >= bestAsk) {
@@ -186,6 +193,9 @@ export function buildRestingBidDecision(
 
   if (crossedBook) {
     return noTrade("PRICE_TOO_HIGH", match.eventSlug, `Resting bid ${options.price} crosses the best ask; the taker path handles that case`);
+  }
+  if (lockedBelowFloor !== undefined) {
+    return noTrade("DEPTH_TOO_SMALL", match.eventSlug, `Locked orderbook best ask ${lockedBelowFloor} is below locked floor ${LOCKED_ENTRY_PRICE_FLOOR}`);
   }
   return noTrade("NO_ELIGIBLE_STRATEGY", match.eventSlug, "No candidate market had a usable order book for a resting bid");
 }
@@ -320,7 +330,8 @@ export function lockedConditionMatchesScore(match: MatchState, selected: Selecte
 function isLiveMatch(match: MatchState): boolean {
   return match.isLive
     && match.ended !== true
-    && (match.period === "1H" || match.period === "HT" || match.period === "2H" || match.period === "ET");
+    // Markets settle on 90 minutes plus stoppage; an extra-time goal cannot lock one.
+    && (match.period === "1H" || match.period === "HT" || match.period === "2H");
 }
 
 function overLocksAt(line: number): number {

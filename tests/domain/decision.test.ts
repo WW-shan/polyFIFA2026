@@ -294,6 +294,18 @@ describe("buildRestingBidDecision", () => {
     expect(decision).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
   });
 
+  test("applies the locked floor to a resting bid on a locked outcome", () => {
+    const locked: SelectedStrategyMarket = { ...selected, strategy: "total_over_locked", lossRequiresGoals: 999, locked: true };
+    const doubted = buildRestingBidDecision(restingMatch, [locked], [book([{ price: 0.4, size: 100 }])], thresholds, { price: 0.3 });
+    expect(doubted).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+
+    const noAsks = buildRestingBidDecision(restingMatch, [locked], [book([])], thresholds, { price: 0.9 });
+    expect(noAsks).toMatchObject({ action: "NO_TRADE", reason: "DEPTH_TOO_SMALL" });
+
+    const believed = buildRestingBidDecision(restingMatch, [locked], [book([{ price: 0.97, size: 100 }])], thresholds, { price: 0.9 });
+    expect(believed.action).toBe("BUY");
+  });
+
   test("does not rest a bid before the tail window opens", () => {
     const early: MatchState = { ...restingMatch, minute: 10, remainingSeconds: 3000 };
     const decision = buildRestingBidDecision(early, [selected], [book([{ price: 0.97, size: 100 }])], thresholds, { price: 0.7 });

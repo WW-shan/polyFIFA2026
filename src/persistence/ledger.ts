@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readlink, realpath, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, readlink, realpath, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { BuyTradeDecision, TailStrategy, TradeResult, TradeResultLeg } from "../domain/types.js";
 
@@ -72,14 +72,17 @@ export class LiveLedger {
     );
   }
 
-  async recordTrade(entry: LedgerTradeEntry): Promise<void> {
+  async recordTrade(entry: LedgerTradeEntry, replacesOrderId?: string): Promise<void> {
     assertLedgerEntries([entry]);
     const safeEntry = { ...entry };
     if (entry.raw !== undefined) safeEntry.raw = serializeDiagnostic(entry.raw);
     if (entry.legs !== undefined) {
       safeEntry.legs = entry.legs.map((leg) => leg.raw === undefined ? { ...leg } : { ...leg, raw: serializeDiagnostic(leg.raw) });
     }
-    await this.updateEntries((entries) => [...entries, normalizeLedgerEntry(safeEntry)]);
+    await this.updateEntries((entries) => [
+      ...(replacesOrderId === undefined ? entries : entries.filter((existing) => existing.orderId !== replacesOrderId)),
+      normalizeLedgerEntry(safeEntry)
+    ]);
   }
 
   async markRedeemedByConditionIds(conditionIds: readonly string[]): Promise<void> {
@@ -101,22 +104,21 @@ export class LiveLedger {
     await this.updateEntries((entries) => {
       let changed = false;
       const updated = entries.map((entry) => {
-        const legs = entry.legs?.length
-          ? entry.legs.map((leg) => (leg.orderId === target && isActiveLedgerStatus(leg.status)
+        if (entry.legs?.length) {
+          // A basket's own id is synthetic; canceling it addresses every leg.
+          const addressesEntry = entry.orderId === target;
+          const legs = entry.legs.map((leg) => ((leg.orderId === target || addressesEntry) && isActiveLedgerStatus(leg.status)
             ? { ...leg, status: leg.status === "filled" ? "filled" : canceledStatusFor(leg), reservedNotional: 0 }
-            : leg))
-          : undefined;
-        const legChanged = legs !== undefined && legs.some((leg, index) => leg !== entry.legs![index]);
-        const selfMatch = entry.orderId === target && isActiveLedgerStatus(entry.status);
-        if (!legChanged && !selfMatch) return entry;
-        changed = true;
-        if (selfMatch) canceled = true;
-        const next = legChanged ? normalizeLedgerEntry({ ...entry, legs }) : { ...entry };
-        if (selfMatch) {
-          next.status = entry.status === "filled" ? "filled" : canceledStatusFor(entry);
-          next.reservedNotional = 0;
+            : leg));
+          if (!legs.some((leg, index) => leg !== entry.legs![index])) return entry;
+          changed = true;
+          canceled = true;
+          return withUpdatedLegs(entry, legs);
         }
-        return next;
+        if (entry.orderId !== target || !isActiveLedgerStatus(entry.status)) return entry;
+        changed = true;
+        canceled = true;
+        return { ...entry, status: entry.status === "filled" ? "filled" : canceledStatusFor(entry), reservedNotional: 0 };
       });
       return changed ? updated : undefined;
     });
@@ -131,15 +133,16 @@ export class LiveLedger {
    */
   async recordRestingOrderFill(
     orderId: string,
-    fill: { shares: number; price: number; remainingShares?: number }
+    fill: { shares: number; price: number; remainingShares?: number; fee?: number }
   ): Promise<boolean> {
     const target = orderId.trim();
     const { shares, price, remainingShares } = fill;
     if (!target || !Number.isFinite(shares) || shares <= 0 || !Number.isFinite(price) || price <= 0) return false;
     const notional = shares * price;
+    const fee = fill.fee !== undefined && Number.isFinite(fill.fee) && fill.fee > 0 ? fill.fee : 0;
     const status: LedgerStatus = remainingShares !== undefined && remainingShares <= 0 ? "filled" : "partial";
     const reservation = remainingShares === undefined ? undefined : Math.max(0, remainingShares) * price;
-    const applied = { status, price, shares, notional, ...(reservation === undefined ? {} : { reservation }) };
+    const applied = { status, price, shares, notional, fee, ...(reservation === undefined ? {} : { reservation }) };
     let changed = false;
     await this.updateEntries((entries) => {
       const updated = entries.map((entry) => {
@@ -152,7 +155,7 @@ export class LiveLedger {
           const legs = entry.legs.map((leg) => (isTarget(leg) ? filledLedgerLeg(leg, applied) : leg));
           if (!legs.some((leg, index) => leg !== entry.legs![index])) return entry;
           changed = true;
-          return normalizeLedgerEntry({ ...entry, legs });
+          return withUpdatedLegs(entry, legs);
         }
         if (!isTarget(entry)) return entry;
         const filled = filledLedgerEntry(entry, applied);
@@ -199,7 +202,48 @@ export class LiveLedger {
     });
   }
 
-  async recordResult(decision: BuyTradeDecision, result: TradeResult, timestamp = new Date()): Promise<void> {
+  /**
+   * Write-ahead record for a submission about to be sent. Nothing proves the
+   * venue has not accepted an order until the executor returns, so the event
+   * stays blocked (and the notional reserved) if the process dies in between.
+   * The entry is replaced by `recordResult` or dropped by
+   * `discardPendingSubmission` when the executor refused before submitting.
+   */
+  async recordPendingSubmission(decision: BuyTradeDecision, mode: LedgerTradeEntry["mode"], timestamp = new Date()): Promise<string> {
+    const orderId = `${PENDING_SUBMISSION_PREFIX}${randomUUID()}`;
+    const entry: LedgerTradeEntry = {
+      timestamp: timestamp.toISOString(),
+      mode,
+      status: "posted",
+      eventSlug: decision.eventSlug,
+      marketSlug: decision.marketSlug,
+      tokenId: decision.tokenId,
+      conditionId: decision.conditionId,
+      outcome: decision.outcome,
+      orderId,
+      price: decision.bestAsk,
+      shares: 0,
+      notional: 0,
+      reservedNotional: decision.notional
+    };
+    if (decision.strategy !== undefined) entry.strategy = decision.strategy;
+    await this.recordTrade(entry);
+    return orderId;
+  }
+
+  async discardPendingSubmission(pendingOrderId: string): Promise<void> {
+    await this.updateEntries((entries) => {
+      const remaining = entries.filter((entry) => entry.orderId !== pendingOrderId);
+      return remaining.length === entries.length ? undefined : remaining;
+    });
+  }
+
+  async recordResult(
+    decision: BuyTradeDecision,
+    result: TradeResult,
+    timestamp = new Date(),
+    pendingOrderId?: string
+  ): Promise<void> {
     const planned = decision.legs?.length ? decision.legs : [decision];
     const primary = planned.find((leg) => leg.tokenId === result.tokenId);
     const entry: LedgerTradeEntry = {
@@ -234,24 +278,64 @@ export class LiveLedger {
       });
     }
     if (result.raw !== undefined) entry.raw = result.raw;
-    await this.recordTrade(entry);
+    await this.recordTrade(entry, pendingOrderId);
   }
 }
 
+export const PENDING_SUBMISSION_PREFIX = "pending-submission-";
+
 // All instances addressing the same canonical path share one read/modify/write
 // transaction. Reads can observe either complete version because publication is
-// an atomic rename, including for readers outside this process.
+// an atomic rename, including for readers outside this process. Writers in other
+// processes (a `--cancel-order` next to a running watch) are excluded by an
+// exclusive lock file next to the ledger.
 const ledgerUpdates = new Map<string, Promise<void>>();
+const LEDGER_LOCK_TIMEOUT_MS = 15_000;
+const LEDGER_LOCK_STALE_MS = 60_000;
 
 async function serializeLedgerUpdate(filePath: string, update: () => Promise<void>): Promise<void> {
   const previous = ledgerUpdates.get(filePath) ?? Promise.resolve();
-  const current = previous.then(update);
+  const current = previous.then(() => withLedgerFileLock(filePath, update));
   const tail = current.catch(() => {});
   ledgerUpdates.set(filePath, tail);
   try {
     await current;
   } finally {
     if (ledgerUpdates.get(filePath) === tail) ledgerUpdates.delete(filePath);
+  }
+}
+
+async function withLedgerFileLock(filePath: string, update: () => Promise<void>): Promise<void> {
+  const lockPath = `${filePath}.lock`;
+  await mkdir(dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + LEDGER_LOCK_TIMEOUT_MS;
+  const token = `${process.pid}:${randomUUID()}`;
+  for (;;) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      try {
+        await handle.writeFile(token, "utf8");
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (error) {
+      if (!hasErrorCode(error, "EEXIST")) throw error;
+      // A holder that died mid-update leaves its lock behind; updates are short.
+      const lockStat = await stat(lockPath).catch(() => undefined);
+      if (lockStat && Date.now() - lockStat.mtimeMs > LEDGER_LOCK_STALE_MS) {
+        await unlink(lockPath).catch(() => {});
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`LEDGER_LOCKED: timed out waiting for ${lockPath}`);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+  }
+  try {
+    await update();
+  } finally {
+    const holder = await readFile(lockPath, "utf8").catch(() => undefined);
+    if (holder === token) await unlink(lockPath).catch(() => {});
   }
 }
 
@@ -392,7 +476,30 @@ interface RestingFillApplication {
   price: number;
   shares: number;
   notional: number;
+  fee: number;
   reservation?: number;
+}
+
+/**
+ * Applies leg changes to a basket entry. The entry keeps aggregate totals next
+ * to its legs, and any aggregate the legs do not account for is reported as
+ * unassigned exposure, so every leg change must move the aggregates by the
+ * same amount. A legacy remainder the legs never covered is preserved.
+ */
+function withUpdatedLegs(entry: LedgerTradeEntry, legs: LedgerTradeLeg[]): LedgerTradeEntry {
+  const previous = entry.legs ?? [];
+  const delta = (read: (leg: LedgerTradeLeg) => number): number =>
+    legs.reduce((total, leg, index) => total + read(leg) - (previous[index] ? read(previous[index]!) : 0), 0);
+  const next: LedgerTradeEntry = {
+    ...entry,
+    legs,
+    shares: Math.max(0, entry.shares + delta((leg) => leg.shares)),
+    notional: Math.max(0, entry.notional + delta((leg) => leg.notional))
+  };
+  if (entry.reservedNotional !== undefined) {
+    next.reservedNotional = Math.max(0, entry.reservedNotional + delta((leg) => leg.reservedNotional ?? 0));
+  }
+  return normalizeLedgerEntry(next);
 }
 
 function filledLedgerLeg(leg: LedgerTradeLeg, fill: RestingFillApplication): LedgerTradeLeg {
@@ -402,9 +509,9 @@ function filledLedgerLeg(leg: LedgerTradeLeg, fill: RestingFillApplication): Led
     price: fill.price,
     shares: fill.shares,
     notional: fill.notional,
-    fee: 0,
+    fee: fill.fee,
     estimatedPayout: fill.shares,
-    estimatedProfit: fill.shares - fill.notional
+    estimatedProfit: fill.shares - fill.notional - fill.fee
   };
   if (fill.reservation !== undefined) next.reservedNotional = fill.reservation;
   // An unchanged snapshot must not rewrite the ledger on every live pass.

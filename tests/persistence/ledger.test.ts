@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -485,6 +485,110 @@ describe("LiveLedger", () => {
     expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
       expect.objectContaining({ status: "filled", shares: 138.57, reservedNotional: 0 })
     ]);
+  });
+
+  test("a fill on a single-leg basket leaves no phantom unassigned reservation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-rest-leg-fill-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+    const leg = {
+      mode: "live" as const, status: "posted" as const, orderId: "leg-order", tokenId: "token-1",
+      eventSlug: "event-1", marketSlug: "market-1", conditionId: "condition-1", outcome: "Yes",
+      price: 0.7, shares: 0, notional: 0, fee: 0, estimatedPayout: 0, estimatedProfit: 0, reservedNotional: 96.999
+    };
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z", mode: "live", status: "posted", eventSlug: "event-1",
+      marketSlug: "market-1", tokenId: "token-1", conditionId: "condition-1", outcome: "Yes",
+      orderId: "leg-order", price: 0.7, shares: 0, notional: 0, reservedNotional: 96.999, legs: [leg]
+    });
+
+    expect(await ledger.recordRestingOrderFill("leg-order", { shares: 138.57, price: 0.7, remainingShares: 0 })).toBe(true);
+
+    const active = await ledger.readActiveEntries();
+    expect(active).toHaveLength(1);
+    expect(active[0]).toMatchObject({ tokenId: "token-1", status: "filled", shares: 138.57, reservedNotional: 0 });
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ status: "filled", shares: 138.57, notional: expect.closeTo(96.999, 6), reservedNotional: 0 })
+    ]);
+  });
+
+  test("canceling every basket leg releases the basket's aggregate reservation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-basket-cancel-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+    const leg = (orderId: string, tokenId: string) => ({
+      mode: "live" as const, status: "posted" as const, orderId, tokenId,
+      eventSlug: "event-1", marketSlug: `market-${tokenId}`, conditionId: `condition-${tokenId}`, outcome: "Yes",
+      price: 0.5, shares: 0, notional: 0, fee: 0, estimatedPayout: 0, estimatedProfit: 0, reservedNotional: 10
+    });
+    await ledger.recordTrade({
+      timestamp: "2026-09-23T10:00:00.000Z", mode: "live", status: "posted", eventSlug: "event-1",
+      marketSlug: "market-t1", tokenId: "t1", conditionId: "condition-t1", outcome: "Yes",
+      orderId: "live-basket-o1", price: 0.5, shares: 0, notional: 0, reservedNotional: 20,
+      legs: [leg("o1", "t1"), leg("o2", "t2")]
+    });
+
+    expect(await ledger.markCanceledByOrderId("o1")).toBe(true);
+    expect(await ledger.markCanceledByOrderId("o2")).toBe(true);
+
+    expect(await ledger.readActiveEntries()).toEqual([]);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ status: "canceled", reservedNotional: 0 })
+    ]);
+  });
+
+  test("a write-ahead submission blocks the event and is replaced by the executor result", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-pending-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+    const decision = {
+      action: "BUY" as const, eventSlug: "event-1", marketSlug: "market-1", question: "Q", tokenId: "token-1",
+      conditionId: "condition-1", outcome: "Yes", bestAsk: 0.7, availableSize: 200, shares: 100, notional: 70,
+      estimatedFee: 0, estimatedNetReturn: 0.1
+    };
+
+    const pendingId = await ledger.recordPendingSubmission(decision, "live");
+    expect(await ledger.hasActiveEventTrade("event-1")).toBe(true);
+    expect((await ledger.readActiveEntries())[0]).toMatchObject({ orderId: pendingId, status: "posted", reservedNotional: 70 });
+
+    await ledger.recordResult(decision, {
+      mode: "live", status: "filled", orderId: "real-order", tokenId: "token-1", price: 0.7,
+      shares: 100, notional: 70, fee: 0, estimatedPayout: 100, estimatedProfit: 30
+    }, new Date("2026-09-23T10:00:00.000Z"), pendingId);
+
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual([
+      expect.objectContaining({ orderId: "real-order", status: "filled" })
+    ]);
+
+    const discarded = await ledger.recordPendingSubmission(decision, "live");
+    await ledger.discardPendingSubmission(discarded);
+    expect(JSON.parse(await readFile(file, "utf8"))).toHaveLength(1);
+  });
+
+  test("waits for another writer's lock and recovers a stale one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "poly-ledger-lock-"));
+    const file = join(dir, "ledger.json");
+    const ledger = new LiveLedger(file);
+    const entry = {
+      timestamp: "2026-09-23T10:00:00.000Z", mode: "live" as const, status: "filled" as const, eventSlug: "event-1",
+      marketSlug: "market-1", tokenId: "token-1", conditionId: "condition-1", outcome: "Yes",
+      orderId: "order-1", price: 0.7, shares: 1, notional: 0.7
+    };
+
+    await writeFile(`${file}.lock`, "other-process");
+    let written = false;
+    const pending = ledger.recordTrade(entry).then(() => { written = true; });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+    expect(written).toBe(false);
+    await unlink(`${file}.lock`);
+    await pending;
+    expect(written).toBe(true);
+
+    await writeFile(`${file}.lock`, "dead-process");
+    const old = new Date(Date.now() - 120_000);
+    await utimes(`${file}.lock`, old, old);
+    await ledger.recordTrade({ ...entry, orderId: "order-2" });
+    expect(JSON.parse(await readFile(file, "utf8"))).toHaveLength(2);
   });
 
   test("marks lost condition ids inactive after resolution", async () => {

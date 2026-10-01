@@ -1,17 +1,17 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { netReturnRate } from "./domain/fees.js";
+import { netReturnRate, sportsTakerFeePerShare } from "./domain/fees.js";
 import { lockedConditionMatchesScore } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
 import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, DEFAULT_POLYGON_RPC_URL, readPusdBalance } from "./execution/balance.js";
-import { cancelLiveOrder, getLiveOrder, isRestingOrderType, LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
+import { cancelLiveOrder, getLiveOrder, isCancelConfirmed, isRestingOrderType, LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
 import type { LiveExecuteOptions, LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type MarketSettlementStatus, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
-import { LiveLedger, isActiveLedgerStatus, isLockedStrategy, serializeDiagnostic } from "./persistence/ledger.js";
+import { LiveLedger, isActiveLedgerStatus, isLockedStrategy, PENDING_SUBMISSION_PREFIX, serializeDiagnostic } from "./persistence/ledger.js";
 import { fetchOrderbook } from "./polymarket/clob.js";
 import { fetchEventMatchState, fetchEventStrategyMarkets, hasLockedGoalStrategyMarkets } from "./polymarket/event-page.js";
 import { Scores365ClockProvider, type Scores365GoalSignal } from "./polymarket/scores365-clock.js";
@@ -84,6 +84,8 @@ interface SinglePassOptions {
   lockedIncidentPreviousMatch?: MatchState;
   lockedIncidentStakeLimit?: (fraction?: number) => Promise<number>;
   assessLockedScoreRisk?: (match: MatchState, decision: Extract<TradeDecision, { action: "BUY" }>, context: LockedScoreRiskContext) => Promise<LockedScoreRiskResult>;
+  /** The World Cup watch screens fresh goals itself before attaching a guard. */
+  allowUnguardedLocked?: boolean;
 }
 
 interface PendingBuy {
@@ -236,7 +238,17 @@ export async function runCli(
   }
 }
 
-const TERMINAL_ORDER_SNAPSHOT_STATUSES = new Set(["canceled", "cancelled", "expired", "invalid", "rejected", "unmatched"]);
+// Normalized without the venue's `ORDER_STATUS_` prefix. `unmatched` is not
+// terminal: it is an accepted order whose matching was delayed.
+const TERMINAL_ORDER_SNAPSHOT_STATUSES = new Set([
+  "canceled", "cancelled", "canceledmarketresolved", "cancelledmarketresolved", "expired", "invalid", "rejected"
+]);
+
+function orderSnapshotStatus(snapshot: unknown): string | undefined {
+  if (!isRecord(snapshot) || snapshot.status === undefined || snapshot.status === null) return undefined;
+  const lower = String(snapshot.status).toLowerCase();
+  return (lower.startsWith("order_status_") ? lower.slice("order_status_".length) : lower).replace(/[\s_-]+/g, "");
+}
 
 /**
  * Reconciles resting maker bids against the venue. Read-only: it only queries
@@ -257,17 +269,19 @@ async function reconcileRestingOrders(
   const active = await ledger.readActiveEntries();
   // A posted bid is unresolved; a partially filled one stays tracked while it
   // still reserves notional. Taker leftovers never reserve, so they are excluded.
+  // Write-ahead and unknown ids name no venue order; they need an operator.
   const resting = active.filter((entry) =>
-    Boolean(entry.orderId) && (entry.status === "posted" || (entry.reservedNotional ?? 0) > 0));
+    Boolean(entry.orderId)
+    && !entry.orderId.startsWith(PENDING_SUBMISSION_PREFIX)
+    && entry.orderId !== "live-order-unknown"
+    && (entry.status === "posted" || (entry.reservedNotional ?? 0) > 0));
   if (resting.length === 0) return;
   const liveConfig = liveConfigFromEnv(env);
   const readOrder = deps.getLiveOrder ?? getLiveOrder;
   for (const entry of resting) {
     try {
       const snapshot = await readOrder(liveConfig, entry.orderId);
-      const status = typeof snapshot === "object" && snapshot !== null && "status" in snapshot
-        ? String((snapshot as { status: unknown }).status).toLowerCase().replace(/[\s_-]+/g, "")
-        : undefined;
+      const status = orderSnapshotStatus(snapshot);
       const fill = restingFillFromSnapshot(entry, snapshot);
       if (fill) await ledger.recordRestingOrderFill(entry.orderId, fill);
       if (status && TERMINAL_ORDER_SNAPSHOT_STATUSES.has(status)) {
@@ -285,19 +299,25 @@ async function reconcileRestingOrders(
  * phantom `posted` reservation that also blocks the next pass as a duplicate.
  */
 function restingFillFromSnapshot(
-  entry: { price: number; reservedNotional?: number },
+  entry: { price: number; shares: number; reservedNotional?: number },
   snapshot: unknown
-): { shares: number; price: number; remainingShares?: number } | undefined {
+): { shares: number; price: number; remainingShares?: number; fee?: number } | undefined {
   if (!isRecord(snapshot)) return undefined;
   const matched = numericField(snapshot, "size_matched") ?? numericField(snapshot, "sizeMatched");
   if (matched === undefined || matched <= 0) return undefined;
   const price = numericField(snapshot, "price") ?? entry.price;
   if (!(price > 0)) return undefined;
   const original = numericField(snapshot, "original_size") ?? numericField(snapshot, "originalSize");
+  // The reservation only describes the full order before anything traded;
+  // after a partial fill it is the remainder, not the requested size.
   const requested = original
-    ?? (entry.reservedNotional !== undefined && entry.price > 0 ? entry.reservedNotional / entry.price : undefined);
-  if (requested === undefined) return { shares: matched, price };
-  return { shares: matched, price, remainingShares: Math.max(0, requested - matched) };
+    ?? (entry.shares <= 0 && entry.reservedNotional !== undefined && entry.price > 0 ? entry.reservedNotional / entry.price : undefined);
+  // Immediate-or-kill orders only ever take liquidity and pay the taker fee.
+  const orderType = String(snapshot.order_type ?? snapshot.orderType ?? "").toUpperCase();
+  const fee = orderType === "FAK" || orderType === "FOK" ? matched * sportsTakerFeePerShare(price) : undefined;
+  const fill = { shares: matched, price, ...(fee === undefined ? {} : { fee }) };
+  if (requested === undefined) return fill;
+  return { ...fill, remainingShares: Math.max(0, requested - matched) };
 }
 
 function numericField(record: Record<string, unknown>, field: string): number | undefined {
@@ -318,6 +338,16 @@ async function runCancelOrder(
   const liveConfig = liveConfigFromEnv(env);
   const cancel = deps.cancelLiveOrder ?? cancelLiveOrder;
   const response = await cancel(liveConfig, orderId);
+  // The client reports failures (timeouts, auth, `not_canceled`) in the response
+  // instead of throwing. Releasing on an unconfirmed cancel would let the next
+  // pass bid again while this order may still rest or may already have filled.
+  if (!isCancelConfirmed(orderId, response)) {
+    return {
+      exitCode: 1,
+      stdout: `${JSON.stringify({ mode: "live", status: "cancel_not_confirmed", orderId, releasedReservation: false, response: serializeDiagnostic(response) }, null, 2)}\n`,
+      stderr: "LIVE_CANCEL_NOT_CONFIRMED: the venue did not confirm the cancel; the ledger reservation was kept"
+    };
+  }
   const ledger = new LiveLedger(resolveLedgerFile(args, env) ?? "data/live-ledger.json");
   const released = await ledger.markCanceledByOrderId(orderId);
   return ok({ mode: "live", status: "cancel_requested", orderId, releasedReservation: released, response: serializeDiagnostic(response) });
@@ -338,10 +368,13 @@ async function runSinglePass(
       entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes
     });
 
+    // A locked buy trusts the score completely; live money needs the fake-goal
+    // guard, which only the World Cup watch provides.
+    const suppressUnguardedLocked = args.mode === "live" && !options.assessLockedScoreRisk && options.allowUnguardedLocked !== true;
     let markets = args.marketsFile ? await readJsonFile<StrategyMarket[]>(args.marketsFile) : undefined;
     if (!tailWindow.eligible) {
       markets ??= await loadStrategyMarkets(match.eventSlug);
-      const lockedCandidates = selectLossRequiresCandidates(match, markets, {
+      const lockedCandidates = suppressUnguardedLocked ? [] : selectLossRequiresCandidates(match, markets, {
         entryWindowMinutes: args.entryWindowMinutes ?? DEFAULT_THRESHOLDS.entryWindowMinutes,
         allowLockedOutsideEntryWindow: true
       }).filter((candidate) => candidate.locked === true);
@@ -450,7 +483,7 @@ async function runSinglePass(
       return runDecisionFlow(flowInput);
     };
 
-    let decision = runDecision(decisionStake, thresholdOverrides, lockedIncidentBudgetExhausted);
+    let decision = runDecision(decisionStake, thresholdOverrides, lockedIncidentBudgetExhausted || suppressUnguardedLocked);
     if (decision.action !== "BUY") {
       await writeDepthAudit(args, env, {
         match,
@@ -602,12 +635,21 @@ async function runSinglePass(
       return ok(summary(args.mode, lateSignalBlock));
     }
     const executeOptions = liveExecuteOptions(args, thresholds, deps, decision, checkLockedScoreBeforeExecution);
-    const trade = args.mode === "paper"
-      ? await new PaperExecutor().execute(decision)
-      : await (deps.executeLive
-        ? deps.executeLive(decision, executeOptions)
-        : new LiveExecutor(liveConfig).execute(decision, executeOptions));
-    if (ledger) await ledger.recordResult(decision, trade);
+    const pendingOrderId = ledger ? await ledger.recordPendingSubmission(decision, args.mode === "paper" ? "paper" : "live") : undefined;
+    let trade: TradeResult;
+    try {
+      trade = args.mode === "paper"
+        ? await new PaperExecutor().execute(decision)
+        : await (deps.executeLive
+          ? deps.executeLive(decision, executeOptions)
+          : new LiveExecutor(liveConfig).execute(decision, executeOptions));
+    } catch (error) {
+      // The executor reports every submitted leg in its result; a throw means
+      // it refused before any order reached the venue.
+      if (ledger && pendingOrderId) await ledger.discardPendingSubmission(pendingOrderId);
+      throw error;
+    }
+    if (ledger) await ledger.recordResult(decision, trade, new Date(), pendingOrderId);
 
     return ok(summary(args.mode, decision, trade));
 }
@@ -625,7 +667,17 @@ async function runWatch(
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     const eventSlugs = [required(args.eventSlug, "--event-slug")];
     for (const eventSlug of eventSlugs) {
-      const result = await runSinglePass({ ...args, eventSlug }, env, deps);
+      let result: CliResult;
+      try {
+        result = await runSinglePass({ ...args, eventSlug }, env, deps);
+      } catch (error) {
+        // A page or book fetch can fail transiently late in a match; keep
+        // watching. Execution and ledger failures still stop the watch, and the
+        // write-ahead ledger entry keeps any uncertain submission blocked.
+        if (error instanceof LiveExecutionError || (error instanceof Error && error.message.startsWith("LEDGER_"))) throw error;
+        console.error(`WATCH_PASS_FAILED event=${eventSlug} details=${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
       if (result.exitCode !== 0) return result;
 
       last = JSON.parse(result.stdout) as Record<string, unknown>;
@@ -830,7 +882,7 @@ async function runSportsWatch(
     return undefined;
 
     function singlePassOptionsForLockedIncident(lockedIncident: LockedScoreIncident | undefined): SinglePassOptions {
-      const options: SinglePassOptions = { allowActiveEventRefill: true };
+      const options: SinglePassOptions = { allowActiveEventRefill: true, allowUnguardedLocked: true };
       if (!lockedIncident) return options;
       options.lockedIncidentPreviousMatch = lockedIncident.previousMatch;
       options.lockedIncidentStakeLimit = (fraction) => lockedIncidentBudgetRemaining(lockedIncident.key, fraction);
@@ -1358,7 +1410,10 @@ async function runSportsWatch(
       const details = error instanceof Error ? error.message : String(error);
       console.error(`SPORTS_WATCH_EXECUTION_FAILED event=${match.eventSlug} details=${details}`);
       last = sportsWatchExecutionErrorSummary(match, error);
-      activeMatches.delete(match.eventSlug);
+      // A transient data failure (balance RPC, book fetch) late in a match must
+      // not stop clock polling until the next Sports update; only an executor
+      // failure retires the match from polling.
+      if (error instanceof LiveExecutionError || typeof error === "string") activeMatches.delete(match.eventSlug);
       pendingBuys.delete(match.eventSlug);
       refillEventSlugs.delete(match.eventSlug);
     }
@@ -1649,7 +1704,8 @@ function minDefined(...values: Array<number | undefined>): number | undefined {
 function isLiveLockedScoreMatch(match: MatchState): boolean {
   return match.isLive
     && match.ended !== true
-    && (match.period === "1H" || match.period === "HT" || match.period === "2H" || match.period === "ET");
+    // Markets settle on 90 minutes plus stoppage; an extra-time goal cannot lock one.
+    && (match.period === "1H" || match.period === "HT" || match.period === "2H");
 }
 
 function isPositiveNumber(value: unknown): value is number {
@@ -2109,8 +2165,9 @@ function resolveLedgerFile(args: ParsedArgs, env: Record<string, string | undefi
     const configured = nonEmptyEnv(env.POLY_LEDGER_FILE);
     if (configured) return configured;
     // Never let the test suite write the operator's real ledger; tests pass an
-    // explicit --ledger-file when they need one.
-    if ((env.NODE_ENV ?? process.env.NODE_ENV) === "test") return undefined;
+    // explicit --ledger-file when they need one. A test may override NODE_ENV,
+    // so the runner's own marker is checked too.
+    if ((env.NODE_ENV ?? process.env.NODE_ENV) === "test" || process.env.VITEST) return undefined;
     return "data/live-ledger.json";
   }
   return undefined;
@@ -2245,6 +2302,13 @@ async function readJsonFile<T>(file: string): Promise<T> {
   return JSON.parse(await readFile(file, "utf8")) as T;
 }
 
+const KNOWN_CLI_FLAGS = new Set([
+  "mode", "orderType", "stake", "matchFile", "eventSlug", "marketsFile", "orderbookFile", "ledgerFile",
+  "useLiveBalance", "balanceBuffer", "watch", "worldcup", "intervalMs", "maxIterations", "instantBuyNetReturn",
+  "candidateCompareWaitMs", "liveAuditFile", "depthAuditFile", "maxEntryPrice", "minimumNetReturn",
+  "minimumNotional", "entryWindowMinutes", "restPrice", "restSeconds", "postOnly", "cancelOrder", "tailTimeMode"
+]);
+
 function parseArgs(argv: string[]): ParsedArgs {
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
     return { mode: "paper", orderType: "FAK", help: true };
@@ -2259,7 +2323,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (!value || value.startsWith("--")) {
       throw new Error(`Missing value for ${key}`);
     }
-    raw[toCamel(key.slice(2))] = value;
+    const name = toCamel(key.slice(2));
+    // A mistyped risk flag must not silently fall back to its default.
+    if (!KNOWN_CLI_FLAGS.has(name)) throw new Error(`Unknown option: ${key}`);
+    raw[name] = value;
     index += 1;
   }
 
