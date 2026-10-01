@@ -2,11 +2,12 @@
 
 Research and implementation workspace for a Polymarket World Cup single-match tail-entry bot.
 
-The public-data research track records tennis and table-tennis markets for advance resting-order research. It is separate from the World Cup taker/execution logic below. Start with [the continuous collector and status page](docs/continuous-collector.md); [the earlier five-minute replay report](docs/second-replay-acceptance.md) describes a historical validation sample, not today's live collection.
+The public-data research track records soccer, NFL, NBA, NHL and tennis events for late-game pricing research. Each configured profile now retains every market type in its events, including moneyline, handicaps, totals and period winners; table tennis events remain discoverable through the tennis tag. This materially increases token count and disk use compared with the earlier moneyline-only configuration. The collector is separate from the World Cup taker/execution logic below. Start with [the continuous collector and status page](docs/continuous-collector.md); [the earlier five-minute replay report](docs/second-replay-acceptance.md) describes a historical validation sample, not today's live collection.
 
 Start here:
 
 - `docs/worldcup_tail_spread_research.md` — research conclusions, API notes, backtest summaries.
+- `docs/late-game-score-model-research-2026-09-28.md` — live-visible score/time model, walk-forward results, and the shadow-trading gate.
 - `docs/loss_requires_two_goals_strategy_backtest.md` — latest `lossRequiresGoals >= 2` strategy research.
 - `docs/loss_requires2_last3min_review.md` — last-3-minutes review and ranking.
 - `docs/superpowers/specs/2026-06-22-worldcup-tail-spread-bot-design.md` — implementation design.
@@ -16,19 +17,19 @@ Start here:
 
 ## What The Bot Does
 
-This phase handles World Cup single-match markets where the selected bet only loses after at least two adverse goals, plus locked result markets. It accepts an explicit match state, builds all eligible strategy candidates, ranks profitable CLOB ask levels after fees, and sends the resulting buy-leg plan to either a paper executor or an opt-in live CLOB executor.
+This phase handles World Cup single-match markets where the selected bet only loses after at least three adverse goals (`MINIMUM_NON_LOCKED_LOSS_REQUIRES_GOALS` in `src/domain/risk-thresholds.ts`), plus locked result markets. It accepts an explicit match state, builds all eligible strategy candidates, ranks profitable CLOB ask levels after fees, and sends the resulting buy-leg plan to either a paper executor or an opt-in live CLOB executor.
 
 Examples:
 
-- 1-0 strong team lead: buy weak team win `No`, equivalent to strong team not losing.
-- 2-0 lead: buy leader win `Yes` or draw `No`.
-- Current total 1 with `O/U 2.5`: buy `Under`, because two more goals are required to lose.
-- 4-0 Spain: buy `Spain -2.5`, because one adverse goal still covers and two adverse goals lose.
-- Already-hit markets such as total `Over` or BTTS `Yes` are included as locked candidates.
+- 2-0 lead: buy trailing team win `No`, because three adverse goals are required to lose.
+- 3-0 lead: buy leader win `Yes` or draw `No`.
+- Current total 0 with `O/U 2.5`: buy `Under`, because three more goals are required to lose.
+- 5-0 Spain: buy `Spain -2.5`, because one or two adverse goals still cover and three adverse goals lose.
+- Already-hit markets such as total `Over` or BTTS `Yes` are included as locked candidates. Goals scored in extra time never lock a market, because every market settles on 90 minutes plus stoppage time.
 
 Default entry logic requires at least `0.5%` estimated net return after the Polymarket sports taker fee. The default `minimumNetReturn` is `0.005` and `maxEntryPrice` is `0.999999`; ask levels below that return are skipped instead of queued for a later comparison.
 
-Capital allocation is edge-first, not strategy-name-first: once candidates pass `lossRequiresGoals >= 2`, the bot ranks every profitable ask level across all eligible markets by `estimatedNetReturn`. It buys ranked legs until the stake is exhausted, the next level would fall below the configured return floor, or the remaining/current depth is below the minimum notional. The default `minimumNotional` is `1` pUSD, so it only filters dust-sized legs that are too small to submit cleanly. A tiny best ask level no longer blocks use of the next profitable candidate or price level.
+Capital allocation is edge-first, not strategy-name-first: once candidates pass `lossRequiresGoals >= 3`, the bot ranks every profitable ask level across all eligible markets by `estimatedNetReturn`. It buys ranked legs until the stake is exhausted, the next level would fall below the configured return floor, or the remaining/current depth is below the minimum notional. The default `minimumNotional` is `1` pUSD, so it only filters dust-sized legs that are too small to submit cleanly. A tiny best ask level no longer blocks use of the next profitable candidate or price level.
 
 ## Setup
 
@@ -108,12 +109,18 @@ npm run research:backtest -- --input data/research/tennis-example/dataset.json \
 npm run research:backtest -- --input data/research/tennis-example/dataset.json \
   --output-dir data/research/tennis-example/trigger --entry-mode price-trigger
 
+# Late-game score/time shadow monitor (NFL or NBA); reads only, never trades
+python3 tools/research/export_late_score_model.py nfl /tmp/espn_states_nfl.json.gz 4 900 \
+  --out data/research/models/late-score-nfl.json
+npm run shadow:nfl                       # continuous shadow run during live games
+npm run shadow:late-game -- --league nfl --once --out data/research/shadow/smoke.ndjson
+
 npm run research -- --help
 ```
 
 The default entry threshold is 0.90 and the maximum reference age is 120 seconds; change them with `--entry-min-price` and `--max-entry-age-seconds`. These are backtest parameters, not collection filters. `--shares` changes order size. Entry uses the latest pre-entry second's trade prices (including the labeled binary complement), independently of final payout. A bid at/above that reference is excluded from this resting-order screen.
 
-`price-trigger` uses neither final finish time for entry nor for expiry. It is a price-only baseline: it can trigger or remain active after the recorded match finish. Inspect `entryAtMs`, `expiryAtMs` and `finishAtMs`; do not call those post-finish scenarios pre-finish opportunities.
+`price-trigger` uses neither final finish time for entry nor for expiry. It is a price-only baseline, but a trigger whose entry would fall at or after the recorded match finish is excluded as `entry-after-finish`; an order placed before the finish can still remain active after it. Inspect `entryAtMs`, `expiryAtMs` and `finishAtMs`; do not call fills after the finish pre-finish opportunities.
 
 Outputs: `dataset.json` plus raw HTTP requests/replies; then `summary.csv`, `trials.csv`, `report.json`, and an input-hash manifest. Every output directory must be new; existing evidence is never overwritten. `--require-finish` explicitly excludes missing-finish matches from the download sample and reports the count; omit it to retain those samples. Built-in sport tags also support `table-tennis`, `cs2`, `dota2`, and `valorant`; custom sports require `--tag-id`.
 
@@ -194,9 +201,9 @@ World Cup watch mode (`--watch --worldcup true`) discovers open World Cup events
 
 World Cup watch buys immediately once a ranked leg passes the 0.5% default minimum net return. It does not wait 60 seconds for cross-match comparison by default. Deferred comparison is only an explicit experiment: pass `--minimum-net-return 0`, `--instant-buy-net-return N`, and `--candidate-compare-wait-ms N` together if you want to test that behavior.
 
-The entry window is strict: World Cup watch mode overlays Polymarket Sports updates with the 365Scores public single-game clock, then opens only when `2nd Half + addedTime + preciseGameTime` computes verified `remainingSeconds <= 180`. There is no `87'` or `90:00+` fallback. If 365Scores does not provide the required clock fields, the bot returns `MATCH_NOT_LATE_ENOUGH` and does not fetch balances, orderbooks, or place orders.
+The entry window is strict: World Cup watch mode overlays Polymarket Sports updates with the 365Scores public single-game clock, then opens only when `2nd Half + addedTime + preciseGameTime` computes verified `remainingSeconds` within `--entry-window-minutes` (default 4, i.e. `<= 240`). The clock is not verified until 365Scores has announced a non-zero `addedTime`. There is no `87'` or `90:00+` fallback. If 365Scores does not provide the required clock fields, the bot returns `MATCH_NOT_LATE_ENOUGH` and does not fetch balances, orderbooks, or place orders.
 
-Locked goal buys use an additional fake-goal guard. The watch loop caches one-goal-ahead locked orderbooks before the score changes, then after a score increase it requires a non-conflicting 365Scores goal signal plus stable S1/S2 orderbook delta before buying. If 365Scores is unavailable, only high-price locked decisions at `0.98+` can use a market-only fallback, and only when S0/S1/S2 stale liquidity is still stable. 365Scores no-goal/VAR-disallowed signals, post-regulation/extra-time goal events, score conflicts, best-ask retrace, missing stable post-goal liquidity, locked asks below `0.85` that a limit buy would cross, or isolated related-market movement block the locked buy; high return alone no longer creates a 5%/10% unconfirmed cap path.
+Locked goal buys use an additional fake-goal guard. The watch loop caches one-goal-ahead locked orderbooks before the score changes, then after a score increase it requires a non-conflicting 365Scores goal signal plus stable S1/S2 orderbook delta before buying. If 365Scores is unavailable, a locked decision can use the market-only fallback only when a pre-goal S0 orderbook was cached and the S1/S2 post-goal orderbooks show stable liquidity at or above the minimum notional. The single-event paths (`--event-slug` with or without `--watch`) have no fake-goal guard, so in live mode they never buy locked markets. 365Scores no-goal/VAR-disallowed signals, post-regulation/extra-time goal events, score conflicts, best-ask retrace, missing stable post-goal liquidity, locked asks below `0.85` that a limit buy would cross, or isolated related-market movement block the locked buy; high return alone no longer creates a 5%/10% unconfirmed cap path.
 
 Set `POLY_LIVE_AUDIT_FILE=data/live-sports-audit.ndjson` to append raw Sports WebSocket updates and normalized match-update audit records as NDJSON for replay/debugging.
 
@@ -217,8 +224,9 @@ Semantics:
 - Entries at or below `--rest-price` are still taken immediately (`--max-entry-price` is capped at the bid price), so a cheaper ask is never missed.
 - When nothing is takable at or below the bid price, the planner builds a maker bid at exactly `--rest-price` and the executor signs a **size-based limit order** (not an amount-based market order).
 - Resting legs are maker-only by default (`--post-only false` to allow taking), which guarantees maker status and no taker fee; the venue charges makers nothing, so the recorded fee is `0`.
-- `--order-type` defaults to `GTD` whenever `--rest-price` is set; `FAK`/`FOK` can only take, so combining one of them with `--rest-price` is refused before any submission instead of silently sending an order that can never rest (use `--max-entry-price` to cap a taker-only order). `GTD` signs `expiration = now + 60 + max(rest-seconds, 120)`, and the venue expires the order roughly a minute early, so an abandoned run cannot leave an order on the book. `--order-type GTC` has no venue expiry and must be removed with `--cancel-order <orderId>`.
+- `--order-type` defaults to `GTD` whenever `--rest-price` is set; `FAK`/`FOK` can only take, so combining one of them with `--rest-price` is refused before any submission instead of silently sending an order that can never rest (use `--max-entry-price` to cap a taker-only order). `GTD` signs `expiration = now + 60 + max(rest-seconds, 120)`, and the venue expires the order roughly a minute early, so an abandoned run cannot leave an order on the book. `--order-type GTC` has no venue expiry and must be removed with `--cancel-order <orderId>`. The ledger reservation is released only when the venue confirms the cancel; a timeout, auth error or `not_canceled` answer exits non-zero and keeps the reservation.
 - Every live pass first reconciles ledger entries that still hold a reservation against the venue order snapshot. A bid that traded is recorded from the venue's cumulative `size_matched` as an owned position (`filled`, or `partial` when only part of the size matched), so a hit bid stops being an unresolved submission that blocks the event. Once an order reads back as canceled/expired/rejected, whatever never filled is released, so a GTD expiry does not block the event forever.
+- Before any live submission the ledger records a `pending-submission-*` entry that reserves the stake and blocks the event; the executor result replaces it. If the process dies in between, that entry stays and blocks the event until an operator checks the venue for the order and removes it. Ledger writers in other processes (for example `--cancel-order` next to a running watch) are serialized through a `<ledger>.lock` file.
 - The venue minimum order size (`min_order_size`, currently 5 shares) and the market tick size are read from `GET /book`; a bid that would be below the minimum or off the price grid is refused before signing instead of being sent.
 - Paper mode reports a resting bid as `posted` with `reservedNotional` rather than as a fill, because resting does not trade.
 
