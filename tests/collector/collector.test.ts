@@ -58,7 +58,8 @@ function lifecycleEvent(id: string, closed = false, finishedAtMs?: number): Coll
 
 test("journals 365Scores point-level tennis frames for watched matches", async () => {
   const fixture = JSON.parse(await readFile(new URL("../fixtures/scores365-tennis-game.json", import.meta.url), "utf8")) as unknown;
-  const tennis = { ...event(), sport: "tennis", title: "Guido Ivan Justo vs Pedro Sakamoto", eventSlug: "atp-justo-sakamoto" };
+  // Gamma reports league slugs, not "tennis"; the tag is the discriminator.
+  const tennis = { ...event(), sport: "atp", tags: ["tennis"], title: "Guido Ivan Justo vs Pedro Sakamoto", eventSlug: "atp-justo-sakamoto" };
   const harness = memoryRuntime({ tennisPointsIntervalMs: 15_000 } as CollectorOptions, {
     discover: async () => [tennis],
     request: async (url) => {

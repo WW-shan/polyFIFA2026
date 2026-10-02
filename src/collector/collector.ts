@@ -529,8 +529,15 @@ export class CollectorRuntime {
     if (!this.collecting || !this.journal) return Promise.resolve();
     if (this.tennisPointsInFlight) return this.tennisPointsInFlight;
     const run = Promise.resolve().then(async () => {
-      const targets = this.events.filter(event => event.sport === "tennis")
-        .map(event => ({ eventSlug: event.eventSlug, title: event.title }));
+      // Gamma reports tennis events with `sport="atp"`/`"wta"` (and sometimes
+      // an object shape that catalog normalizes to the league slug), so the
+      // sport string alone misses every match; the tennis tag is the reliable
+      // discriminator.
+      const targets = this.events.filter(event => {
+        const sport = event.sport?.trim().toLowerCase();
+        return (sport !== undefined && ["tennis", "atp", "wta", "itf"].includes(sport))
+          || event.tags.some(tag => ["tennis", "atp", "wta", "itf"].includes(tag.trim().toLowerCase()));
+      }).map(event => ({ eventSlug: event.eventSlug, title: event.title }));
       if (targets.length === 0) return;
       const results = await this.tennisPointsPoller.poll(targets);
       for (const result of results) await this.recordTennisPointFrame(result);

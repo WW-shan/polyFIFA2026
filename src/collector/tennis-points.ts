@@ -352,14 +352,54 @@ export function tennisNameKey(name: string): string {
  * Pairs a 365Scores game with a Polymarket event title (`"A vs B"` / `"A vs. B"`)
  * by requiring both player names, in either order.
  */
+const NAME_STOPWORDS = new Set(["de", "del", "della", "van", "von", "der", "den", "da", "dos", "di", "la", "le", "jr", "sr", "ii", "iii", "iv"]);
+
+/** Word tokens of a player name, accent/punctuation folded and stopwords dropped. */
+export function tennisNameTokens(name: string): string[] {
+  return name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/).filter(token => token.length > 0 && !NAME_STOPWORDS.has(token));
+}
+
+/**
+ * Name matching has to survive both orders and shortened names: Polymarket
+ * publishes `"Yunchaokete Bu"` while 365Scores publishes `"Bu Yunchaokete"`,
+ * and `"Matheus Pucinelli de Almeida"` versus `"Matheus Almeida"`. Compare
+ * token sets, requiring the shorter name's tokens to all appear in the longer
+ * one plus at least one meaningful (non-initial) shared fragment.
+ */
+export function tennisNamesMatch(a: string, b: string): boolean {
+  const keyA = tennisNameKey(a), keyB = tennisNameKey(b);
+  if (!keyA || !keyB) return false;
+  if (keyA === keyB) return true;
+  // Concatenated-key containment is deliberately not used: "Mackinlay" is a
+  // prefix of "Mackinlay J.", and accepting that would pair a singles event
+  // with a doubles pair. Token coverage below handles hyphens, accents and
+  // given/family order without that false positive.
+  const left = new Set(tennisNameTokens(a)), right = new Set(tennisNameTokens(b));
+  if (left.size === 0 || right.size === 0) return false;
+  const [small, large] = left.size <= right.size ? [left, right] : [right, left];
+  if (small.size < 2 && small.size !== large.size) return false;
+  let shared = 0, meaningful = false;
+  for (const token of small) {
+    if (!large.has(token)) continue;
+    shared += 1;
+    if (token.length >= 4) meaningful = true;
+  }
+  return shared === small.size && meaningful;
+}
+
 export function matchTennisFrameToTitle(frame: { homeName: string; awayName: string }, title: string): boolean {
   const [left, right] = title.split(/\s+vs\.?\s+/i);
   if (!left || !right) return false;
-  const a = tennisNameKey(left), b = tennisNameKey(right);
-  const home = tennisNameKey(frame.homeName), away = tennisNameKey(frame.awayName);
-  if (!a || !b || !home || !away) return false;
-  const close = (x: string, y: string) => x === y || (x.length >= 5 && y.length >= 5 && (x.includes(y) || y.includes(x)));
-  return (close(a, home) && close(b, away)) || (close(a, away) && close(b, home));
+  const { homeName, awayName } = frame;
+  // A doubles pair ("A./B. vs C./D.") must never pair with a singles event
+  // just because one surname is shared.
+  const frameDoubles = homeName.includes("/") || awayName.includes("/");
+  const titleDoubles = left.includes("/") || right.includes("/");
+  if (frameDoubles !== titleDoubles) return false;
+  const direct = tennisNamesMatch(left, homeName) && tennisNamesMatch(right, awayName);
+  const swapped = tennisNamesMatch(left, awayName) && tennisNamesMatch(right, homeName);
+  return direct !== swapped;
 }
 
 export interface TennisEntrySignal {

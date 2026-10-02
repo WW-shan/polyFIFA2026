@@ -111,6 +111,19 @@ describe("365Scores tennis point frames", () => {
     expect(matchTennisFrameToTitle(value, "Somebody Else vs Pedro Sakamoto")).toBe(false);
   });
 
+  test("matches swapped given/family names and shortened names", () => {
+    expect(matchTennisFrameToTitle({ homeName: "Bu Yunchaokete", awayName: "Novak Djokovic" },
+      "China Open: Yunchaokete Bu vs Novak Djokovic")).toBe(true);
+    expect(matchTennisFrameToTitle({ homeName: "Matheus Almeida", awayName: "Tomas Barrios Vera" },
+      "Curitiba: Matheus Pucinelli de Almeida vs Tomas Barrios")).toBe(true);
+    expect(matchTennisFrameToTitle({ homeName: "Sascha Gueymard Wayenburg", awayName: "Clement Tabur" },
+      "Mouilleron-Le-Captif: Clement Tabur vs Sascha Gueymard-Wayenburg")).toBe(true);
+    expect(matchTennisFrameToTitle({ homeName: "Mackinlay J.", awayName: "Okonkwo O." },
+      "Mackinlay vs Okonkwo")).toBe(false);
+    expect(matchTennisFrameToTitle({ homeName: "Novak Djokovic", awayName: "Carlos Alcaraz" },
+      "Novak Djokovic vs Carlos Alcaraz")).toBe(true);
+  });
+
   test("builds the public URLs and date parameters", () => {
     expect(tennisDateParam(Date.parse("2026-10-01T18:00:00.000Z"))).toBe("02/10/2026");
     expect(tennisGameUrl(4867638)).toContain("gameId=4867638");
