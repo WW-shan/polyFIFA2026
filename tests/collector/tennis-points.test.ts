@@ -4,7 +4,8 @@ import { describe, expect, test } from "vitest";
 import {
   SCORES365_TIMEZONE, TennisPointsPoller, isLiveTennisFrame, liveTennisGamesFromAllScores,
   matchTennisFrameToTitle, normalizeTennisPointFrame, parseTennisSetStages, tennisAllScoresUrl,
-  tennisDateParam, tennisEntrySignal, tennisGameUrl, type TennisPointFrame
+  tennisDateParam, tennisEntrySignal, tennisFrameSideForTitleOutcome, tennisFrameTitleOrientation,
+  tennisGameUrl, type TennisPointFrame
 } from "../../src/collector/tennis-points.js";
 
 const fixture = JSON.parse(readFileSync(join(__dirname, "../fixtures/scores365-tennis-game.json"), "utf8")) as unknown;
@@ -72,7 +73,20 @@ describe("365Scores tennis point frames", () => {
     expect(signal.tiebreak).toBe(true);
     expect(signal.lateSet).toBe(true);
     expect(signal.regularGame).toBe(false);
+    expect(signal.favoriteLeadsSet).toBe(false);
     expect(signal.candidate).toBe(false);
+  });
+
+  test("keeps extended tiebreak counters instead of collapsing 8-8 to 0-0", () => {
+    const raw = structuredClone(fixture) as { game: { stages: Array<Record<string, unknown>>; currentPointByPointGame: { servingCompetitorId: number; points: unknown[] } } };
+    const set = raw.game.stages.find(stage => stage.name === "Set 2")!;
+    set.homeCompetitorScore = 6; set.awayCompetitorScore = 6;
+    const game = raw.game.stages.find(stage => stage.name === "Game")!;
+    game.homeCompetitorScore = 8; game.awayCompetitorScore = 8;
+    raw.game.currentPointByPointGame.servingCompetitorId = 69017;
+    raw.game.currentPointByPointGame.points = [];
+    const value = normalizeTennisPointFrame(raw, observedAtMs)!;
+    expect(value.game).toMatchObject({ home: "8", away: "8", tiebreak: true });
   });
 
   test("flags the regular-game point loss as the entry candidate", () => {
@@ -89,6 +103,30 @@ describe("365Scores tennis point frames", () => {
   test("does not fire before the favourite loses a service point", () => {
     const signal = tennisEntrySignal(frame({ game: { serving: "home", home: "40", away: "0", tiebreak: false, breakPoint: false, setPoint: true, matchPoint: true, points: [] } }))!;
     expect(signal.serverLostPoints).toBe(0);
+    expect(signal.candidate).toBe(false);
+  });
+
+  test("uses the receiver score as a lower bound when 365 starts the point list at deuce", () => {
+    const signal = tennisEntrySignal(frame({
+      game: {
+        serving: "home", home: "40", away: "40", tiebreak: false, breakPoint: false, setPoint: false, matchPoint: false,
+        points: [{ winner: null, home: 40, away: 40, important: 0 }]
+      }
+    }))!;
+    expect(signal.serverLostPoints).toBe(3);
+    expect(signal.candidate).toBe(true);
+  });
+
+  test("does not fire when the favourite is trailing the live set", () => {
+    const signal = tennisEntrySignal(frame({
+      sets: [
+        { name: "Set 1", shortName: "S1", home: 6, away: 2, ended: true, live: false },
+        { name: "Set 2", shortName: "S2", home: 4, away: 5, ended: false, live: true }
+      ],
+      game: { serving: "home", home: "0", away: "15", tiebreak: false, breakPoint: false, setPoint: false, matchPoint: false, points: [] }
+    }))!;
+    expect(signal.lateSet).toBe(true);
+    expect(signal.favoriteLeadsSet).toBe(false);
     expect(signal.candidate).toBe(false);
   });
 
@@ -122,6 +160,19 @@ describe("365Scores tennis point frames", () => {
       "Mackinlay vs Okonkwo")).toBe(false);
     expect(matchTennisFrameToTitle({ homeName: "Novak Djokovic", awayName: "Carlos Alcaraz" },
       "Novak Djokovic vs Carlos Alcaraz")).toBe(true);
+  });
+
+  test("maps Polymarket outcome order to the 365Scores home/away coordinate", () => {
+    const direct = { homeName: "Bu Yunchaokete", awayName: "Novak Djokovic" };
+    expect(tennisFrameTitleOrientation(direct, "China Open: Yunchaokete Bu vs Novak Djokovic")).toBe("direct");
+    expect(tennisFrameSideForTitleOutcome(direct, "China Open: Yunchaokete Bu vs Novak Djokovic", 0)).toBe("home");
+    expect(tennisFrameSideForTitleOutcome(direct, "China Open: Yunchaokete Bu vs Novak Djokovic", 1)).toBe("away");
+
+    const swapped = { homeName: "Sascha Gueymard Wayenburg", awayName: "Clement Tabur" };
+    const title = "Mouilleron-Le-Captif: Clement Tabur vs Sascha Gueymard-Wayenburg";
+    expect(tennisFrameTitleOrientation(swapped, title)).toBe("swapped");
+    expect(tennisFrameSideForTitleOutcome(swapped, title, 0)).toBe("away");
+    expect(tennisFrameSideForTitleOutcome(swapped, title, 1)).toBe("home");
   });
 
   test("builds the public URLs and date parameters", () => {

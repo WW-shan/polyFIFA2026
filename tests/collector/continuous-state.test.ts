@@ -81,7 +81,7 @@ describe("persistent continuous capture observations", () => {
     const status = state.snapshot();
     expect(status.tennisPoints).toHaveLength(1);
     expect(status.tennisPoints![0]).toMatchObject({ key: "game:123", eventSlug: "game", scores365GameId: 4867638,
-      setsToWin: 2, game: { home: "15", away: "30" }, signal: { candidate: true, serverLostPoints: 1 } });
+      setsToWin: 2, game: { home: "15", away: "30" }, signal: { candidate: true, serverLostPoints: 2 } });
     expect(status.games[0]?.lastSeenAtMs).toBe(300);
   });
 

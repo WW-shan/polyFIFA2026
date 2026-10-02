@@ -163,9 +163,10 @@ export function parseTennisGameStage(
   const rawHome = numberValue(live?.homeCompetitorScore);
   const rawAway = numberValue(live?.awayCompetitorScore);
   if (!live || rawHome === null || rawAway === null) return null;
-  // Some feeds keep 15/30/40 notation inside a tiebreak; only treat small
-  // counters as raw points when a 6-6 tiebreak is actually being played.
-  const rawCounts = tiebreak && rawHome <= 7 && rawAway <= 7;
+  // 365Scores uses raw point counts for tiebreaks, including extended
+  // tiebreaks (8-8, 12-12, ...).  Do not clamp at 7: the old guard turned
+  // 8-8 into "0-0" and corrupted both the displayed score and the signal.
+  const rawCounts = tiebreak;
   const homePoints = rawCounts ? String(Math.trunc(rawHome)) : pointLabel(rawHome);
   const awayPoints = rawCounts ? String(Math.trunc(rawAway)) : pointLabel(rawAway);
   if (homePoints === null || awayPoints === null) return null;
@@ -388,18 +389,39 @@ export function tennisNamesMatch(a: string, b: string): boolean {
   return shared === small.size && meaningful;
 }
 
-export function matchTennisFrameToTitle(frame: { homeName: string; awayName: string }, title: string): boolean {
+export function tennisFrameTitleOrientation(frame: { homeName: string; awayName: string }, title: string): "direct" | "swapped" | null {
   const [left, right] = title.split(/\s+vs\.?\s+/i);
-  if (!left || !right) return false;
+  if (!left || !right) return null;
   const { homeName, awayName } = frame;
   // A doubles pair ("A./B. vs C./D.") must never pair with a singles event
   // just because one surname is shared.
   const frameDoubles = homeName.includes("/") || awayName.includes("/");
   const titleDoubles = left.includes("/") || right.includes("/");
-  if (frameDoubles !== titleDoubles) return false;
+  if (frameDoubles !== titleDoubles) return null;
   const direct = tennisNamesMatch(left, homeName) && tennisNamesMatch(right, awayName);
   const swapped = tennisNamesMatch(left, awayName) && tennisNamesMatch(right, homeName);
-  return direct !== swapped;
+  if (direct === swapped) return null;
+  return direct ? "direct" : "swapped";
+}
+
+/** True when a 365Scores frame and a Polymarket title describe the same pairing. */
+export function matchTennisFrameToTitle(frame: { homeName: string; awayName: string }, title: string): boolean {
+  return tennisFrameTitleOrientation(frame, title) !== null;
+}
+
+/**
+ * Map a Polymarket moneyline outcome index (0 = first outcome in Gamma) to the
+ * 365Scores home/away coordinate.  The two feeds do not guarantee the same
+ * order, so live execution must use this instead of assuming index 0 is home.
+ */
+export function tennisFrameSideForTitleOutcome(
+  frame: { homeName: string; awayName: string }, title: string, outcomeIndex: number
+): "home" | "away" | null {
+  if (outcomeIndex !== 0 && outcomeIndex !== 1) return null;
+  const orientation = tennisFrameTitleOrientation(frame, title);
+  if (orientation === null) return null;
+  if (orientation === "direct") return outcomeIndex === 0 ? "home" : "away";
+  return outcomeIndex === 0 ? "away" : "home";
 }
 
 export interface TennisEntrySignal {
@@ -416,6 +438,8 @@ export interface TennisEntrySignal {
   tiebreak: boolean;
   /** A normal service game, not a tiebreak. */
   regularGame: boolean;
+  /** The match favourite is also ahead in the live set. */
+  favoriteLeadsSet: boolean;
   favoriteServing: boolean;
   /** Points the receiver has won in the current game == points the server lost. */
   serverLostPoints: number;
@@ -463,20 +487,27 @@ export function tennisEntrySignal(frame: TennisPointFrame): TennisEntrySignal | 
   const late = set ? lateGameScore(set.home, set.away) : { late: false, tiebreak: false };
   const serving = game.serving;
   const favoriteServing = serving === favored;
+  const favoriteLeadsSet = set !== null
+    && (favored === "home" ? set.home > set.away : set.away > set.home);
   const receiverPoints = serving === null ? null : serving === "home" ? game.away : game.home;
   const receiverValue = receiverPoints === null ? null
     : game.tiebreak && /^\d+$/.test(receiverPoints) ? Number(receiverPoints) : POINT_VALUES[receiverPoints] ?? null;
   const history = game.points;
   const serverLostFromHistory = serving === null ? 0 : history.filter(point => point.winner !== null && point.winner !== serving).length;
-  const serverLostPoints = history.length > 0 ? serverLostFromHistory : receiverValue ?? 0;
+  // Some 365Scores point lists start with the current score as a placeholder
+  // (for example 40-40 with `winnerCompetitorId: 0`).  The receiver's current
+  // point value still gives a lower bound on how many points the server has
+  // lost, so never undercount just because that placeholder is the first row.
+  const receiverMinimum = receiverValue ?? 0;
+  const serverLostPoints = Math.max(serverLostFromHistory, receiverMinimum);
   const lastPoint = history.length > 0 ? history[history.length - 1]! : null;
   const recentPointLoss = lastPoint !== null && serving !== null && lastPoint.winner !== null && lastPoint.winner !== serving;
   return {
     favored, favoredSets, trailerSets, setsToWin, oneSetFromMatch, setGames,
     lateSet: late.late, tiebreak: late.tiebreak, regularGame: late.late && !late.tiebreak,
-    favoriteServing, serverLostPoints, recentPointLoss,
+    favoriteServing, favoriteLeadsSet, serverLostPoints, recentPointLoss,
     breakPointAgainstFavorite: game.breakPoint && favoriteServing,
-    candidate: oneSetFromMatch && late.late && !late.tiebreak && favoriteServing && serverLostPoints >= 1
+    candidate: oneSetFromMatch && late.late && !late.tiebreak && favoriteLeadsSet && favoriteServing && serverLostPoints >= 1
   };
 }
 
