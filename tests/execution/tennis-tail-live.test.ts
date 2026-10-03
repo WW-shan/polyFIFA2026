@@ -250,6 +250,37 @@ describe("runTennisTailWatch ladder parity", () => {
     expect(summary.levelsPlaced).toBe(5);
   });
 
+  test("keeps sweeping while a quiet book can still rest a higher level", async () => {
+    const file = await ledgerFile();
+    const ledger = new LiveLedger(file);
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+    const books: Record<string, OrderbookSnapshot> = {
+      "token-swiatek": { ...book, bids: [{ price: 0.90, size: 500 }], asks: [{ price: 0.95, size: 500 }] },
+      "token-gauff": opponentBook(0.05)
+    };
+    let sleeps = 0;
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher(books),
+        placeLadder,
+        ledger,
+        sleep: async () => {
+          sleeps += 1;
+          // The book sits unchanged for one poll, then the bid rises to 0.93.
+          if (sleeps >= 2) books["token-swiatek"] = { ...book, bids: [{ price: 0.93, size: 500 }], asks: [{ price: 0.95, size: 500 }] };
+        }
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 3 }
+    );
+
+    expect(placeLadder).toHaveBeenCalledTimes(2);
+    expect(placeLadder.mock.calls[0]![0].map(level => level.price)).toEqual([0.80, 0.85, 0.88, 0.90]);
+    expect(placeLadder.mock.calls[1]![0].map(level => level.price)).toEqual([0.92]);
+    expect(summary.levelsPlaced).toBe(5);
+  });
+
   test("does not re-place a level that is already resting in the ledger", async () => {
     const file = await ledgerFile();
     const ledger = new LiveLedger(file);

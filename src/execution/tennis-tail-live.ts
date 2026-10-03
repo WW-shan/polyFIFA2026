@@ -247,7 +247,10 @@ async function sweepEvent(
   if (planned.action === "SKIP") {
     if (planned.reason === "NOT_GEN1") return; // not an entry state; nothing to report
     if (planned.reason === "NO_NEW_LEVELS") {
-      state.done = true; // every qualifying level is already resting
+      // Every level restable *right now* is already resting, but the backtest
+      // arms each level at its own first qualifying second: a quiet poll must
+      // not stop a higher level that can still become restable before the set
+      // ends. The per-event sweep cap bounds the retries.
       return;
     }
     if (planned.reason === "BUDGET_EXHAUSTED" || planned.reason === "MARKET_NOT_MONEYLINE" || planned.reason === "NO_MATCHING_TOKEN") {

@@ -126,8 +126,46 @@ describe("365Scores tennis point frames", () => {
       game: { serving: "home", home: "0", away: "15", tiebreak: false, breakPoint: false, setPoint: false, matchPoint: false, points: [] }
     }))!;
     expect(signal.lateSet).toBe(true);
+    expect(signal.oneSetFromMatch).toBe(false);
     expect(signal.favoriteLeadsSet).toBe(false);
     expect(signal.candidate).toBe(false);
+  });
+
+  test("enters the deciding set when its leader is one game from the match", () => {
+    const decider = (home: number, away: number) => frame({
+      setsWon: { home: 1, away: 1 },
+      statusText: "Set 3",
+      sets: [
+        { name: "Set 1", shortName: "S1", home: 6, away: 4, ended: true, live: false },
+        { name: "Set 2", shortName: "S2", home: 3, away: 6, ended: true, live: false },
+        { name: "Set 3", shortName: "S3", home, away, ended: false, live: true }
+      ],
+      game: { serving: "home", home: "30", away: "15", tiebreak: false, breakPoint: false, setPoint: false, matchPoint: false, points: [] }
+    });
+    const homeLeads = tennisEntrySignal(decider(5, 4))!;
+    expect(homeLeads.favored).toBe("home");
+    expect(homeLeads.oneSetFromMatch).toBe(true);
+    expect(homeLeads.lateSet).toBe(true);
+    expect(homeLeads.favoriteLeadsSet).toBe(true);
+
+    const awayLeads = tennisEntrySignal(decider(4, 5))!;
+    expect(awayLeads.favored).toBe("away");
+    expect(awayLeads.oneSetFromMatch).toBe(true);
+    expect(awayLeads.lateSet).toBe(true);
+  });
+
+  test("does not enter a tied 6-6 deciding tiebreak", () => {
+    const signal = tennisEntrySignal(frame({
+      setsWon: { home: 1, away: 1 },
+      statusText: "Set 3",
+      sets: [
+        { name: "Set 1", shortName: "S1", home: 6, away: 4, ended: true, live: false },
+        { name: "Set 2", shortName: "S2", home: 3, away: 6, ended: true, live: false },
+        { name: "Set 3", shortName: "S3", home: 6, away: 6, ended: false, live: true }
+      ],
+      game: { serving: "home", home: "5", away: "4", tiebreak: true, breakPoint: false, setPoint: false, matchPoint: false, points: [] }
+    }));
+    expect(signal?.oneSetFromMatch ?? false).toBe(false);
   });
 
   test("does not fire when the favourite is receiving", () => {
@@ -219,6 +257,46 @@ describe("TennisPointsPoller", () => {
     const third = await poller.poll(targets);
     expect(third).toHaveLength(1);
     expect(urls.filter(url => url.includes("/allscores/"))).toHaveLength(1);
+  });
+
+  test("rotates the per-poll game cap so later live games are still polled", async () => {
+    let nowMs = observedAtMs;
+    const docs = new Map<number, unknown>();
+    const liveGames = [1, 2, 3].map(index => {
+      const id = 7000 + index;
+      const home = `Player ${index} Home`;
+      const away = `Player ${index} Away`;
+      const doc = structuredClone(fixture) as { game: { id: number; homeCompetitor: { name: string }; awayCompetitor: { name: string } } };
+      doc.game.id = id;
+      doc.game.homeCompetitor.name = home;
+      doc.game.awayCompetitor.name = away;
+      docs.set(id, doc);
+      return { eventSlug: `event-${index}`, title: `${home} vs ${away}`, id, home, away };
+    });
+    const listingThree = { games: liveGames.map(game => ({
+      id: game.id, statusGroup: 3,
+      homeCompetitor: { name: game.home }, awayCompetitor: { name: game.away }
+    })) };
+    const requestedIds: string[] = [];
+    const request = (url: string): Promise<unknown> => {
+      if (url.includes("/allscores/")) return Promise.resolve(listingThree);
+      const id = /gameId=(\d+)/.exec(url)?.[1];
+      if (id) requestedIds.push(id);
+      return Promise.resolve(docs.get(Number(id)));
+    };
+    const poller = new TennisPointsPoller({
+      request, now: () => nowMs, heartbeatMs: 60_000, listRefreshMs: 600_000, maxGames: 2, concurrency: 1
+    });
+    const targets = liveGames.map(({ eventSlug, title }) => ({ eventSlug, title }));
+
+    const first = await poller.poll(targets);
+    expect(new Set(first.map(result => result.eventSlug))).toEqual(new Set(["event-1", "event-2"]));
+    expect(requestedIds).toEqual(["7001", "7002"]);
+
+    nowMs += 61_000;
+    const second = await poller.poll(targets);
+    expect(new Set(second.map(result => result.eventSlug))).toEqual(new Set(["event-3", "event-1"]));
+    expect(requestedIds).toEqual(["7001", "7002", "7003", "7001"]);
   });
 
   test("skips targets that never matched a live 365Scores game", async () => {

@@ -429,7 +429,10 @@ export interface TennisEntrySignal {
   favoredSets: number;
   trailerSets: number;
   setsToWin: number;
-  /** The favoured side has won `setsToWin - 1` sets and leads the match. */
+  /**
+   * The favoured side has won `setsToWin - 1` sets and leads the live set
+   * (or, at 6-6, already leads the match), i.e. it is one set from the match.
+   */
   oneSetFromMatch: boolean;
   /** Current-set games, when 365Scores publishes the live set. */
   setGames: { home: number; away: number } | null;
@@ -438,7 +441,7 @@ export interface TennisEntrySignal {
   tiebreak: boolean;
   /** A normal service game, not a tiebreak. */
   regularGame: boolean;
-  /** The match favourite is also ahead in the live set. */
+  /** The favoured side is ahead in the live set. */
   favoriteLeadsSet: boolean;
   favoriteServing: boolean;
   /** Points the receiver has won in the current game == points the server lost. */
@@ -466,29 +469,53 @@ function lateGameScore(home: number, away: number): { late: boolean; tiebreak: b
 /**
  * Derives the late-game entry signal from one point-level frame.
  *
- * The signal is intentionally conservative: the match draw must be known, one
- * side must lead with `setsToWin - 1` sets won, the live set must be at 5-x /
- * 6-5 / 6-6, the game must be a regular service game and the favourite must
- * already have lost at least one point on its own serve. `candidate` is the
- * "常规局丢分" state the resting bid is waiting for.
+ * The signal is intentionally conservative: the match draw must be known and
+ * the side that would win the match by taking the live set must lead that set
+ * while already holding `setsToWin - 1` sets (5-x / 6-5, or 6-6 with a set
+ * lead). `candidate` additionally requires a regular service game in which
+ * that side has already lost a point on its own serve - the "常规局丢分"
+ * state the resting bid is waiting for.
  */
 export function tennisEntrySignal(frame: TennisPointFrame): TennisEntrySignal | null {
   const game = frame.game, setsWon = frame.setsWon, setsToWin = frame.setsToWin;
   if (!game || !setsWon || !setsToWin) return null;
-  let favored: "home" | "away";
-  if (setsWon.home > setsWon.away) favored = "home";
-  else if (setsWon.away > setsWon.home) favored = "away";
-  else return null;
-  const favoredSets = favored === "home" ? setsWon.home : setsWon.away;
-  const trailerSets = favored === "home" ? setsWon.away : setsWon.home;
-  const oneSetFromMatch = favoredSets === setsToWin - 1 && favoredSets > trailerSets;
   const set = currentSet(frame.sets);
   const setGames = set ? { home: set.home, away: set.away } : null;
   const late = set ? lateGameScore(set.home, set.away) : { late: false, tiebreak: false };
+  const setLeader: "home" | "away" | null = set === null || set.home === set.away
+    ? null : set.home > set.away ? "home" : "away";
+  const matchLeader: "home" | "away" | null = setsWon.home > setsWon.away
+    ? "home" : setsWon.away > setsWon.home ? "away" : null;
+  // Backtest parity (`gen1`): the entry side is the side that would win the
+  // match by taking the live set - it must lead that set while already
+  // holding `setsToWin - 1` sets. This also covers the deciding set after a
+  // split (1-1 / 2-2), which the old "sets leader only" rule skipped. At 6-6
+  // there is no game leader, so only a side that already leads the match can
+  // qualify; a level deciding-set tiebreak stays out until its point score
+  // names a leader.
+  let favored: "home" | "away" | null = null;
+  let oneSetFromMatch = false;
+  if (set !== null && set.home === 6 && set.away === 6) {
+    const matchLeaderSets = matchLeader === "home" ? setsWon.home : matchLeader === "away" ? setsWon.away : null;
+    if (matchLeader !== null && matchLeaderSets === setsToWin - 1) {
+      favored = matchLeader;
+      oneSetFromMatch = true;
+    }
+  } else if (setLeader !== null) {
+    const leaderSets = setLeader === "home" ? setsWon.home : setsWon.away;
+    if (leaderSets === setsToWin - 1) {
+      favored = setLeader;
+      oneSetFromMatch = true;
+    }
+  }
+  // Research fields keep a best-effort side even outside the entry state.
+  favored ??= matchLeader ?? setLeader;
+  if (favored === null) return null;
+  const favoredSets = favored === "home" ? setsWon.home : setsWon.away;
+  const trailerSets = favored === "home" ? setsWon.away : setsWon.home;
   const serving = game.serving;
   const favoriteServing = serving === favored;
-  const favoriteLeadsSet = set !== null
-    && (favored === "home" ? set.home > set.away : set.away > set.home);
+  const favoriteLeadsSet = setLeader !== null && setLeader === favored;
   const receiverPoints = serving === null ? null : serving === "home" ? game.away : game.home;
   const receiverValue = receiverPoints === null ? null
     : game.tiebreak && /^\d+$/.test(receiverPoints) ? Number(receiverPoints) : POINT_VALUES[receiverPoints] ?? null;
@@ -521,7 +548,7 @@ export interface TennisPointsPollerOptions {
   now?: () => number;
   /** How long the allscores → Polymarket title mapping is reused. */
   listRefreshMs?: number;
-  /** Upper bound on `/web/game/` fetches per poll. */
+  /** Upper bound on `/web/game/` fetches per poll; the window rotates across live games. */
   maxGames?: number;
   /** Simultaneous `/web/game/` fetches. */
   concurrency?: number;
@@ -554,6 +581,7 @@ export class TennisPointsPoller {
   private readonly gameIdBySlug = new Map<string, number>();
   private readonly lastRecordedAtMs = new Map<string, number>();
   private readonly lastFingerprint = new Map<string, string>();
+  private pollCursor = 0;
   private listFetchedAtMs = 0;
   private pollInFlight: Promise<TennisPointPollResult[]> | undefined;
 
@@ -619,10 +647,18 @@ export class TennisPointsPoller {
     if (targets.length === 0) return [];
     await this.refreshGameIds(targets);
     const results: TennisPointPollResult[] = [];
-    const targetsWithIds = targets
+    const eligible = targets
       .map(target => ({ target, gameId: this.gameIdBySlug.get(target.eventSlug) }))
-      .filter((entry): entry is { target: TennisPointsPollTarget; gameId: number } => entry.gameId !== undefined)
-      .slice(0, this.maxGames);
+      .filter((entry): entry is { target: TennisPointsPollTarget; gameId: number } => entry.gameId !== undefined);
+    // A busy day can run more live games than one poll may fetch. Rotate the
+    // window instead of always truncating, so every game is polled at least
+    // once every ceil(count / maxGames) polls.
+    const take = Math.min(this.maxGames, eligible.length);
+    const targetsWithIds: Array<{ target: TennisPointsPollTarget; gameId: number }> = [];
+    for (let index = 0; index < take; index++) {
+      targetsWithIds.push(eligible[(this.pollCursor + index) % eligible.length]!);
+    }
+    this.pollCursor = eligible.length === 0 ? 0 : (this.pollCursor + take) % eligible.length;
     let cursor = 0;
     await Promise.all(Array.from({ length: Math.min(this.concurrency, targetsWithIds.length) }, async () => {
       while (cursor < targetsWithIds.length) {
