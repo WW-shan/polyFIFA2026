@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import type { OrderbookSnapshot } from "../../src/domain/types.js";
+import type { OrderbookSnapshot, TradeResult } from "../../src/domain/types.js";
+import type { LiveRestingLevel } from "../../src/execution/live-executor.js";
+import { runTennisTailWatch, type TennisTailEvent } from "../../src/execution/tennis-tail-live.js";
 import { tennisGen1 } from "../../src/domain/tennis-gen1.js";
 import {
   DEFAULT_TENNIS_TAIL_LADDER,
@@ -87,6 +89,88 @@ function replayLiveEntries(input: {
 }
 
 describe("tennis Gen1 replay parity", () => {
+  test("the production watcher places the same ladder at the same archived snapshots", async () => {
+    const event: TennisTailEvent = {
+      eventSlug: fixture.market.eventSlug,
+      eventTitle: fixture.market.eventTitle,
+      gameId: fixture.gameId,
+      setsToWin: fixture.setsToWin,
+      markets: [fixture.market]
+    };
+    const snapshotTimes = [...new Set(fixture.tokens.flatMap((token) => token.snapshots.map((snapshot) => snapshot.tMs)))]
+      .sort((a, b) => a - b);
+    let clock = snapshotTimes[0]!;
+    let nextSnapshot = 1;
+    const placements: Array<{ tokenId: string; price: number; tMs: number }> = [];
+    const placeLadder = async (levels: readonly LiveRestingLevel[]): Promise<TradeResult[]> => {
+      for (const level of levels) placements.push({ tokenId: level.tokenId, price: level.price, tMs: clock });
+      return levels.map((level, index) => ({
+        mode: "live" as const,
+        status: "posted" as const,
+        orderId: `parity-${index}`,
+        tokenId: level.tokenId,
+        price: level.price,
+        shares: level.shares,
+        notional: level.notional,
+        fee: 0,
+        estimatedPayout: level.shares,
+        estimatedProfit: level.shares - level.notional,
+        reservedNotional: level.notional
+      }));
+    };
+    const latestSports = () => latestAtOrBefore(fixture.sports, clock);
+    const latestSnapshot = (tokenId: string) => {
+      const token = fixture.tokens.find((candidate) => candidate.tokenId === tokenId);
+      return token ? latestAtOrBefore(token.snapshots, clock) : undefined;
+    };
+
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        latestScore: () => {
+          const frame = latestSports();
+          return frame && frame.homeName && frame.awayName ? {
+            score: frame.score,
+            homeName: frame.homeName,
+            awayName: frame.awayName,
+            observedAtMs: frame.tMs,
+            receivedAtMs: frame.tMs,
+            live: true,
+            ended: false
+          } : undefined;
+        },
+        fetchOrderbook: async (tokenId) => {
+          const snapshot = latestSnapshot(tokenId);
+          return snapshot
+            ? orderbookFromSnapshot(tokenId, snapshot)
+            : { tokenId, bids: [], asks: [], tickSize: "0.01", negRisk: false, minimumOrderSize: 5 };
+        },
+        placeLadder,
+        sleep: async () => {
+          if (nextSnapshot < snapshotTimes.length) clock = snapshotTimes[nextSnapshot++]!;
+        }
+      },
+      {
+        config: DEFAULT_TENNIS_TAIL_LADDER,
+        dryRun: false,
+        intervalMs: 0,
+        discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+        reconcileEveryIterations: Number.MAX_SAFE_INTEGER,
+        heartbeatEveryIterations: 0,
+        maxIterations: snapshotTimes.length + 1
+      }
+    );
+
+    const expected = fixture.expectedOrders
+      .map((order) => ({ tokenId: order.tokenKey, price: order.price, tMs: order.entryAtMs }))
+      .sort((a, b) => a.tMs - b.tMs || a.price - b.price);
+    const actual = placements.sort((a, b) => a.tMs - b.tMs || a.price - b.price);
+    expect(actual).toEqual(expected);
+    expect(summary.armed).toHaveLength(3);
+    expect(summary.levelsPlaced).toBe(5);
+    expect(summary.errors).toBe(0);
+  });
+
   test("the archived per-price replay matches the frozen fixture entries", () => {
     const replayed = replayTennisGen1Orders(fixture.sports, fixture.tokens, {
       prices: fixture.prices,
