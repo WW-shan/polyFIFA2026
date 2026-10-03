@@ -20,6 +20,9 @@ coverage/
 # temporary files
 /tmp/
 *.log
+*.jsonl
+logs/
+data/execution/
 data/live-ledger.json
 data/live-sports-audit.ndjson
 data/live-depth-audit.ndjson
