@@ -22,6 +22,7 @@ import { PENDING_SUBMISSION_PREFIX } from "../persistence/ledger.js";
 import { TERMINAL_ORDER_SNAPSHOT_STATUSES, orderSnapshotStatus, restingFillFromSnapshot } from "./resting-reconcile.js";
 
 const TENNIS_TAG_ID = "864";
+const DEFAULT_LEAGUES = ["atp", "wta"];
 const DEFAULT_LEDGER_FILE = "data/execution/tennis-tail-ledger.json";
 const DEFAULT_LOG_FILE = "logs/tennis-tail.jsonl";
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
@@ -39,6 +40,8 @@ export interface TennisTailCliOptions {
   proxyUrl?: string;
   clobHost: string;
   scores365BaseUrl: string;
+  /** Tournament prefixes to trade; the backtest only has ATP/WTA evidence. */
+  leagues: string[];
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
@@ -57,6 +60,7 @@ async function main(argv: string[]): Promise<void> {
     maxNotionalPerDay: options.config.maxNotionalPerDay,
     orderType: options.orderType,
     postOnly: options.postOnly,
+    leagues: options.leagues,
     intervalMs: options.intervalMs,
     maxIterations: options.maxIterations ?? null,
     ledgerFile: options.ledgerFile
@@ -81,7 +85,7 @@ async function main(argv: string[]): Promise<void> {
 
   const summary = await runTennisTailWatch(
     {
-      discover: () => discoverTennisTailEvents(deps, options.proxyUrl),
+      discover: () => discoverTennisTailEvents(deps, options.leagues),
       pollPoints: (targets) => stopping ? Promise.resolve([]) : poller.poll(targets),
       fetchOrderbook: (tokenId) => fetchTennisOrderbook(tokenId, options),
       placeLadder: (levels, executeOptions) => executor.placeRestingLadder(levels, executeOptions),
@@ -102,10 +106,16 @@ async function main(argv: string[]): Promise<void> {
   console.log(JSON.stringify({ at: new Date().toISOString(), summary }, null, 2));
 }
 
+/** Slugs are `<league>-<players>-<date>`; `itf` has no score feed in the archive. */
+export function tennisLeagueOf(eventSlug: string): string {
+  return eventSlug.split("-")[0]?.trim().toLowerCase() ?? "";
+}
+
 export async function discoverTennisTailEvents(
   deps: CatalogDependencies,
-  _proxyUrl?: string
+  leagues: readonly string[] = DEFAULT_LEAGUES
 ): Promise<TennisTailEvent[]> {
+  const allowed = new Set(leagues.map((league) => league.trim().toLowerCase()).filter(Boolean));
   const events = await discoverSportsEvents({
     tagId: TENNIS_TAG_ID,
     sports: ["tennis"],
@@ -121,6 +131,9 @@ export async function discoverTennisTailEvents(
     // The backtest universe is singles only; doubles titles share a surname and
     // must never be paired with a singles point feed.
     if (event.title.includes("/")) continue;
+    // ITF has book data but no score data in the archive (0 backtest samples),
+    // so it is excluded unless the operator explicitly opts in.
+    if (allowed.size > 0 && !allowed.has(tennisLeagueOf(event.eventSlug))) continue;
     discovered.push({ eventSlug: event.eventSlug, eventTitle: event.title, markets: [market] });
   }
   return discovered;
@@ -223,12 +236,18 @@ export function cliOptions(flags: ReadonlyMap<string, string | true>): TennisTai
     ledgerFile: String(flags.get("ledger-file") ?? DEFAULT_LEDGER_FILE),
     logFile: String(flags.get("log-file") ?? DEFAULT_LOG_FILE),
     clobHost: String(flags.get("clob-host") ?? process.env.POLY_CLOB_HOST ?? "https://clob.polymarket.com"),
-    scores365BaseUrl: String(flags.get("scores365-base-url") ?? SCORES365_BASE_URL)
+    scores365BaseUrl: String(flags.get("scores365-base-url") ?? SCORES365_BASE_URL),
+    leagues: [...DEFAULT_LEAGUES]
   };
   const restSeconds = numberFlag(flags, "rest-seconds");
   if (restSeconds !== undefined) options.restSeconds = restSeconds;
   const maxIterations = numberFlag(flags, "max-iterations");
   if (maxIterations !== undefined) options.maxIterations = maxIterations;
+  const leaguesArg = flags.get("leagues");
+  if (typeof leaguesArg === "string") {
+    const leagues = leaguesArg.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+    options.leagues = leagues.includes("all") ? [] : leagues;
+  }
   const proxyUrl = flags.get("proxy") ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? process.env.https_proxy ?? process.env.http_proxy;
   if (typeof proxyUrl === "string" && proxyUrl.trim()) options.proxyUrl = proxyUrl.trim();
   return options;

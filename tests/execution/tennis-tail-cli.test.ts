@@ -71,6 +71,12 @@ describe("cliOptions", () => {
     expect(options.intervalMs).toBe(5000);
   });
 
+  test("defaults to ATP/WTA and honours --leagues all", () => {
+    expect(cliOptions(new Map()).leagues).toEqual(["atp", "wta"]);
+    expect(cliOptions(new Map([["leagues", "ATP, itf"]])).leagues).toEqual(["atp", "itf"]);
+    expect(cliOptions(new Map([["leagues", "all"]])).leagues).toEqual([]);
+  });
+
   test("rejects invalid ladders and order types", () => {
     expect(() => cliOptions(new Map([["ladder", "0.9,1.2"]]))).toThrow(/ladder/);
     expect(() => cliOptions(new Map([["order-type", "FAK"]]))).toThrow(/order-type/);
@@ -89,6 +95,18 @@ describe("discoverTennisTailEvents", () => {
       marketType: "moneyline",
       tickSize: "0.01"
     });
+  });
+
+  test("excludes ITF by default and includes it when opted in", async () => {
+    const itf = gammaEvent({
+      id: "evt-itf",
+      slug: "itf-palan1-chen9-2026-10-03",
+      title: "M25 Yinchuan: Dominik Palan vs Kuan-Shou Chen"
+    });
+    expect((await discoverTennisTailEvents(deps([gammaEvent(), itf]))).map((event) => event.eventSlug))
+      .toEqual(["atp-swiatek-gauff-2026-10-04"]);
+    expect((await discoverTennisTailEvents(deps([gammaEvent(), itf]), ["atp", "wta", "itf"])).map((event) => event.eventSlug))
+      .toEqual(["atp-swiatek-gauff-2026-10-04", "itf-palan1-chen9-2026-10-03"]);
   });
 
   test("drops doubles and events without a moneyline market", async () => {

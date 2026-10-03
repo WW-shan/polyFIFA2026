@@ -5,7 +5,8 @@
 
 ## 1. 策略是什么
 
-- 只做 **网球 moneyline**（ATP/WTA/ITF 单打；双打标题带 `/`，自动排除）。
+- 只做 **网球 moneyline**。默认只做 **ATP/WTA**：回测样本里 ITF 的 573 场有盘口、
+  但没有任何比分数据，等于 0 样本 0 证据（`--leagues all` 可以放开，但那是没验证过的）。
 - 信号 Gen1：领先方已拿 `setsToWin - 1` 盘，且当前盘进入 5-x(x≤4)、6-5 或 6-6
   （`oneSetFromMatch && lateSet`）。**Gen1 一出现就挂满阶梯，不等点级丢分。**
 - 挂单：post-only 被动买单，阶梯 `0.80 / 0.85 / 0.88 / 0.90 / 0.92`，
@@ -60,6 +61,7 @@ npm run tennis:tail -- --live true --interval-ms 15000 \
 | `--max-per-day N` | 217.5 | 当日挂单占用上限（USDC） |
 | `--order-type GTC\|GTD` | GTC | GTD 需配合 `--rest-seconds` |
 | `--max-iterations N` | 无限 | 跑 N 轮后退出，便于先验收 |
+| `--leagues atp,wta` | atp,wta | 赛事前缀；`all` = 不筛，包含 ITF（无回测证据） |
 | `--proxy URL` | 环境变量 | 走本地代理 |
 
 ## 4. 风险控制与去重
@@ -92,4 +94,6 @@ venue 未确认撤单时不会释放预留（避免重复挂单）。
   采集器会继续记录，样本足够后再回测对比。
 - 小盘口（set winner / handicap / totals 等）样本 1–6 笔，暂不参与主资金；
   `tennis_completed_match` 一律排除。
+- ITF 默认不挂：归档里 ITF 只有 CLOB 盘口、没有比分（抽查 5,792 条秒级盘口 0 条带 score），
+  Gen1 无法判定，也没有任何回测样本。
 - 比赛在挂单途中结束/退赛会留下未成交挂单，由对账在终态时释放。
