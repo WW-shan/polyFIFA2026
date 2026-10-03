@@ -33,7 +33,8 @@
     "live:smoke": "BOT_MODE=live tsx src/cli.ts --mode live --match-file tests/fixtures/matches/spain-5-0.json --markets-file tests/fixtures/markets/spain-spreads.json --orderbook-file tests/fixtures/orderbooks/spain-2p5-ask-097.json --stake 5 --order-type FOK",
     "collect:export-tail": "tsx src/collector/storage-cli.ts export-tail",
     "tennis:tail": "tsx src/execution/tennis-tail-cli.ts",
-    "tennis:tail:live": "node --env-file=.env.local --import tsx src/execution/tennis-tail-cli.ts --live true"
+    "tennis:tail:live": "node --env-file=.env.local --import tsx src/execution/tennis-tail-cli.ts --live true",
+    "research:tennis-gen1": "tsx scripts/research/tennis-gen1-backtest.ts"
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.6",

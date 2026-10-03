@@ -1,0 +1,367 @@
+{
+ "generatedFrom": "data/collector/continuous/tail.sqlite",
+ "gameKey": "game:6374478",
+ "gameId": "6374478",
+ "setsToWin": 2,
+ "title": "Curitiba: Guido Justo vs Tomas Barrios",
+ "market": {
+  "eventSlug": "capture-6374478",
+  "eventTitle": "Curitiba: Guido Justo vs Tomas Barrios",
+  "marketSlug": "atp-justo-barrios-2026-10-03",
+  "conditionId": "0x87c41288f71f3af9dc2892de94554c090d2368149e6bc7d5c8c6abb8d98effb2",
+  "outcomes": [
+   "Guido Justo",
+   "Tomas Barrios"
+  ],
+  "tokenIds": [
+   "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "78629692579158213183515250768282955768828751662970159814013867566207490655401"
+  ],
+  "marketType": "moneyline",
+  "tickSize": "0.01",
+  "negRisk": false
+ },
+ "tokens": [
+  {
+   "tokenId": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "outcome": "Guido Justo",
+   "tokenKey": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "side": "home",
+   "snapshots": [
+    {
+     "tMs": 1791050453777,
+     "bid": 0.69,
+     "ask": 0.7
+    },
+    {
+     "tMs": 1791050462978,
+     "bid": 0.72,
+     "ask": 0.73
+    },
+    {
+     "tMs": 1791050474400,
+     "bid": 0.7,
+     "ask": 0.76
+    },
+    {
+     "tMs": 1791050483330,
+     "bid": 0.79,
+     "ask": 0.8
+    },
+    {
+     "tMs": 1791050493334,
+     "bid": 0.8,
+     "ask": 0.81
+    },
+    {
+     "tMs": 1791050503538,
+     "bid": 0.8,
+     "ask": 0.81
+    },
+    {
+     "tMs": 1791050523444,
+     "bid": 0.76,
+     "ask": 0.77
+    },
+    {
+     "tMs": 1791050538213,
+     "bid": 0.76,
+     "ask": 0.77
+    },
+    {
+     "tMs": 1791050554417,
+     "bid": 0.82,
+     "ask": 0.83
+    },
+    {
+     "tMs": 1791050573001,
+     "bid": 0.86,
+     "ask": 0.87
+    },
+    {
+     "tMs": 1791050648200,
+     "bid": 0.86,
+     "ask": 0.87
+    },
+    {
+     "tMs": 1791050670285,
+     "bid": 0.85,
+     "ask": 0.87
+    },
+    {
+     "tMs": 1791050691707,
+     "bid": 0.85,
+     "ask": 0.86
+    },
+    {
+     "tMs": 1791050711700,
+     "bid": 0.85,
+     "ask": 0.86
+    },
+    {
+     "tMs": 1791050731376,
+     "bid": 0.91,
+     "ask": 0.92
+    },
+    {
+     "tMs": 1791050751173,
+     "bid": 0.91,
+     "ask": 0.93
+    },
+    {
+     "tMs": 1791050770844,
+     "bid": 0.85,
+     "ask": 0.86
+    },
+    {
+     "tMs": 1791050791037,
+     "bid": 0.85,
+     "ask": 0.86
+    },
+    {
+     "tMs": 1791050810904,
+     "bid": 0.92,
+     "ask": 0.93
+    },
+    {
+     "tMs": 1791050831112,
+     "bid": 0.93,
+     "ask": 0.97
+    }
+   ],
+   "otherTokenKey": "78629692579158213183515250768282955768828751662970159814013867566207490655401",
+   "minimumOrderSize": 5,
+   "tickSize": "0.01",
+   "negRisk": false
+  },
+  {
+   "tokenId": "78629692579158213183515250768282955768828751662970159814013867566207490655401",
+   "outcome": "Tomas Barrios",
+   "tokenKey": "78629692579158213183515250768282955768828751662970159814013867566207490655401",
+   "side": "away",
+   "snapshots": [
+    {
+     "tMs": 1791050453777,
+     "bid": 0.3,
+     "ask": 0.31
+    },
+    {
+     "tMs": 1791050462978,
+     "bid": 0.27,
+     "ask": 0.28
+    },
+    {
+     "tMs": 1791050474400,
+     "bid": 0.24,
+     "ask": 0.3
+    },
+    {
+     "tMs": 1791050483330,
+     "bid": 0.2,
+     "ask": 0.21
+    },
+    {
+     "tMs": 1791050493334,
+     "bid": 0.19,
+     "ask": 0.2
+    },
+    {
+     "tMs": 1791050503538,
+     "bid": 0.19,
+     "ask": 0.2
+    },
+    {
+     "tMs": 1791050523444,
+     "bid": 0.23,
+     "ask": 0.24
+    },
+    {
+     "tMs": 1791050538213,
+     "bid": 0.23,
+     "ask": 0.24
+    },
+    {
+     "tMs": 1791050554417,
+     "bid": 0.17,
+     "ask": 0.18
+    },
+    {
+     "tMs": 1791050573001,
+     "bid": 0.13,
+     "ask": 0.14
+    },
+    {
+     "tMs": 1791050648200,
+     "bid": 0.13,
+     "ask": 0.14
+    },
+    {
+     "tMs": 1791050670285,
+     "bid": 0.13,
+     "ask": 0.15
+    },
+    {
+     "tMs": 1791050691707,
+     "bid": 0.14,
+     "ask": 0.15
+    },
+    {
+     "tMs": 1791050711700,
+     "bid": 0.14,
+     "ask": 0.15
+    },
+    {
+     "tMs": 1791050731376,
+     "bid": 0.08,
+     "ask": 0.09
+    },
+    {
+     "tMs": 1791050751174,
+     "bid": 0.07,
+     "ask": 0.09
+    },
+    {
+     "tMs": 1791050770844,
+     "bid": 0.14,
+     "ask": 0.15
+    },
+    {
+     "tMs": 1791050791037,
+     "bid": 0.14,
+     "ask": 0.15
+    },
+    {
+     "tMs": 1791050810904,
+     "bid": 0.07,
+     "ask": 0.08
+    },
+    {
+     "tMs": 1791050831112,
+     "bid": 0.03,
+     "ask": 0.07
+    }
+   ],
+   "otherTokenKey": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "minimumOrderSize": 5,
+   "tickSize": "0.01",
+   "negRisk": false
+  }
+ ],
+ "sports": [
+  {
+   "tMs": 1791050509995,
+   "score": "4-6, 6-4, 4-3",
+   "homeName": "Guido Justo",
+   "awayName": "Tomas Barrios"
+  },
+  {
+   "tMs": 1791050574721,
+   "score": "4-6, 6-4, 5-3",
+   "homeName": "Guido Justo",
+   "awayName": "Tomas Barrios"
+  },
+  {
+   "tMs": 1791050662917,
+   "score": "4-6, 6-4, 5-3",
+   "homeName": "Guido Justo",
+   "awayName": "Tomas Barrios"
+  },
+  {
+   "tMs": 1791050754528,
+   "score": "4-6, 6-4, 5-3",
+   "homeName": "Guido Justo",
+   "awayName": "Tomas Barrios"
+  },
+  {
+   "tMs": 1791050873808,
+   "score": "4-6, 6-4, 6-3",
+   "homeName": "Guido Justo",
+   "awayName": "Tomas Barrios"
+  }
+ ],
+ "prices": [
+  0.8,
+  0.85,
+  0.88,
+  0.9,
+  0.92
+ ],
+ "finishedAtMs": 1791050879110,
+ "expectedOrders": [
+  {
+   "tokenKey": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "side": "home",
+   "price": 0.8,
+   "entryAtMs": 1791050648200,
+   "entryScore": "4-6, 6-4, 5-3",
+   "entryKind": "game",
+   "entryBid": 0.86,
+   "entryAsk": 0.87,
+   "filled": false,
+   "touchAtMs": null,
+   "leadMs": null,
+   "entryMsToFinish": 230910,
+   "marketLeaderBlocks": 0
+  },
+  {
+   "tokenKey": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "side": "home",
+   "price": 0.85,
+   "entryAtMs": 1791050648200,
+   "entryScore": "4-6, 6-4, 5-3",
+   "entryKind": "game",
+   "entryBid": 0.86,
+   "entryAsk": 0.87,
+   "filled": false,
+   "touchAtMs": null,
+   "leadMs": null,
+   "entryMsToFinish": 230910,
+   "marketLeaderBlocks": 0
+  },
+  {
+   "tokenKey": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "side": "home",
+   "price": 0.88,
+   "entryAtMs": 1791050731376,
+   "entryScore": "4-6, 6-4, 5-3",
+   "entryKind": "game",
+   "entryBid": 0.91,
+   "entryAsk": 0.92,
+   "filled": true,
+   "touchAtMs": 1791050770844,
+   "leadMs": 39468,
+   "entryMsToFinish": 147734,
+   "marketLeaderBlocks": 0
+  },
+  {
+   "tokenKey": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "side": "home",
+   "price": 0.9,
+   "entryAtMs": 1791050731376,
+   "entryScore": "4-6, 6-4, 5-3",
+   "entryKind": "game",
+   "entryBid": 0.91,
+   "entryAsk": 0.92,
+   "filled": true,
+   "touchAtMs": 1791050770844,
+   "leadMs": 39468,
+   "entryMsToFinish": 147734,
+   "marketLeaderBlocks": 0
+  },
+  {
+   "tokenKey": "420869471017477000550918282317726330220449416543814333682633960370994632096",
+   "side": "home",
+   "price": 0.92,
+   "entryAtMs": 1791050810904,
+   "entryScore": "4-6, 6-4, 5-3",
+   "entryKind": "game",
+   "entryBid": 0.92,
+   "entryAsk": 0.93,
+   "filled": false,
+   "touchAtMs": null,
+   "leadMs": null,
+   "entryMsToFinish": 68206,
+   "marketLeaderBlocks": 0
+  }
+ ]
+}
