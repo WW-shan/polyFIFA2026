@@ -1,13 +1,14 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { netReturnRate, sportsTakerFeePerShare } from "./domain/fees.js";
+import { netReturnRate } from "./domain/fees.js";
 import { lockedConditionMatchesScore } from "./domain/decision.js";
 import { selectLossRequiresCandidates } from "./domain/loss-requires-strategy.js";
 import { classifyTailWindow } from "./domain/time-window.js";
 import type { DecisionThresholds, MatchState, NoTradeDecision, OrderbookSnapshot, SelectedStrategyMarket, StrategyMarket, TradeDecision, TradeResult } from "./domain/types.js";
 import { capStakeToAvailableBalance, DEFAULT_POLYGON_RPC_URL, readPusdBalance } from "./execution/balance.js";
 import { cancelLiveOrder, getLiveOrder, isCancelConfirmed, isRestingOrderType, LiveExecutionError, liveConfigFromEnv, type LiveOrderType } from "./execution/live-executor.js";
+import { TERMINAL_ORDER_SNAPSHOT_STATUSES, orderSnapshotStatus, restingFillFromSnapshot } from "./execution/resting-reconcile.js";
 import type { LiveExecuteOptions, LiveExecutorConfig } from "./execution/live-executor.js";
 import { PaperExecutor } from "./execution/paper-executor.js";
 import { AutoSettlementMonitor, DEFAULT_POLYMARKET_RELAYER_URL, type MarketSettlementStatus, type RedeemablePosition, type SettlementConfig, type SettlementResult, type SubmitDepositWalletBatchInput } from "./execution/settlement.js";
@@ -238,18 +239,6 @@ export async function runCli(
   }
 }
 
-// Normalized without the venue's `ORDER_STATUS_` prefix. `unmatched` is not
-// terminal: it is an accepted order whose matching was delayed.
-const TERMINAL_ORDER_SNAPSHOT_STATUSES = new Set([
-  "canceled", "cancelled", "canceledmarketresolved", "cancelledmarketresolved", "expired", "invalid", "rejected"
-]);
-
-function orderSnapshotStatus(snapshot: unknown): string | undefined {
-  if (!isRecord(snapshot) || snapshot.status === undefined || snapshot.status === null) return undefined;
-  const lower = String(snapshot.status).toLowerCase();
-  return (lower.startsWith("order_status_") ? lower.slice("order_status_".length) : lower).replace(/[\s_-]+/g, "");
-}
-
 /**
  * Reconciles resting maker bids against the venue. Read-only: it only queries
  * order snapshots and never submits or cancels anything itself.
@@ -291,41 +280,6 @@ async function reconcileRestingOrders(
       // Unknown venue state keeps the reservation: never release on a read error.
     }
   }
-}
-
-/**
- * Reads how much of a resting bid actually traded. `size_matched` is the
- * authoritative fill size, so a maker bid that got hit is never left behind as a
- * phantom `posted` reservation that also blocks the next pass as a duplicate.
- */
-function restingFillFromSnapshot(
-  entry: { price: number; shares: number; reservedNotional?: number },
-  snapshot: unknown
-): { shares: number; price: number; remainingShares?: number; fee?: number } | undefined {
-  if (!isRecord(snapshot)) return undefined;
-  const matched = numericField(snapshot, "size_matched") ?? numericField(snapshot, "sizeMatched");
-  if (matched === undefined || matched <= 0) return undefined;
-  const price = numericField(snapshot, "price") ?? entry.price;
-  if (!(price > 0)) return undefined;
-  const original = numericField(snapshot, "original_size") ?? numericField(snapshot, "originalSize");
-  // The reservation only describes the full order before anything traded;
-  // after a partial fill it is the remainder, not the requested size.
-  const requested = original
-    ?? (entry.shares <= 0 && entry.reservedNotional !== undefined && entry.price > 0 ? entry.reservedNotional / entry.price : undefined);
-  // Immediate-or-kill orders only ever take liquidity and pay the taker fee.
-  const orderType = String(snapshot.order_type ?? snapshot.orderType ?? "").toUpperCase();
-  const fee = orderType === "FAK" || orderType === "FOK" ? matched * sportsTakerFeePerShare(price) : undefined;
-  const fill = { shares: matched, price, ...(fee === undefined ? {} : { fee }) };
-  if (requested === undefined) return fill;
-  return { ...fill, remainingShares: Math.max(0, requested - matched) };
-}
-
-function numericField(record: Record<string, unknown>, field: string): number | undefined {
-  const value = record[field];
-  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-  if (typeof value !== "string" || value.trim().length === 0) return undefined;
-  const parsed = Number(value.trim());
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 async function runCancelOrder(

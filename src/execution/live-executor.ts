@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { BuyTradeLeg, MarketTickSize, OrderbookSnapshot, TradeDecision, TradeResult, TradeResultLeg } from "../domain/types.js";
+import type { BuyTradeLeg, MarketTickSize, OrderbookSnapshot, TailStrategy, TradeDecision, TradeResult, TradeResultLeg } from "../domain/types.js";
 import { netReturnRate, sportsTakerFeePerShare } from "../domain/fees.js";
 import { signPoly1271Order } from "./poly1271-signature.js";
 import { serializeDiagnostic } from "../persistence/ledger.js";
@@ -63,6 +63,25 @@ export interface LiveOrderRequest {
   beforeSubmit?: (order: LiveOrderRequest) => void | Promise<void>;
 }
 
+/**
+ * One passive bid level for {@link LiveExecutor.placeRestingLadder}. Unlike a
+ * basket leg it is never merged with another level on the same token.
+ */
+export interface LiveRestingLevel {
+  tokenId: string;
+  price: number;
+  shares: number;
+  notional: number;
+  tickSize?: MarketTickSize;
+  negRisk?: boolean;
+  estimatedFee?: number;
+  eventSlug?: string;
+  marketSlug?: string;
+  conditionId?: string;
+  outcome?: string;
+  strategy?: TailStrategy;
+}
+
 export interface LiveClobClient {
   placeLimitBuy(order: LiveOrderRequest): Promise<TradeResult>;
 }
@@ -119,43 +138,83 @@ export class LiveExecutor {
     const refreshedLegs = await refreshPlannedLegs(plannedLegs, options);
     if (refreshedLegs.length === 0) return stalePlanResult(decision);
 
-    const submissions = await Promise.allSettled(refreshedLegs.map(async (leg) => {
-      const orderType = options.orderType ?? "FAK";
-      const order: LiveOrderRequest = {
-        tokenId: leg.tokenId,
-        price: leg.price,
-        size: leg.shares,
-        notional: leg.notional,
-        orderType,
-        tickSize: leg.tickSize ?? "0.001",
-        negRisk: leg.negRisk ?? false,
-        estimatedFee: leg.estimatedFee
-      };
-      if (isRestingOrderType(orderType)) {
-        // Resting bids are maker-only by default and always carry a bounded
-        // lifetime so an abandoned run cannot leave an order on the book.
-        order.postOnly = options.postOnly ?? true;
-        const restSeconds = options.restSeconds ?? DEFAULT_REST_SECONDS;
-        order.expiration = orderType === "GTD"
-          ? Math.floor(Date.now() / 1000) + 60 + Math.max(restSeconds, 120)
-          : 0;
-      }
-      if (options.beforeSubmit) order.beforeSubmit = options.beforeSubmit;
-      await checkBeforeSubmit(order);
-      return client.placeLimitBuy(order);
-    }));
+    const orderType = options.orderType ?? "FAK";
+    const submissions = await Promise.allSettled(
+      refreshedLegs.map((leg) => this.submitLeg(client, leg, orderType, options))
+    );
     const results = submissions.map((submission, index) => {
       const leg = refreshedLegs[index]!;
       if (submission.status === "fulfilled") return tradeResultToLeg(submission.value, leg);
-      const error: unknown = submission.reason;
-      const result = error instanceof LiveExecutionError && error.code === "LIVE_ORDER_REJECTED" && !isUncertainPostResponse(error.raw)
-        ? rejectedLegResult(leg, error)
-        : uncertainLegResult(leg, error);
-      return tradeResultToLeg(result, leg);
+      return tradeResultToLeg(submissionFailureResult(leg, submission.reason), leg);
     });
 
     return aggregateLiveResults(decision, results);
   }
+
+  /**
+   * Submit a passive resting ladder one level at a time.
+   *
+   * Unlike {@link execute}, levels are never merged by token: a ladder is
+   * deliberately several resting bids on the same token at different prices,
+   * and merging them would destroy the maker queue position the backtest
+   * assumes. Each level keeps its own order id so it can be reconciled and
+   * canceled independently.
+   */
+  async placeRestingLadder(
+    levels: readonly LiveRestingLevel[],
+    options: LiveExecuteOptions = {}
+  ): Promise<TradeResult[]> {
+    if (levels.length === 0) return [];
+    const config = requireLiveConfig(this.config);
+    const client = await this.clientFactory(config);
+    const orderType = options.orderType && isRestingOrderType(options.orderType) ? options.orderType : "GTC";
+    const legs = levels.map(liveRestingLevelToLeg);
+    const submissions = await Promise.allSettled(
+      legs.map((leg) => this.submitLeg(client, leg, orderType, options))
+    );
+    return submissions.map((submission, index) => {
+      const leg = legs[index]!;
+      return submission.status === "fulfilled"
+        ? submission.value
+        : submissionFailureResult(leg, submission.reason);
+    });
+  }
+
+  private async submitLeg(
+    client: LiveClobClient,
+    leg: BuyTradeLeg,
+    orderType: LiveOrderType,
+    options: LiveExecuteOptions
+  ): Promise<TradeResult> {
+    const order: LiveOrderRequest = {
+      tokenId: leg.tokenId,
+      price: leg.price,
+      size: leg.shares,
+      notional: leg.notional,
+      orderType,
+      tickSize: leg.tickSize ?? "0.001",
+      negRisk: leg.negRisk ?? false,
+      estimatedFee: leg.estimatedFee
+    };
+    if (isRestingOrderType(orderType)) {
+      // Resting bids are maker-only by default and always carry a bounded
+      // lifetime so an abandoned run cannot leave an order on the book.
+      order.postOnly = options.postOnly ?? true;
+      const restSeconds = options.restSeconds ?? DEFAULT_REST_SECONDS;
+      order.expiration = orderType === "GTD"
+        ? Math.floor(Date.now() / 1000) + 60 + Math.max(restSeconds, 120)
+        : 0;
+    }
+    if (options.beforeSubmit) order.beforeSubmit = options.beforeSubmit;
+    await checkBeforeSubmit(order);
+    return client.placeLimitBuy(order);
+  }
+}
+
+function submissionFailureResult(leg: BuyTradeLeg, reason: unknown): TradeResult {
+  return reason instanceof LiveExecutionError && reason.code === "LIVE_ORDER_REJECTED" && !isUncertainPostResponse(reason.raw)
+    ? rejectedLegResult(leg, reason)
+    : uncertainLegResult(leg, reason);
 }
 
 async function checkBeforeSubmit(order: LiveOrderRequest): Promise<void> {
@@ -192,6 +251,28 @@ function decisionToLeg(decision: Extract<TradeDecision, { action: "BUY" }>): Buy
   if (decision.negRisk !== undefined) leg.negRisk = decision.negRisk;
   if (decision.tailWindowSource !== undefined) leg.tailWindowSource = decision.tailWindowSource;
   if (decision.tailWindowDetails !== undefined) leg.tailWindowDetails = decision.tailWindowDetails;
+  return leg;
+}
+
+function liveRestingLevelToLeg(level: LiveRestingLevel): BuyTradeLeg {
+  const leg: BuyTradeLeg = {
+    eventSlug: level.eventSlug ?? "",
+    marketSlug: level.marketSlug ?? "",
+    question: level.marketSlug ?? "",
+    tokenId: level.tokenId,
+    conditionId: level.conditionId ?? "",
+    outcome: level.outcome ?? "",
+    price: level.price,
+    availableSize: level.shares,
+    shares: level.shares,
+    notional: level.notional,
+    estimatedFee: level.estimatedFee ?? level.shares * sportsTakerFeePerShare(level.price),
+    estimatedNetReturn: netReturnRate(level.price),
+    resting: true
+  };
+  if (level.tickSize !== undefined) leg.tickSize = level.tickSize;
+  if (level.negRisk !== undefined) leg.negRisk = level.negRisk;
+  if (level.strategy !== undefined) leg.strategy = level.strategy;
   return leg;
 }
 
