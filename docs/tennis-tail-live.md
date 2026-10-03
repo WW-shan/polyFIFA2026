@@ -93,6 +93,20 @@ npm run tennis:tail -- --live true --interval-ms 15000 \
   终态订单释放预留；读失败时保留预留，绝不少算敞口。
 - **价位记忆**：已挂档位从 ledger 恢复，进程重启也不会重复挂同一档；
   venue 拒单（post-only 被拒等）不算已挂，下一轮会重试。
+- **多场隔离**：每笔挂单的 token 只取自该 event 自己的 moneyline market。
+  365Scores 帧要过两道球员名校验（映射赛程时、取到帧后各一次），名字对不上
+  的帧永远不会挂到该 event 上；两场同名/近名的比赛不会互相下单。
+- **重复上架去重**：Gamma 若把同一场比赛挂成两个 event（conditionId、token
+  集合或球员组合相同），发现阶段只保留第一个，并写 `duplicate_event` 日志，
+  避免同一比分源被挂两套梯子。
+- **转写容差**：球员名允许保守的拼写变体（如 365Scores `Abdullah Shelbayh`
+  vs Polymarket `Abedallah Shelbayh`），前提是双方共享一个 4 字符以上的
+  family-name token 且只有一处 edit distance ≤ 2 的差异；共享姓氏的不同球员
+  （Mirra vs Erika Andreeva）仍然拒绝配对。
+- **监控心跳**：默认每 20 轮（15s 间隔约 5 分钟）写一条 `heartbeat` 日志，
+  含 `discovered`（发现场次）、`monitored`（当前有帧）、`neverPolled`
+  （从未配上 365Scores 比分的场次）和 `stale`（超 180s 没帧）。`neverPolled`
+  非空说明有比赛在监控但拿不到局分，需要本人查看日志而不是默默漏挂。
 
 ## 6. 撤单
 

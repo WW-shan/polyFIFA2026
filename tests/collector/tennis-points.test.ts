@@ -5,7 +5,7 @@ import {
   SCORES365_TIMEZONE, TennisPointsPoller, isLiveTennisFrame, liveTennisGamesFromAllScores,
   matchTennisFrameToTitle, normalizeTennisPointFrame, parseTennisSetStages, tennisAllScoresUrl,
   tennisDateParam, tennisEntrySignal, tennisFrameSideForTitleOutcome, tennisFrameTitleOrientation,
-  tennisGameUrl, type TennisPointFrame
+  tennisGameUrl, tennisNamesMatch, type TennisPointFrame
 } from "../../src/collector/tennis-points.js";
 
 const fixture = JSON.parse(readFileSync(join(__dirname, "../fixtures/scores365-tennis-game.json"), "utf8")) as unknown;
@@ -200,6 +200,28 @@ describe("365Scores tennis point frames", () => {
       "Novak Djokovic vs Carlos Alcaraz")).toBe(true);
   });
 
+  test("tolerates transliteration variants of one player", () => {
+    // Live regression: Polymarket "Columbus: Abedallah Shelbayh vs Mitchell
+    // Krueger" against the 365Scores spelling "Abdullah Shelbayh".
+    expect(matchTennisFrameToTitle({ homeName: "Abdullah Shelbayh", awayName: "Mitchell Krueger" },
+      "Columbus: Abedallah Shelbayh vs Mitchell Krueger")).toBe(true);
+    expect(tennisFrameTitleOrientation({ homeName: "Abdullah Shelbayh", awayName: "Mitchell Krueger" },
+      "Columbus: Abedallah Shelbayh vs Mitchell Krueger")).toBe("direct");
+    expect(tennisNamesMatch("Nikoloz Basilashvili", "Nikolas Basilashvili")).toBe(true);
+  });
+
+  test("still rejects different players who share a surname or a given name", () => {
+    expect(tennisNamesMatch("Mirra Andreeva", "Erika Andreeva")).toBe(false);
+    expect(tennisNamesMatch("Alex Michelsen", "Alex Molcan")).toBe(false);
+    expect(tennisNamesMatch("Alexander Zverev", "Mischa Zverev")).toBe(false);
+    expect(matchTennisFrameToTitle({ homeName: "Mirra Andreeva", awayName: "Madison Keys" },
+      "Erika Andreeva vs Madison Keys")).toBe(false);
+    expect(matchTennisFrameToTitle({ homeName: "Alex Michelsen", awayName: "Alex Molcan" },
+      "Alex Michelsen vs Alex Molcan")).toBe(true);
+    expect(matchTennisFrameToTitle({ homeName: "Alex Michelsen", awayName: "Miomir Kecmanovic" },
+      "Alex Molcan vs Miomir Kecmanovic")).toBe(false);
+  });
+
   test("maps Polymarket outcome order to the 365Scores home/away coordinate", () => {
     const direct = { homeName: "Bu Yunchaokete", awayName: "Novak Djokovic" };
     expect(tennisFrameTitleOrientation(direct, "China Open: Yunchaokete Bu vs Novak Djokovic")).toBe("direct");
@@ -297,6 +319,43 @@ describe("TennisPointsPoller", () => {
     const second = await poller.poll(targets);
     expect(new Set(second.map(result => result.eventSlug))).toEqual(new Set(["event-3", "event-1"]));
     expect(requestedIds).toEqual(["7001", "7002", "7003", "7001"]);
+  });
+
+  test("polls a transliterated game title that exact matching would miss", async () => {
+    const doc = structuredClone(fixture) as { game: { id: number; homeCompetitor: { name: string }; awayCompetitor: { name: string } } };
+    doc.game.id = 555001;
+    doc.game.homeCompetitor.name = "Abdullah Shelbayh";
+    doc.game.awayCompetitor.name = "Mitchell Krueger";
+    const listingVariant = { games: [
+      { id: 555001, statusGroup: 3, homeCompetitor: { name: "Abdullah Shelbayh" }, awayCompetitor: { name: "Mitchell Krueger" } }
+    ] };
+    const request: (url: string) => Promise<unknown> = (url) =>
+      Promise.resolve(url.includes("/allscores/") ? listingVariant : doc);
+    const poller = new TennisPointsPoller({ request, now: () => observedAtMs, listRefreshMs: 600_000 });
+    const results = await poller.poll([{
+      eventSlug: "atp-shelbay-krueger-2026-10-03",
+      title: "Columbus: Abedallah Shelbayh vs Mitchell Krueger"
+    }]);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.eventSlug).toBe("atp-shelbay-krueger-2026-10-03");
+    expect(results[0]!.frame.homeName).toBe("Abdullah Shelbayh");
+  });
+
+  test("never returns a frame whose players do not match the target title", async () => {
+    const doc = structuredClone(fixture) as { game: { id: number; homeCompetitor: { name: string }; awayCompetitor: { name: string } } };
+    doc.game.id = 555002;
+    doc.game.homeCompetitor.name = "Mirra Andreeva";
+    doc.game.awayCompetitor.name = "Madison Keys";
+    // The listing wrongly maps a different pairing onto the target slug; the
+    // poll-time name verification must drop it instead of arming the wrong event.
+    const listingWrong = { games: [
+      { id: 555002, statusGroup: 3, homeCompetitor: { name: "Mirra Andreeva" }, awayCompetitor: { name: "Madison Keys" } }
+    ] };
+    const request: (url: string) => Promise<unknown> = (url) =>
+      Promise.resolve(url.includes("/allscores/") ? listingWrong : doc);
+    const poller = new TennisPointsPoller({ request, now: () => observedAtMs, listRefreshMs: 600_000 });
+    const results = await poller.poll([{ eventSlug: "wta-keys-2026-10-04", title: "Erika Andreeva vs Madison Keys" }]);
+    expect(results).toEqual([]);
   });
 
   test("skips targets that never matched a live 365Scores game", async () => {

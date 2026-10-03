@@ -366,7 +366,10 @@ export function tennisNameTokens(name: string): string[] {
  * publishes `"Yunchaokete Bu"` while 365Scores publishes `"Bu Yunchaokete"`,
  * and `"Matheus Pucinelli de Almeida"` versus `"Matheus Almeida"`. Compare
  * token sets, requiring the shorter name's tokens to all appear in the longer
- * one plus at least one meaningful (non-initial) shared fragment.
+ * one plus at least one meaningful (non-initial) shared fragment. Exact
+ * coverage is tried first; a conservative variant pass (see
+ * {@link tennisNameVariantMatch}) then admits transliteration spellings such
+ * as `"Abdullah Shelbayh"` vs `"Abedallah Shelbayh"`.
  */
 export function tennisNamesMatch(a: string, b: string): boolean {
   const keyA = tennisNameKey(a), keyB = tennisNameKey(b);
@@ -386,20 +389,72 @@ export function tennisNamesMatch(a: string, b: string): boolean {
     shared += 1;
     if (token.length >= 4) meaningful = true;
   }
-  return shared === small.size && meaningful;
+  if (shared === small.size && meaningful) return true;
+  // Transliteration variants of the same name ("Abdullah Shelbayh" on
+  // 365Scores vs "Abedallah Shelbayh" on Polymarket) defeat exact token
+  // coverage. Accept them only when the names still share an exact meaningful
+  // token (usually the family name) and the single differing token looks like
+  // a spelling variant: same first letter, near-equal length, edit distance 2.
+  return tennisNameVariantMatch(left, right);
+}
+
+/** Levenshtein distance for short name tokens (bounded inputs). */
+export function tennisTokenEditDistance(a: string, b: string): number {
+  const rows = a.length, cols = b.length;
+  let previous = Array.from({ length: cols + 1 }, (_value, index) => index);
+  for (let row = 1; row <= rows; row += 1) {
+    const current = new Array<number>(cols + 1).fill(0);
+    current[0] = row;
+    for (let col = 1; col <= cols; col += 1) {
+      const substitution = previous[col - 1]! + (a[row - 1] === b[col - 1] ? 0 : 1);
+      current[col] = Math.min(previous[col]! + 1, current[col - 1]! + 1, substitution);
+    }
+    previous = current;
+  }
+  return previous[cols]!;
+}
+
+/**
+ * Tolerant comparison for transliterated spellings of one player. Both names
+ * must have the same token count, exactly one differing token each way, and at
+ * least one exact shared token of four or more characters (the family-name
+ * anchor). The differing tokens must agree on their first letter and be within
+ * an edit distance of two. This deliberately rejects different players who
+ * merely share a surname ("Mirra Andreeva" vs "Erika Andreeva").
+ */
+function tennisNameVariantMatch(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size || left.size < 2) return false;
+  const leftOnly = [...left].filter((token) => !right.has(token));
+  const rightOnly = [...right].filter((token) => !left.has(token));
+  if (leftOnly.length !== 1 || rightOnly.length !== 1) return false;
+  const sharedTokens = [...left].filter((token) => right.has(token));
+  if (!sharedTokens.some((token) => token.length >= 4)) return false;
+  const [a] = leftOnly, [b] = rightOnly;
+  if (a === undefined || b === undefined || a.length < 3 || b.length < 3) return false;
+  if (a[0] !== b[0]) return false;
+  if (Math.abs(a.length - b.length) > 2) return false;
+  return tennisTokenEditDistance(a, b) <= 2;
 }
 
 export function tennisFrameTitleOrientation(frame: { homeName: string; awayName: string }, title: string): "direct" | "swapped" | null {
   const [left, right] = title.split(/\s+vs\.?\s+/i);
   if (!left || !right) return null;
   const { homeName, awayName } = frame;
+  // Polymarket tennis titles carry a tournament prefix ("Columbus: Abedallah
+  // Shelbayh vs Mitchell Krueger"); 365Scores names the players only. Strip
+  // the prefix so the tolerant name comparison sees the bare names.
+  const bareName = (value: string): string => {
+    const colon = value.lastIndexOf(":");
+    return (colon >= 0 ? value.slice(colon + 1) : value).trim() || value.trim();
+  };
+  const titleLeft = bareName(left), titleRight = bareName(right);
   // A doubles pair ("A./B. vs C./D.") must never pair with a singles event
   // just because one surname is shared.
   const frameDoubles = homeName.includes("/") || awayName.includes("/");
   const titleDoubles = left.includes("/") || right.includes("/");
   if (frameDoubles !== titleDoubles) return null;
-  const direct = tennisNamesMatch(left, homeName) && tennisNamesMatch(right, awayName);
-  const swapped = tennisNamesMatch(left, awayName) && tennisNamesMatch(right, homeName);
+  const direct = tennisNamesMatch(titleLeft, homeName) && tennisNamesMatch(titleRight, awayName);
+  const swapped = tennisNamesMatch(titleLeft, awayName) && tennisNamesMatch(titleRight, homeName);
   if (direct === swapped) return null;
   return direct ? "direct" : "swapped";
 }

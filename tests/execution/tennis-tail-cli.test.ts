@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { cliOptions, discoverTennisTailEvents } from "../../src/execution/tennis-tail-cli.js";
 import type { CatalogDependencies } from "../../src/collector/catalog.js";
 
@@ -101,12 +101,44 @@ describe("discoverTennisTailEvents", () => {
     const itf = gammaEvent({
       id: "evt-itf",
       slug: "itf-palan1-chen9-2026-10-03",
-      title: "M25 Yinchuan: Dominik Palan vs Kuan-Shou Chen"
+      title: "M25 Yinchuan: Dominik Palan vs Kuan-Shou Chen",
+      // A separate market identity, as Gamma always publishes for a new match.
+      markets: [{
+        ...gammaEvent().markets[0],
+        id: "mkt-itf-ml",
+        slug: "itf-palan1-chen9-2026-10-03-moneyline",
+        conditionId: "cond-itf-ml",
+        outcomes: JSON.stringify(["Dominik Palan", "Kuan-Shou Chen"]),
+        clobTokenIds: JSON.stringify(["token-palan", "token-chen"])
+      }]
     });
     expect((await discoverTennisTailEvents(deps([gammaEvent(), itf]))).map((event) => event.eventSlug))
       .toEqual(["atp-swiatek-gauff-2026-10-04"]);
     expect((await discoverTennisTailEvents(deps([gammaEvent(), itf]), ["atp", "wta", "itf"])).map((event) => event.eventSlug))
       .toEqual(["atp-swiatek-gauff-2026-10-04", "itf-palan1-chen9-2026-10-03"]);
+  });
+
+  test("keeps one event per match when Gamma lists the same match twice", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Same players, new conditionId: a relisted market would otherwise arm a
+      // second ladder on the same point feed.
+      const relisted = gammaEvent({
+        id: "evt-relisted",
+        slug: "atp-swiatek-gauff-2026-10-04-alt",
+        markets: [{ ...gammaEvent().markets[0], id: "mkt-ml-2", slug: "atp-swiatek-gauff-2026-10-04-alt-moneyline", conditionId: "cond-ml-2" }]
+      });
+      const duplicateMarkets = await discoverTennisTailEvents(deps([gammaEvent(), relisted]));
+      expect(duplicateMarkets.map((event) => event.eventSlug)).toEqual(["atp-swiatek-gauff-2026-10-04"]);
+
+      // Same conditionId, new slug: the literal same market under two events.
+      const copied = gammaEvent({ id: "evt-copy", slug: "atp-swiatek-gauff-2026-10-04-copy" });
+      const duplicateConditions = await discoverTennisTailEvents(deps([gammaEvent(), copied]));
+      expect(duplicateConditions.map((event) => event.eventSlug)).toEqual(["atp-swiatek-gauff-2026-10-04"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("drops doubles and events without a moneyline market", async () => {

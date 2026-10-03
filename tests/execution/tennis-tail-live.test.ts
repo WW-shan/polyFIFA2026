@@ -389,3 +389,152 @@ describe("runTennisTailWatch ladder parity", () => {
     expect(summary.levelsPlaced).toBe(6);
   });
 });
+
+describe("runTennisTailWatch multi-event isolation", () => {
+  const secondMarket: TennisTailMarket = {
+    eventSlug: "wta-andreeva-keys-2026-10-04",
+    eventTitle: "Mirra Andreeva vs. Madison Keys",
+    marketSlug: "wta-andreeva-keys-2026-10-04-moneyline",
+    conditionId: "cond-ml-2",
+    outcomes: ["Mirra Andreeva", "Madison Keys"],
+    tokenIds: ["token-andreeva", "token-keys"],
+    marketType: "moneyline",
+    tickSize: "0.01",
+    negRisk: false
+  };
+  const secondEvent: TennisTailEvent = {
+    eventSlug: secondMarket.eventSlug,
+    eventTitle: secondMarket.eventTitle,
+    markets: [secondMarket]
+  };
+  const secondFrame: TennisPointFrame = {
+    ...frame,
+    scores365GameId: 2,
+    homeName: "Mirra Andreeva",
+    awayName: "Madison Keys"
+  };
+  const secondBook: OrderbookSnapshot = {
+    tokenId: "token-andreeva",
+    bids: [{ price: 0.94, size: 500 }],
+    asks: [{ price: 0.96, size: 500 }],
+    tickSize: "0.01",
+    negRisk: false
+  };
+  const secondOpponentBook: OrderbookSnapshot = {
+    tokenId: "token-keys",
+    bids: [{ price: 0.04, size: 500 }],
+    asks: [{ price: 0.06, size: 500 }],
+    tickSize: "0.01"
+  };
+
+  test("arms two concurrent Gen1 events on their own tokens only", async () => {
+    const file = await ledgerFile();
+    const ledger = new LiveLedger(file);
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+    const books: Record<string, OrderbookSnapshot> = {
+      "token-swiatek": book,
+      "token-gauff": opponentBook(0.05),
+      "token-andreeva": secondBook,
+      "token-keys": secondOpponentBook
+    };
+
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event, secondEvent],
+        pollPoints: async () => [
+          { eventSlug: event.eventSlug, frame, signal: gen1 },
+          { eventSlug: secondEvent.eventSlug, frame: secondFrame, signal: { ...gen1, favored: "home" } }
+        ],
+        fetchOrderbook: bookFetcher(books),
+        placeLadder,
+        ledger
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 1 }
+    );
+
+    expect(summary.armed).toHaveLength(2);
+    expect(placeLadder).toHaveBeenCalledTimes(2);
+    const [firstCall, secondCall] = placeLadder.mock.calls;
+    expect(firstCall![0].every((level) => level.tokenId === "token-swiatek" && level.eventSlug === event.eventSlug)).toBe(true);
+    expect(secondCall![0].every((level) => level.tokenId === "token-andreeva" && level.eventSlug === secondEvent.eventSlug)).toBe(true);
+
+    const entries = await ledger.readEntries();
+    expect(entries.filter((entry) => entry.eventSlug === event.eventSlug).every((entry) => entry.tokenId === "token-swiatek")).toBe(true);
+    expect(entries.filter((entry) => entry.eventSlug === secondEvent.eventSlug).every((entry) => entry.tokenId === "token-andreeva")).toBe(true);
+  });
+
+  test("arms only the event whose own signal is Gen1", async () => {
+    const fetched: string[] = [];
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+    const books: Record<string, OrderbookSnapshot> = {
+      "token-swiatek": book,
+      "token-gauff": opponentBook(0.05),
+      "token-andreeva": secondBook,
+      "token-keys": secondOpponentBook
+    };
+
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event, secondEvent],
+        pollPoints: async () => [
+          { eventSlug: event.eventSlug, frame, signal: { ...gen1, lateSet: false } },
+          { eventSlug: secondEvent.eventSlug, frame: secondFrame, signal: { ...gen1, favored: "home" } }
+        ],
+        fetchOrderbook: async (tokenId) => { fetched.push(tokenId); return bookFetcher(books)(tokenId); },
+        placeLadder
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 1 }
+    );
+
+    expect(summary.armed).toHaveLength(1);
+    expect(summary.armed[0]!.eventSlug).toBe(secondEvent.eventSlug);
+    expect(fetched).toContain("token-andreeva");
+    expect(fetched).not.toContain("token-swiatek");
+  });
+
+  test("refuses to arm when a mislabeled frame names another event's players", async () => {
+    const records: TennisTailArmRecord[] = [];
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [secondEvent],
+        // eventSlug says Andreeva/Keys, but the frame is the Swiatek/Gauff match.
+        pollPoints: async () => [{ eventSlug: secondEvent.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher({ "token-andreeva": secondBook, "token-keys": secondOpponentBook }),
+        placeLadder,
+        onRecord: (record) => { records.push(record); }
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 1 }
+    );
+
+    expect(summary.armed).toHaveLength(0);
+    expect(placeLadder).not.toHaveBeenCalled();
+    expect(records.some((record) => record.kind === "skipped" && record.details.includes("no outcome maps to the 365Scores favoured side"))).toBe(true);
+  });
+
+  test("heartbeat reports an event that never matched a 365Scores game", async () => {
+    const records: TennisTailArmRecord[] = [];
+    await runTennisTailWatch(
+      {
+        discover: async () => [event, secondEvent],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: { ...gen1, lateSet: false } }],
+        fetchOrderbook: async () => book,
+        onRecord: (record) => { records.push(record); }
+      },
+      {
+        config: DEFAULT_TENNIS_TAIL_LADDER,
+        dryRun: true,
+        intervalMs: 0,
+        maxIterations: 2,
+        heartbeatEveryIterations: 2
+      }
+    );
+
+    const heartbeat = records.find((record) => record.kind === "heartbeat")?.heartbeat;
+    expect(heartbeat).toBeDefined();
+    expect(heartbeat!.discovered).toBe(2);
+    expect(heartbeat!.monitored).toBe(1);
+    expect(heartbeat!.neverPolled).toEqual([secondEvent.eventSlug]);
+  });
+});

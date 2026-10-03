@@ -38,12 +38,33 @@ export interface TennisTailEvent {
   markets: readonly TennisTailMarket[];
 }
 
+/**
+ * Periodic liveness snapshot. A discovered event that never produces a frame
+ * (365Scores name mismatch, feed outage) is otherwise invisible: nothing is
+ * armed and nothing is logged, so the operator cannot tell monitoring apart
+ * from a silent miss.
+ */
+export interface TennisTailHeartbeat {
+  iterations: number;
+  discovered: number;
+  /** Frames returned by the poller this iteration. */
+  polled: number;
+  /** Discovered events with a fresh 365Scores frame. */
+  monitored: number;
+  levelsPlaced: number;
+  /** Discovered events that have never produced a 365Scores frame. */
+  neverPolled: readonly string[];
+  /** Events whose last frame is older than the staleness window. */
+  stale: readonly string[];
+}
+
 export interface TennisTailArmRecord {
-  kind: "armed" | "skipped" | "error";
+  kind: "armed" | "skipped" | "error" | "heartbeat";
   eventSlug: string;
   details: string;
   plan?: TennisTailLadderPlan;
   results?: TradeResult[];
+  heartbeat?: TennisTailHeartbeat;
 }
 
 export interface TennisTailLiveDeps {
@@ -76,6 +97,10 @@ export interface TennisTailLiveOptions {
   maxSweepsPerEvent?: number;
   /** Iterations between read-only reconciliations of resting bids (default 8). */
   reconcileEveryIterations?: number;
+  /** Iterations between liveness heartbeats; 0 disables them (default 20). */
+  heartbeatEveryIterations?: number;
+  /** How long an event may go without a frame before it is reported stale. */
+  heartbeatStaleMs?: number;
 }
 
 export interface TennisTailLiveSummary {
@@ -100,6 +125,8 @@ interface EventArmState {
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_MAX_SWEEPS = 240;
+const DEFAULT_HEARTBEAT_ITERATIONS = 20;
+const DEFAULT_HEARTBEAT_STALE_MS = 180_000;
 
 export async function runTennisTailWatch(
   deps: TennisTailLiveDeps,
@@ -113,7 +140,11 @@ export async function runTennisTailWatch(
   const maxIterations = options.maxIterations ?? Number.POSITIVE_INFINITY;
   const maxSweepsPerEvent = options.maxSweepsPerEvent ?? DEFAULT_MAX_SWEEPS;
   const reconcileEveryIterations = options.reconcileEveryIterations ?? 8;
+  const heartbeatEveryIterations = options.heartbeatEveryIterations ?? DEFAULT_HEARTBEAT_ITERATIONS;
+  const heartbeatStaleMs = options.heartbeatStaleMs ?? DEFAULT_HEARTBEAT_STALE_MS;
   const states = new Map<string, EventArmState>();
+  /** eventSlug -> timestamp of its last frame; 0 means never matched. */
+  const monitoring = new Map<string, number>();
   const summary: TennisTailLiveSummary = {
     iterations: 0,
     discoveredEvents: 0,
@@ -150,8 +181,11 @@ export async function runTennisTailWatch(
       title: event.eventTitle
     }));
 
+    for (const event of events) {
+      if (!monitoring.has(event.eventSlug)) monitoring.set(event.eventSlug, 0);
+    }
+    let frames: readonly TennisPointPollResult[] = [];
     if (targets.length > 0) {
-      let frames: readonly TennisPointPollResult[];
       try {
         frames = await deps.pollPoints(targets);
       } catch (error) {
@@ -159,7 +193,9 @@ export async function runTennisTailWatch(
         await emit(deps, { kind: "error", eventSlug: "-", details: `poll failed: ${describe(error)}` });
         frames = [];
       }
+      const observedAt = now();
       for (const frame of frames) {
+        if (monitoring.has(frame.eventSlug)) monitoring.set(frame.eventSlug, observedAt);
         const state = states.get(frame.eventSlug) ?? { placedPrices: new Set<number>(), sweeps: 0, done: false };
         states.set(frame.eventSlug, state);
         if (state.done) continue;
@@ -167,6 +203,32 @@ export async function runTennisTailWatch(
         if (!event) continue;
         await sweepEvent(deps, options, event, frame, state, summary, now, maxSweepsPerEvent);
       }
+    }
+
+    if (heartbeatEveryIterations > 0 && summary.iterations % heartbeatEveryIterations === 0) {
+      const observedAt = now();
+      const neverPolled: string[] = [];
+      const stale: string[] = [];
+      for (const event of events) {
+        const lastFrameAt = monitoring.get(event.eventSlug) ?? 0;
+        if (lastFrameAt === 0) neverPolled.push(event.eventSlug);
+        else if (observedAt - lastFrameAt > heartbeatStaleMs) stale.push(event.eventSlug);
+      }
+      const monitored = events.length - neverPolled.length - stale.length;
+      await emit(deps, {
+        kind: "heartbeat",
+        eventSlug: "-",
+        details: `monitoring ${monitored}/${events.length} events; ${frames.length} frames this sweep; ${neverPolled.length} never matched a 365Scores game; ${stale.length} stale`,
+        heartbeat: {
+          iterations: summary.iterations,
+          discovered: events.length,
+          polled: frames.length,
+          monitored,
+          levelsPlaced: summary.levelsPlaced,
+          neverPolled,
+          stale
+        }
+      });
     }
 
     if (summary.iterations >= maxIterations) break;

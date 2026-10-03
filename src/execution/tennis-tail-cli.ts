@@ -6,7 +6,7 @@
 import { appendFile } from "node:fs/promises";
 import { discoverSportsEvents, type CatalogDependencies } from "../collector/catalog.js";
 import type { CollectorEvent } from "../collector/types.js";
-import { TennisPointsPoller, SCORES365_BASE_URL } from "../collector/tennis-points.js";
+import { TennisPointsPoller, SCORES365_BASE_URL, tennisNameKey } from "../collector/tennis-points.js";
 import type { OrderbookSnapshot } from "../domain/types.js";
 import { fetchJson } from "../polymarket/http.js";
 import { normalizeOrderbook, type RawOrderbook } from "../polymarket/clob.js";
@@ -137,6 +137,12 @@ export async function discoverTennisTailEvents(
     maxPages: 20
   }, deps);
   const discovered: TennisTailEvent[] = [];
+  // Two Gamma events for one match (relisted market, duplicated tag page) would
+  // arm two ladders on the same point feed and defeat the per-event exposure
+  // cap. Keep the first event and make every duplicate visible in the log.
+  const seenConditionIds = new Set<string>();
+  const seenTokenSets = new Set<string>();
+  const seenPairings = new Set<string>();
   for (const event of events) {
     const market = moneylineTennisMarket(event);
     if (!market) continue;
@@ -146,9 +152,38 @@ export async function discoverTennisTailEvents(
     // ITF has book data but no score data in the archive (0 backtest samples),
     // so it is excluded unless the operator explicitly opts in.
     if (allowed.size > 0 && !allowed.has(tennisLeagueOf(event.eventSlug))) continue;
+    const tokenKey = [...market.tokenIds].sort().join(" ");
+    const pairingKey = tennisPairingKey(event.title);
+    const duplicate = seenConditionIds.has(market.conditionId)
+      || seenTokenSets.has(tokenKey)
+      || (pairingKey !== null && seenPairings.has(pairingKey));
+    if (duplicate) {
+      console.warn(JSON.stringify({
+        at: new Date().toISOString(),
+        kind: "duplicate_event",
+        eventSlug: event.eventSlug,
+        details: `skipped duplicate tennis event (conditionId ${market.conditionId})`
+      }));
+      continue;
+    }
+    seenConditionIds.add(market.conditionId);
+    seenTokenSets.add(tokenKey);
+    if (pairingKey !== null) seenPairings.add(pairingKey);
     discovered.push({ eventSlug: event.eventSlug, eventTitle: event.title, markets: [market] });
   }
   return discovered;
+}
+
+/** Player-pairing identity of a title, ignoring the tournament prefix. */
+function tennisPairingKey(title: string): string | null {
+  const [left, right] = title.split(/\s+vs\.?\s+/i);
+  if (!left || !right) return null;
+  const bare = (value: string): string => {
+    const colon = value.lastIndexOf(":");
+    return (colon >= 0 ? value.slice(colon + 1) : value).trim() || value.trim();
+  };
+  const names = [tennisNameKey(bare(left)), tennisNameKey(bare(right))].filter((name) => name.length > 0).sort();
+  return names.length === 2 ? names.join("|") : null;
 }
 
 function moneylineTennisMarket(event: CollectorEvent): TennisTailMarket | null {
