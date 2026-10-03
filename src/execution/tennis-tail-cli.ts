@@ -19,6 +19,7 @@ import {
 import { runTennisTailWatch, type TennisTailArmRecord, type TennisTailEvent } from "./tennis-tail-live.js";
 import { LiveExecutor, getLiveOrder, liveConfigFromEnv, type LiveOrderType } from "./live-executor.js";
 import { PENDING_SUBMISSION_PREFIX } from "../persistence/ledger.js";
+import { createAutoSettlementMonitor } from "./auto-settlement.js";
 import { TERMINAL_ORDER_SNAPSHOT_STATUSES, orderSnapshotStatus, restingFillFromSnapshot } from "./resting-reconcile.js";
 
 const TENNIS_TAG_ID = "864";
@@ -76,6 +77,7 @@ async function main(argv: string[]): Promise<void> {
   });
   const ledger = new LiveLedger(options.ledgerFile);
   const executor = new LiveExecutor(liveConfigFromEnv(process.env));
+  const settlement = createAutoSettlementMonitor({ env: process.env, ledger });
 
   let stopping = false;
   process.on("SIGINT", () => {
@@ -83,6 +85,7 @@ async function main(argv: string[]): Promise<void> {
     console.log("\nSIGINT received; stopping after the current poll. Resting orders remain on the book; use --cancel-order flow to pull them.");
   });
 
+  if (settlement) console.log(JSON.stringify({ at: new Date().toISOString(), autoRedeem: "enabled" }));
   const summary = await runTennisTailWatch(
     {
       discover: () => discoverTennisTailEvents(deps, options.leagues),
@@ -90,7 +93,10 @@ async function main(argv: string[]): Promise<void> {
       fetchOrderbook: (tokenId) => fetchTennisOrderbook(tokenId, options),
       placeLadder: (levels, executeOptions) => executor.placeRestingLadder(levels, executeOptions),
       ledger,
-      reconcile: () => reconcileTennisRestingOrders(ledger, process.env),
+      reconcile: async () => {
+        await reconcileTennisRestingOrders(ledger, process.env);
+        settlement?.kick();
+      },
       onRecord: (record) => logRecord(options, record)
     },
     {
@@ -103,7 +109,13 @@ async function main(argv: string[]): Promise<void> {
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {})
     }
   );
-  console.log(JSON.stringify({ at: new Date().toISOString(), summary }, null, 2));
+  await settlement?.waitForIdle();
+  console.log(JSON.stringify({
+    at: new Date().toISOString(),
+    summary,
+    settlement: settlement?.lastResult ?? null,
+    settlementError: settlement?.lastError ? describe(settlement.lastError) : null
+  }, null, 2));
 }
 
 /** Slugs are `<league>-<players>-<date>`; `itf` has no score feed in the archive. */

@@ -172,6 +172,27 @@ describe("planTennisTailLadder", () => {
     expect(result.plan.levels[0]!.shares).toBe(5);
   });
 
+  test("skips a level that is already resting", () => {
+    const result = plan({ alreadyPlacedPrices: [0.80, 0.85] });
+    expect(result.action).toBe("ARM");
+    if (result.action !== "ARM") return;
+    expect(result.plan.levels.map((level) => level.price)).toEqual([0.88, 0.90, 0.92]);
+  });
+
+  test("reports no new levels when every qualifying price already rests", () => {
+    const result = plan({ alreadyPlacedPrices: [0.80, 0.85, 0.88, 0.90, 0.92] });
+    expect(result).toMatchObject({ action: "SKIP", reason: "NO_NEW_LEVELS" });
+  });
+
+  test("requires the favoured token to hold the market's best bid", () => {
+    const behind = plan({ otherBestBid: 0.94 });
+    expect(behind).toMatchObject({ action: "SKIP", reason: "NOT_MARKET_LEADER" });
+    const ahead = plan({ otherBestBid: 0.93 });
+    expect(ahead.action).toBe("ARM");
+    const tied = plan({ otherBestBid: 0.93 });
+    expect(tied.action).toBe("ARM");
+  });
+
   test("scales shares per level", () => {
     const result = plan({}, { sharesPerLevel: 10, maxNotionalPerEvent: 43.5, maxNotionalPerDay: 1305 });
     expect(result.action).toBe("ARM");

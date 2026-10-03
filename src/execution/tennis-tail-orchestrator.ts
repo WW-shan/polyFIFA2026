@@ -91,8 +91,10 @@ export type TennisTailSkipReason =
   | "NOT_GEN1"
   | "MARKET_NOT_MONEYLINE"
   | "NO_MATCHING_TOKEN"
+  | "NOT_MARKET_LEADER"
   | "ORDERBOOK_UNRESTABLE"
-  | "BUDGET_EXHAUSTED";
+  | "BUDGET_EXHAUSTED"
+  | "NO_NEW_LEVELS";
 
 export type TennisTailPlanResult =
   | { action: "ARM"; plan: TennisTailLadderPlan }
@@ -108,6 +110,17 @@ export interface TennisTailPlanInput {
   committedEventNotional?: number;
   /** Resting notional already committed across all events today. */
   committedDayNotional?: number;
+  /**
+   * Ladder prices already resting for this token. The backtest arms each level
+   * at its own first qualifying second, so a re-sweep must only add the levels
+   * that are still missing - never duplicate one that is already on the book.
+   */
+  alreadyPlacedPrices?: readonly number[];
+  /**
+   * Best bid of the other outcome token in the same market. The backtest only
+   * enters the token that holds the market's best bid (`b === maxBid`).
+   */
+  otherBestBid?: number;
 }
 
 /** Gen1: one set from the match and the live set is about to be decided. */
@@ -155,13 +168,18 @@ function splitTitle(title: string): [string | null, string | null] {
   return [left?.trim() || null, right?.trim() || null];
 }
 
-function bestBid(book: OrderbookSnapshot): number | undefined {
+/** Highest usable bid in the book (positive price and size). */
+export function orderbookBestBid(book: OrderbookSnapshot): number | undefined {
   return bestLevel(book.bids, "max");
 }
 
-function bestAsk(book: OrderbookSnapshot): number | undefined {
+/** Lowest usable ask in the book (positive price and size). */
+export function orderbookBestAsk(book: OrderbookSnapshot): number | undefined {
   return bestLevel(book.asks, "min");
 }
+
+const bestBid = orderbookBestBid;
+const bestAsk = orderbookBestAsk;
 
 function bestLevel(levels: readonly PriceLevel[], direction: "min" | "max"): number | undefined {
   const usable = levels.filter((level) =>
@@ -211,6 +229,15 @@ export function planTennisTailLadder(input: TennisTailPlanInput): TennisTailPlan
   const sharesPerLevel = Math.max(requestedShares, minimumOrderSize);
   const bid = bestBid(orderbook);
   const ask = bestAsk(orderbook);
+  // Backtest parity: only the token holding the market's best bid is entered.
+  if (input.otherBestBid !== undefined && (bid === undefined || bid < input.otherBestBid)) {
+    return {
+      action: "SKIP",
+      reason: "NOT_MARKET_LEADER",
+      details: `favoured bestBid ${bid ?? "none"} is behind the other outcome's ${input.otherBestBid}`
+    };
+  }
+  const alreadyPlaced = new Set((input.alreadyPlacedPrices ?? []).map((price) => Number(price.toFixed(6))));
   const prices = [...(config.prices ?? TENNIS_TAIL_LADDER_PRICES)].sort((a, b) => a - b);
   const eventBudget = Math.max(0, config.maxNotionalPerEvent - (input.committedEventNotional ?? 0));
   const dayBudget = Math.max(0, config.maxNotionalPerDay - (input.committedDayNotional ?? 0));
@@ -220,6 +247,7 @@ export function planTennisTailLadder(input: TennisTailPlanInput): TennisTailPlan
 
   for (const price of prices) {
     if (!Number.isFinite(price) || price <= 0 || price >= 1) continue;
+    if (alreadyPlaced.has(Number(price.toFixed(6)))) continue;
     if (!priceConformsToTickSize(price, tickSize)) continue;
     if (ask === undefined || price >= ask) continue;
     if (bid === undefined || bid < price) continue;
@@ -234,6 +262,18 @@ export function planTennisTailLadder(input: TennisTailPlanInput): TennisTailPlan
   }
 
   if (levels.length === 0) {
+    const qualifying = prices.filter((price) =>
+      Number.isFinite(price) && price > 0 && price < 1
+      && priceConformsToTickSize(price, tickSize)
+      && ask !== undefined && price < ask
+      && bid !== undefined && bid >= price);
+    if (qualifying.length > 0 && qualifying.every((price) => alreadyPlaced.has(Number(price.toFixed(6))))) {
+      return {
+        action: "SKIP",
+        reason: "NO_NEW_LEVELS",
+        details: `all ${qualifying.length} qualifying ladder levels are already resting`
+      };
+    }
     if (droppedForBudget) {
       return {
         action: "SKIP",

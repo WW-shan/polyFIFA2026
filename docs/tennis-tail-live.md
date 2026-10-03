@@ -8,11 +8,16 @@
 - 只做 **网球 moneyline**。默认只做 **ATP/WTA**：回测样本里 ITF 的 573 场有盘口、
   但没有任何比分数据，等于 0 样本 0 证据（`--leagues all` 可以放开，但那是没验证过的）。
 - 信号 Gen1：领先方已拿 `setsToWin - 1` 盘，且当前盘进入 5-x(x≤4)、6-5 或 6-6
-  （`oneSetFromMatch && lateSet`）。**Gen1 一出现就挂满阶梯，不等点级丢分。**
+  （`oneSetFromMatch && lateSet`）。**Gen1 一出现就开始挂阶梯，不等点级丢分。**
+- **分档补挂（与回测对齐）**：回测里每个价位是在它自己"第一次满足条件"的那一秒挂进去的
+  （bid 涨上来高档位才够条件）。实盘同样每轮重扫：Gen1 期间缺的档位会在后续轮询里补挂，
+  已挂上的档不会重复挂；全部档位挂满或触到单场上限就停。
 - 挂单：post-only 被动买单，阶梯 `0.80 / 0.85 / 0.88 / 0.90 / 0.92`，
   成交后持有到结算。被回破不自动撤（回测：不撤 ROI 12.68% > 撤 12.52%）。
 - 挂单前每条腿都校验：`bestBid >= P` 且 `bestAsk > P`。不抢价、不追价、
-  不改成吃单；书不满足就跳过该档。
+  不改成吃单；书不满足就跳过该档，下一轮再试。
+- 另外要求**领先方 token 的 bid 不低于另一个 outcome 的 bid**（回测的
+  `b === maxBid` 条件）；盘口反转/滞后时不挂，等恢复正常。
 
 ## 2. 实盘与回测的一个关键差异：最小下单量
 
@@ -64,7 +69,16 @@ npm run tennis:tail -- --live true --interval-ms 15000 \
 | `--leagues atp,wta` | atp,wta | 赛事前缀；`all` = 不筛，包含 ITF（无回测证据） |
 | `--proxy URL` | 环境变量 | 走本地代理 |
 
-## 4. 风险控制与去重
+## 4. 结算与赎回
+
+- 策略**没有卖出**：成交后持有到结算，赢 1 USDC/股、输 0。
+- 自动赎回默认开启（`POLY_AUTO_REDEEM=false` 关闭）：复用 `src/execution/settlement.ts`，
+  只要有 funder/deposit wallet 地址和私钥就会在 watch 里周期性领取已结算仓位，
+  并把 ledger 里的持仓标成 `redeemed` / `lost`。依赖的额外环境变量与世界杯实盘一致
+  （`POLY_RELAYER_URL`、`POLY_AUTO_REDEEM_INTERVAL_MS`、relayer/builder key 等）。
+- 未配置钱包/私钥时自动赎回静默跳过，持仓留在 ledger 里等人工处理。
+
+## 5. 风险控制与去重
 
 - **单场上限**：本场已挂/已成交占用 ≥ 单场上限时不再加档。
 - **单日上限**：所有 active 挂单/持仓的占用合计达到上限后不再开新梯。
@@ -74,8 +88,10 @@ npm run tennis:tail -- --live true --interval-ms 15000 \
   返回替换；进程死在提交中间也不会重复开梯。
 - **对账**：每 8 轮做一次只读对账，`size_matched` > 0 的挂单转成持仓，
   终态订单释放预留；读失败时保留预留，绝不少算敞口。
+- **价位记忆**：已挂档位从 ledger 恢复，进程重启也不会重复挂同一档；
+  venue 拒单（post-only 被拒等）不算已挂，下一轮会重试。
 
-## 5. 撤单
+## 6. 撤单
 
 不自动撤单。要手动撤某条腿（用同一个 ledger）：
 
@@ -86,7 +102,7 @@ npx tsx src/cli.ts --mode live --cancel-order <orderId> \
 
 venue 未确认撤单时不会释放预留（避免重复挂单）。
 
-## 6. 已知边界
+## 7. 已知边界
 
 - `quote-touch-assumed` 只验证“价格触达”，不验证队列位置、深度和延迟；
   实盘先用 5 股/档小仓跑，核对真实成交率与滑点。

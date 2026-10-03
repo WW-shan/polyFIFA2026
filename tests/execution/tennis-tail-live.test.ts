@@ -68,6 +68,19 @@ const book: OrderbookSnapshot = {
   negRisk: false
 };
 
+/** Favoured book plus the other outcome's book, keyed by token id. */
+function bookFetcher(books: Record<string, OrderbookSnapshot>) {
+  return async (tokenId: string): Promise<OrderbookSnapshot> => {
+    const found = books[tokenId];
+    if (!found) throw new Error(`no book for ${tokenId}`);
+    return found;
+  };
+}
+
+function opponentBook(bid: number): OrderbookSnapshot {
+  return { tokenId: "token-gauff", bids: [{ price: bid, size: 500 }], asks: [{ price: bid + 0.01, size: 500 }], tickSize: "0.01" };
+}
+
 function posted(order: LiveRestingLevel): TradeResult {
   return {
     mode: "live",
@@ -204,7 +217,144 @@ describe("runTennisTailWatch", () => {
       { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 1 }
     );
 
-    // 21.75 event cap - 3.50 already resting = 18.25, so the 0.92 level drops.
+    // The seeded 0.90 level is already resting (budget 3.50, price memory), so
+    // only the levels the ledger does not know about are added.
+    expect(placeLadder.mock.calls[0]![0].map((level) => level.price)).toEqual([0.80, 0.85, 0.88, 0.92]);
+  });
+});
+
+describe("runTennisTailWatch ladder parity", () => {
+  test("re-sweeps and adds levels that only become restable later", async () => {
+    const file = await ledgerFile();
+    const ledger = new LiveLedger(file);
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+    const books: Record<string, OrderbookSnapshot> = {
+      "token-swiatek": { ...book, bids: [{ price: 0.90, size: 500 }] }, // 0.92 cannot rest yet
+      "token-gauff": opponentBook(0.05)
+    };
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher(books),
+        placeLadder,
+        ledger,
+        sleep: async () => { books["token-swiatek"] = book; } // next poll the bid rises to 0.93
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 2 }
+    );
+
+    expect(placeLadder).toHaveBeenCalledTimes(2);
     expect(placeLadder.mock.calls[0]![0].map((level) => level.price)).toEqual([0.80, 0.85, 0.88, 0.90]);
+    expect(placeLadder.mock.calls[1]![0].map((level) => level.price)).toEqual([0.92]);
+    expect(summary.levelsPlaced).toBe(5);
+  });
+
+  test("does not re-place a level that is already resting in the ledger", async () => {
+    const file = await ledgerFile();
+    const ledger = new LiveLedger(file);
+    await ledger.recordTrade({
+      timestamp: new Date().toISOString(),
+      mode: "live",
+      status: "posted",
+      eventSlug: event.eventSlug,
+      marketSlug: market.marketSlug,
+      tokenId: "token-swiatek",
+      conditionId: market.conditionId,
+      outcome: "Iga Swiatek",
+      orderId: "resting-092",
+      price: 0.92,
+      shares: 0,
+      notional: 0,
+      reservedNotional: 4.6
+    });
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+
+    await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
+        placeLadder,
+        ledger
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 1 }
+    );
+
+    expect(placeLadder).toHaveBeenCalledTimes(1);
+    const placed = placeLadder.mock.calls[0]![0].map((level) => level.price);
+    expect(placed).toEqual([0.80, 0.85, 0.88, 0.90]);
+  });
+
+  test("waits for the favoured token to hold the market's best bid", async () => {
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+    const books: Record<string, OrderbookSnapshot> = {
+      "token-swiatek": book,
+      "token-gauff": opponentBook(0.97) // stale/inverted book: the other side is the market leader
+    };
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher(books),
+        placeLadder,
+        sleep: async () => { books["token-gauff"] = opponentBook(0.05); }
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 2 }
+    );
+
+    expect(placeLadder).toHaveBeenCalledTimes(1);
+    expect(summary.armed).toHaveLength(1);
+    const skipped = summary.skipped;
+    expect(skipped).toBeGreaterThanOrEqual(1);
+  });
+
+  test("reports a repeated skip once instead of every poll", async () => {
+    const records: TennisTailArmRecord[] = [];
+    const books: Record<string, OrderbookSnapshot> = {
+      "token-swiatek": book,
+      "token-gauff": opponentBook(0.97)
+    };
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher(books),
+        placeLadder: vi.fn(),
+        onRecord: (record) => { records.push(record); }
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: true, intervalMs: 0, maxIterations: 3 }
+    );
+
+    expect(summary.skipped).toBe(3);
+    expect(records.filter((record) => record.kind === "skipped")).toHaveLength(1);
+  });
+
+  test("retries a level the venue rejected", async () => {
+    const file = await ledgerFile();
+    const ledger = new LiveLedger(file);
+    let call = 0;
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => {
+      call += 1;
+      return levels.map((level) => {
+        if (level.price !== 0.88 || call !== 1) return posted(level);
+        const { reservedNotional: _reservation, ...rest } = posted(level);
+        return { ...rest, status: "rejected" as const };
+      });
+    });
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
+        placeLadder,
+        ledger
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 2 }
+    );
+
+    expect(placeLadder).toHaveBeenCalledTimes(2);
+    expect(placeLadder.mock.calls[1]![0].map((level) => level.price)).toEqual([0.88]);
+    expect(summary.levelsPlaced).toBe(6);
   });
 });
