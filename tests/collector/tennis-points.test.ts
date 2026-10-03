@@ -281,6 +281,20 @@ describe("TennisPointsPoller", () => {
     expect(urls.filter(url => url.includes("/allscores/"))).toHaveLength(1);
   });
 
+  test("returns unchanged frames on every poll when the heartbeat is zero", async () => {
+    let nowMs = observedAtMs;
+    const request: (url: string) => Promise<unknown> = (url) => Promise.resolve(url.includes("/allscores/") ? listing : fixture);
+    // The live watch re-evaluates the order book on every poll, so it must keep
+    // receiving the frame even when the 365Scores state has not changed.
+    const poller = new TennisPointsPoller({ request, now: () => nowMs, heartbeatMs: 0, listRefreshMs: 600_000 });
+    const targets = [{ eventSlug: "atp-justo-sakamoto", title: "Guido Ivan Justo vs Pedro Sakamoto" }];
+    expect(await poller.poll(targets)).toHaveLength(1);
+    nowMs += 15_000;
+    expect(await poller.poll(targets)).toHaveLength(1);
+    nowMs += 15_000;
+    expect(await poller.poll(targets)).toHaveLength(1);
+  });
+
   test("rotates the per-poll game cap so later live games are still polled", async () => {
     let nowMs = observedAtMs;
     const docs = new Map<number, unknown>();

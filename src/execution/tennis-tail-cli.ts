@@ -98,6 +98,12 @@ async function main(argv: string[]): Promise<void> {
   const poller = new TennisPointsPoller({
     request,
     baseUrl: options.scores365BaseUrl,
+    // The collector deduplicates unchanged frames (score-change / 60s heartbeat)
+    // because it journals them. The live watch needs the *book* re-evaluated on
+    // every poll: a level that only becomes restable later must be armed at the
+    // next sweep, not up to 60s later. heartbeatMs = 0 disables that dedupe;
+    // non-live frames are still dropped, so a finished match stops sweeping.
+    heartbeatMs: 0,
     onError: (error, detail) => { void logRecord(options, { kind: "error", eventSlug: `scores365:${detail}`, details: describe(error) }); }
   });
   const ledger = new LiveLedger(options.ledgerFile);

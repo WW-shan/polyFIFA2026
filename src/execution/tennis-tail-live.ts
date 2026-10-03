@@ -58,6 +58,25 @@ export interface TennisTailHeartbeat {
   stale: readonly string[];
 }
 
+/**
+ * Latency of one arm, in the same clock as `frame.observedAtMs` (the moment the
+ * 365Scores frame was parsed). The backtest arms on a 10s book-snapshot grid
+ * with the score pushed by the sports feed; these fields measure how far the
+ * live HTTP-poll path is from that grid on every real arm.
+ */
+export interface TennisTailArmTiming {
+  frameObservedAtMs: number;
+  sweepStartedAtMs: number;
+  /** How old the 365Scores frame was when its sweep started. */
+  signalAgeMs: number;
+  /** Sweep start -> order book snapshot(s) available. */
+  orderbookMs: number;
+  /** Sweep start -> arm emitted. */
+  sweepMs: number;
+  /** Sweep start -> ladder submission settled (live only). */
+  submitMs?: number;
+}
+
 export interface TennisTailArmRecord {
   kind: "armed" | "skipped" | "error" | "heartbeat";
   eventSlug: string;
@@ -65,6 +84,7 @@ export interface TennisTailArmRecord {
   plan?: TennisTailLadderPlan;
   results?: TradeResult[];
   heartbeat?: TennisTailHeartbeat;
+  timing?: TennisTailArmTiming;
 }
 
 export interface TennisTailLiveDeps {
@@ -145,6 +165,21 @@ export async function runTennisTailWatch(
   const states = new Map<string, EventArmState>();
   /** eventSlug -> timestamp of its last frame; 0 means never matched. */
   const monitoring = new Map<string, number>();
+  // Reconciliation is read-only venue I/O whose results only matter to the next
+  // sweep. Run it in the background so a slow venue read cannot delay the
+  // signal -> book -> order critical path (the backtest has no such step).
+  let reconcileInFlight: Promise<void> | undefined;
+  const kickReconcile = (): void => {
+    const reconcile = deps.reconcile;
+    if (!reconcile || reconcileInFlight) return;
+    reconcileInFlight = Promise.resolve()
+      .then(() => reconcile())
+      .catch(async (error) => {
+        summary.errors += 1;
+        await emit(deps, { kind: "error", eventSlug: "-", details: `reconcile failed: ${describe(error)}` });
+      })
+      .finally(() => { reconcileInFlight = undefined; });
+  };
   const summary: TennisTailLiveSummary = {
     iterations: 0,
     discoveredEvents: 0,
@@ -156,14 +191,7 @@ export async function runTennisTailWatch(
 
   while (summary.iterations < maxIterations) {
     summary.iterations += 1;
-    if (deps.reconcile && (summary.iterations - 1) % reconcileEveryIterations === 0) {
-      try {
-        await deps.reconcile();
-      } catch (error) {
-        summary.errors += 1;
-        await emit(deps, { kind: "error", eventSlug: "-", details: `reconcile failed: ${describe(error)}` });
-      }
-    }
+    if (deps.reconcile && (summary.iterations - 1) % reconcileEveryIterations === 0) kickReconcile();
     let events: readonly TennisTailEvent[];
     try {
       events = await deps.discover();
@@ -250,6 +278,7 @@ async function sweepEvent(
 ): Promise<void> {
   const signal = frame.signal;
   if (!signal || !isTennisTailEntry(signal)) return; // nothing to arm; resting levels stay put
+  const sweepStartedAtMs = now();
   const market = event.markets.find((candidate) => candidate.marketType === "moneyline");
   if (!market) {
     state.done = true;
@@ -280,13 +309,18 @@ async function sweepEvent(
 
   let orderbook: OrderbookSnapshot;
   let otherBestBid: number | undefined;
+  let orderbookReadyAtMs = 0;
   try {
-    orderbook = await deps.fetchOrderbook(resolved.tokenId);
+    // Both books are only needed for the market-leader check; fetch them in
+    // parallel so the critical path pays one round trip, not two.
     const otherTokenId = market.tokenIds[1 - resolved.outcomeIndex];
-    if (typeof otherTokenId === "string" && otherTokenId.length > 0) {
-      const other = await deps.fetchOrderbook(otherTokenId).catch(() => undefined);
-      if (other) otherBestBid = orderbookBestBid(other);
-    }
+    const otherBook = typeof otherTokenId === "string" && otherTokenId.length > 0
+      ? deps.fetchOrderbook(otherTokenId).catch(() => undefined)
+      : Promise.resolve(undefined);
+    const [favouredBook, other] = await Promise.all([deps.fetchOrderbook(resolved.tokenId), otherBook]);
+    orderbook = favouredBook;
+    if (other) otherBestBid = orderbookBestBid(other);
+    orderbookReadyAtMs = now();
   } catch (error) {
     summary.errors += 1;
     await emit(deps, { kind: "error", eventSlug: event.eventSlug, details: `orderbook failed: ${describe(error)}` });
@@ -330,16 +364,25 @@ async function sweepEvent(
   summary.levelsPlaced += planned.plan.levels.length;
   delete state.lastSkip;
 
+  const timing: TennisTailArmTiming = {
+    frameObservedAtMs: frame.frame.observedAtMs,
+    sweepStartedAtMs,
+    signalAgeMs: Math.max(0, sweepStartedAtMs - frame.frame.observedAtMs),
+    orderbookMs: Math.max(0, orderbookReadyAtMs - sweepStartedAtMs),
+    sweepMs: Math.max(0, now() - sweepStartedAtMs)
+  };
+
   if (options.dryRun) {
     for (const level of planned.plan.levels) state.placedPrices.add(Number(level.price.toFixed(6)));
-    await emit(deps, { kind: "armed", eventSlug: event.eventSlug, details: "dry-run", plan: planned.plan });
+    await emit(deps, { kind: "armed", eventSlug: event.eventSlug, details: "dry-run", plan: planned.plan, timing });
     return;
   }
 
   try {
     const { results, placedPrices } = await submitLadder(deps, options, planned.plan);
     for (const price of placedPrices) state.placedPrices.add(price);
-    await emit(deps, { kind: "armed", eventSlug: event.eventSlug, details: "submitted", plan: planned.plan, results });
+    timing.submitMs = Math.max(0, now() - sweepStartedAtMs);
+    await emit(deps, { kind: "armed", eventSlug: event.eventSlug, details: "submitted", plan: planned.plan, results, timing });
   } catch (error) {
     summary.errors += 1;
     await emit(deps, {

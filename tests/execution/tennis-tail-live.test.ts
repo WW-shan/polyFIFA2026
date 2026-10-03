@@ -390,6 +390,48 @@ describe("runTennisTailWatch ladder parity", () => {
   });
 });
 
+describe("runTennisTailWatch timing", () => {
+  test("keeps sweeping while a reconciliation is still in flight", async () => {
+    const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
+        placeLadder,
+        // A venue read that never settles must not block the signal path.
+        reconcile: () => new Promise<void>(() => {})
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 1 }
+    );
+
+    expect(summary.iterations).toBe(1);
+    expect(placeLadder).toHaveBeenCalledTimes(1);
+  });
+
+  test("records the signal age and book latency on every arm", async () => {
+    const records: TennisTailArmRecord[] = [];
+    let tick = frame.observedAtMs;
+    await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
+        now: () => { tick += 250; return tick; },
+        onRecord: (record) => { records.push(record); }
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: true, intervalMs: 0, maxIterations: 1 }
+    );
+
+    const armed = records.find((record) => record.kind === "armed");
+    expect(armed?.timing).toBeDefined();
+    expect(armed!.timing!.frameObservedAtMs).toBe(frame.observedAtMs);
+    expect(armed!.timing!.signalAgeMs).toBeGreaterThanOrEqual(0);
+    expect(armed!.timing!.orderbookMs).toBeGreaterThanOrEqual(0);
+    expect(armed!.timing!.sweepMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
 describe("runTennisTailWatch multi-event isolation", () => {
   const secondMarket: TennisTailMarket = {
     eventSlug: "wta-andreeva-keys-2026-10-04",
