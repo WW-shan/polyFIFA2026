@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { LiveExecutionError, LiveExecutor, liveConfigFromEnv, normalizeConfirmedLiveOrderResult, normalizeLiveOrderResult } from "../../src/execution/live-executor.js";
+import { cancelLiveOrder, getLiveOrder, LiveExecutionError, LiveExecutor, liveConfigFromEnv, normalizeConfirmedLiveOrderResult, normalizeLiveOrderResult } from "../../src/execution/live-executor.js";
 import type { LiveOrderRequest } from "../../src/execution/live-executor.js";
 import type { BuyTradeDecision, TradeResult } from "../../src/domain/types.js";
 
@@ -74,6 +74,47 @@ describe("LiveExecutor", () => {
       apiSecret: "secret",
       passphrase: "passphrase"
     });
+  });
+
+  test("reads an explicit proxy for the SDK transport", () => {
+    expect(liveConfigFromEnv({ POLY_PROXY_URL: "http://127.0.0.1:10808" })).toMatchObject({
+      proxyUrl: "http://127.0.0.1:10808"
+    });
+    expect(liveConfigFromEnv({ HTTPS_PROXY: "http://127.0.0.1:10809" })).toMatchObject({
+      proxyUrl: "http://127.0.0.1:10809"
+    });
+  });
+
+  test("routes order lookup and cancellation through the SDK client", async () => {
+    const config = liveConfigFromEnv({
+      POLY_PRIVATE_KEY: "0xabc",
+      POLY_API_KEY: "key",
+      POLY_API_SECRET: "secret",
+      POLY_PASSPHRASE: "passphrase"
+    });
+    const getOrder = vi.fn(async (orderId: string) => ({ id: orderId, status: "LIVE" }));
+    const cancelOrder = vi.fn(async (payload: { orderID: string }) => ({ canceled: payload.orderID }));
+    const seenConfigs: Array<{ proxyUrl?: string }> = [];
+    const factory = async (required: { proxyUrl?: string }) => {
+      seenConfigs.push(required);
+      return {
+        async placeLimitBuy(): Promise<TradeResult> {
+          throw new Error("not used");
+        },
+        getOrder,
+        cancelOrder
+      };
+    };
+
+    const proxyConfig = { ...config, proxyUrl: "http://127.0.0.1:10808" };
+    await expect(getLiveOrder(proxyConfig, "order-1", factory)).resolves.toEqual({ id: "order-1", status: "LIVE" });
+    await expect(cancelLiveOrder(proxyConfig, "order-1", factory)).resolves.toEqual({ canceled: "order-1" });
+    expect(getOrder).toHaveBeenCalledWith("order-1");
+    expect(cancelOrder).toHaveBeenCalledWith({ orderID: "order-1" });
+    expect(seenConfigs).toEqual([
+      expect.objectContaining({ proxyUrl: "http://127.0.0.1:10808" }),
+      expect.objectContaining({ proxyUrl: "http://127.0.0.1:10808" })
+    ]);
   });
 
   test("treats blank private key, funder, and boolean settings as unset", () => {

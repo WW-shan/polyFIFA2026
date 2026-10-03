@@ -121,8 +121,14 @@ async function main(argv: string[]): Promise<void> {
   const streams = createPublicStreams(streamOptions);
   await streams.start([]);
   const ledger = new LiveLedger(options.ledgerFile);
-  const executor = new LiveExecutor(liveConfigFromEnv(process.env));
-  const settlement = createAutoSettlementMonitor({ env: process.env, ledger });
+  const liveConfig = liveConfigFromEnv(process.env);
+  if (options.proxyUrl) liveConfig.proxyUrl = options.proxyUrl;
+  const executor = new LiveExecutor(liveConfig);
+  const settlement = createAutoSettlementMonitor({
+    env: process.env,
+    ledger,
+    ...(options.proxyUrl ? { proxyUrl: options.proxyUrl } : {})
+  });
 
   let stopping = false;
   process.on("SIGINT", () => {
@@ -158,7 +164,7 @@ async function main(argv: string[]): Promise<void> {
       placeLadder: (levels, executeOptions) => executor.placeRestingLadder(levels, executeOptions),
       ledger,
       reconcile: async () => {
-        await reconcileTennisRestingOrders(ledger, process.env);
+        await reconcileTennisRestingOrders(ledger, process.env, options.proxyUrl);
         settlement?.kick();
       },
       onRecord: (record) => logRecord(options, record)
@@ -241,9 +247,11 @@ export async function discoverTennisTailEvents(
   for (const event of events) {
     const market = moneylineTennisMarket(event);
     if (!market) continue;
-    // The backtest universe is singles only; doubles titles share a surname and
-    // must never be paired with a singles point feed.
-    if (event.title.includes("/")) continue;
+    // The backtest universe is singles only; doubles pairs share a surname and
+    // must never be paired with a singles point feed. Gamma is inconsistent
+    // about putting the slash in `title`, so also use the sport label and the
+    // outcomes (which always name the pairs).
+    if (isDoublesTennisEvent(event)) continue;
     // ITF has book data but no score data in the archive (0 backtest samples),
     // so it is excluded unless the operator explicitly opts in.
     if (allowed.size > 0 && !allowed.has(tennisLeagueOf(event.eventSlug))) continue;
@@ -295,6 +303,25 @@ export async function discoverTennisTailEvents(
     });
   }
   return discovered;
+}
+
+/**
+ * Gamma's doubles labelling is not stable: some events have `sport: atp-doubles`,
+ * some put `/` only in the outcomes, and some omit the slash from the title.
+ * Reject all of those before any score/title mapping can confuse a pair with a
+ * singles player.
+ */
+export function isDoublesTennisEvent(event: CollectorEvent): boolean {
+  const sport = (event.sport ?? "").trim().toLowerCase();
+  if (sport.includes("doubles")) return true;
+  const label = [
+    event.title,
+    ...event.markets.flatMap((market) => market.outcomes)
+  ].join(" ").toLowerCase();
+  return label.includes("(doubles)")
+    || label.includes(" doubles:")
+    || label.includes("/")
+    || label.includes(" & ");
 }
 
 const BEST_OF_FIVE_TOURNAMENT = /(australian open|roland garros|french open|wimbledon|us open)/i;
@@ -369,7 +396,8 @@ function tickSizeFromMarket(raw: Record<string, unknown>): TennisTailMarket["tic
  */
 export async function reconcileTennisRestingOrders(
   ledger: LiveLedger,
-  env: Record<string, string | undefined>
+  env: Record<string, string | undefined>,
+  proxyUrl?: string
 ): Promise<void> {
   const active = await ledger.readActiveEntries();
   const resting = active.filter((entry) =>
@@ -379,6 +407,7 @@ export async function reconcileTennisRestingOrders(
     && (entry.status === "posted" || (entry.reservedNotional ?? 0) > 0));
   if (resting.length === 0) return;
   const config = liveConfigFromEnv(env);
+  if (proxyUrl) config.proxyUrl = proxyUrl;
   for (const entry of resting) {
     try {
       const snapshot = await getLiveOrder(config, entry.orderId);

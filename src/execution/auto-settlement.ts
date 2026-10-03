@@ -12,6 +12,8 @@ import type { LiveLedger } from "../persistence/ledger.js";
 export interface AutoSettlementOptions {
   env: Record<string, string | undefined>;
   ledger: LiveLedger;
+  /** Explicit CLI proxy, overriding the env-derived settlement proxy. */
+  proxyUrl?: string;
   /** Test/live overrides; ledger callbacks and onError are filled in below. */
   deps?: SettlementMonitorDependencies;
 }
@@ -58,6 +60,7 @@ export function settlementConfigFromEnv(
 export function createAutoSettlementMonitor(options: AutoSettlementOptions): AutoSettlementMonitor | undefined {
   const config = settlementConfigFromEnv(options.env, liveConfigFromEnv(options.env));
   if (!config) return undefined;
+  if (options.proxyUrl) config.proxyUrl = options.proxyUrl;
   const ledger = options.ledger;
   const overrides = options.deps ?? {};
   const deps: SettlementMonitorDependencies = {

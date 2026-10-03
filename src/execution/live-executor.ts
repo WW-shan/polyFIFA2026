@@ -33,6 +33,8 @@ export interface LiveExecutorConfig {
   funderAddress?: string;
   depositWalletAddress?: string;
   rpcUrl?: string;
+  /** HTTP(S) proxy used by the SDK's Axios transport for CLOB writes/reads. */
+  proxyUrl?: string;
   syncBalanceAllowance?: boolean;
 }
 
@@ -84,6 +86,10 @@ export interface LiveRestingLevel {
 
 export interface LiveClobClient {
   placeLimitBuy(order: LiveOrderRequest): Promise<TradeResult>;
+  /** Read-only order lookup used by resting-order reconciliation. */
+  getOrder?(orderID: string): Promise<unknown>;
+  /** Cancellation used by the operator cancellation flow. */
+  cancelOrder?(payload: { orderID: string }): Promise<unknown>;
 }
 
 export interface LiveOrderConfirmation {
@@ -105,7 +111,7 @@ export interface LiveOrderConfirmationError {
 export type LiveClientFactory = (config: RequiredLiveExecutorConfig) => Promise<LiveClobClient>;
 
 type RequiredLiveExecutorConfig = Required<Pick<LiveExecutorConfig, "host" | "chainId" | "signatureType" | "privateKey" | "apiKey" | "apiSecret" | "passphrase">> &
-  Pick<LiveExecutorConfig, "funderAddress" | "depositWalletAddress" | "rpcUrl" | "syncBalanceAllowance">;
+  Pick<LiveExecutorConfig, "funderAddress" | "depositWalletAddress" | "rpcUrl" | "proxyUrl" | "syncBalanceAllowance">;
 
 export class LiveExecutionError extends Error {
   readonly code: LiveErrorCode;
@@ -543,6 +549,9 @@ export function liveConfigFromEnv(env: Record<string, string | undefined>): Live
   if (passphrase) config.passphrase = passphrase;
   const rpcUrl = nonEmptyEnv(env.POLY_RPC_URL);
   if (rpcUrl) config.rpcUrl = rpcUrl;
+  const proxyUrl = nonEmptyEnv(env.POLY_PROXY_URL)
+    ?? firstNonEmptyEnv(env, ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]);
+  if (proxyUrl) config.proxyUrl = proxyUrl;
   const syncBalanceAllowance = nonEmptyEnv(env.POLY_SYNC_BALANCE_ALLOWANCE);
   if (syncBalanceAllowance) config.syncBalanceAllowance = parseBooleanEnv(syncBalanceAllowance);
   const funderAddress = nonEmptyEnv(env.POLY_FUNDER_ADDRESS);
@@ -553,6 +562,35 @@ export function liveConfigFromEnv(env: Record<string, string | undefined>): Live
     config.funderAddress = funderAddress;
   }
 
+  return config;
+}
+
+function firstNonEmptyEnv(env: Record<string, string | undefined>, names: readonly string[]): string | undefined {
+  for (const name of names) {
+    const value = nonEmptyEnv(env[name]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function proxyConfigFromUrl(proxyUrl: string): { protocol: string; host: string; port: number; auth?: { username: string; password: string } } {
+  const url = new URL(proxyUrl);
+  const protocol = url.protocol.replace(/:$/, "").toLowerCase();
+  if (protocol !== "http" && protocol !== "https") {
+    throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", `Unsupported proxy protocol: ${protocol}`);
+  }
+  const port = url.port ? Number(url.port) : protocol === "https" ? 443 : 80;
+  if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) {
+    throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", `Invalid proxy port: ${url.port}`);
+  }
+  const config: { protocol: string; host: string; port: number; auth?: { username: string; password: string } } = {
+    protocol,
+    host: url.hostname,
+    port
+  };
+  if (url.username || url.password) {
+    config.auth = { username: decodeURIComponent(url.username), password: decodeURIComponent(url.password) };
+  }
   return config;
 }
 
@@ -583,6 +621,7 @@ function requireLiveConfig(config: LiveExecutorConfig): RequiredLiveExecutorConf
   if (config.funderAddress) required.funderAddress = config.funderAddress;
   if (config.depositWalletAddress) required.depositWalletAddress = config.depositWalletAddress;
   if (config.rpcUrl) required.rpcUrl = config.rpcUrl;
+  if (config.proxyUrl) required.proxyUrl = config.proxyUrl;
   if (config.syncBalanceAllowance !== undefined) required.syncBalanceAllowance = config.syncBalanceAllowance;
   return required;
 }
@@ -592,26 +631,34 @@ function requireLiveConfig(config: LiveExecutorConfig): RequiredLiveExecutorConf
  * uses. Resting GTC orders have no venue-side expiry, so this is the only way to
  * take them off the book before they fill.
  */
-export async function cancelLiveOrder(config: LiveExecutorConfig, orderId: string): Promise<unknown> {
-  const requiredConfig = requireLiveConfig(config);
-  const client = await defaultLiveClientFactory(requiredConfig);
-  const cancel = (client as unknown as LiveClobConfirmationClient).cancelOrder;
-  if (!cancel) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no cancelOrder");
-  return cancel.call(client, { orderID: orderId });
+export async function cancelLiveOrder(
+  config: LiveExecutorConfig,
+  orderId: string,
+  clientFactory: LiveClientFactory = defaultLiveClientFactory
+): Promise<unknown> {
+  const client = await clientFactory(requireLiveConfig(config));
+  if (!client.cancelOrder) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no cancelOrder");
+  return client.cancelOrder({ orderID: orderId });
 }
 
 /** Reads one live order snapshot (read-only) for ledger reconciliation. */
-export async function getLiveOrder(config: LiveExecutorConfig, orderId: string): Promise<unknown> {
-  const requiredConfig = requireLiveConfig(config);
-  const client = await defaultLiveClientFactory(requiredConfig);
-  const getOrder = (client as unknown as LiveClobConfirmationClient).getOrder;
-  if (!getOrder) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no getOrder");
-  return getOrder.call(client, orderId);
+export async function getLiveOrder(
+  config: LiveExecutorConfig,
+  orderId: string,
+  clientFactory: LiveClientFactory = defaultLiveClientFactory
+): Promise<unknown> {
+  const client = await clientFactory(requireLiveConfig(config));
+  if (!client.getOrder) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no getOrder");
+  return client.getOrder(orderId);
 }
 
 async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Promise<LiveClobClient> {
   try {
     const clob = await import("@polymarket/clob-client-v2");
+    if (config.proxyUrl) {
+      const axios = (await import("axios")).default;
+      axios.defaults.proxy = proxyConfigFromUrl(config.proxyUrl);
+    }
     const viem = await import("viem");
     const accounts = await import("viem/accounts");
     const chains = await import("viem/chains");
@@ -654,6 +701,16 @@ async function defaultLiveClientFactory(config: RequiredLiveExecutorConfig): Pro
     };
 
     return {
+      getOrder: (orderID: string) => {
+        const getOrder = (client as unknown as LiveClobConfirmationClient).getOrder;
+        if (!getOrder) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no getOrder");
+        return getOrder.call(client, orderID);
+      },
+      cancelOrder: (payload: { orderID: string }) => {
+        const cancel = (client as unknown as LiveClobConfirmationClient).cancelOrder;
+        if (!cancel) throw new LiveExecutionError("LIVE_CLIENT_UNAVAILABLE", "Installed clob client has no cancelOrder");
+        return cancel.call(client, payload);
+      },
       async placeLimitBuy(order: LiveOrderRequest): Promise<TradeResult> {
         if (config.syncBalanceAllowance) {
           await client.updateBalanceAllowance({ asset_type: clob.AssetType.COLLATERAL });

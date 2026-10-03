@@ -219,12 +219,29 @@ describe("discoverTennisTailEvents", () => {
       slug: "atp-doubles-2026-10-04",
       title: "A./B. vs C./D."
     });
+    const doublesWithoutSlash = gammaEvent({
+      id: "evt-2b",
+      slug: "atp-doubles-2026-10-05",
+      title: "Curitiba: Kestelboim and Zormann vs Miguel and Ribeiro",
+      sport: "atp-doubles"
+    });
+    const doublesOutcomes = gammaEvent({
+      id: "evt-2c",
+      slug: "atp-doubles-2026-10-06",
+      title: "Curitiba: Pair One vs Pair Two",
+      sport: "tennis",
+      markets: [{
+        ...gammaEvent().markets[0],
+        outcomes: JSON.stringify(["Kestelboim/Zormann", "Miguel/Ribeiro"]),
+        clobTokenIds: JSON.stringify(["token-doubles-a", "token-doubles-b"])
+      }]
+    });
     const noMoneyline = gammaEvent({
       id: "evt-3",
       slug: "atp-no-ml-2026-10-04",
       markets: [gammaEvent().markets[1]]
     });
-    const events = await discoverTennisTailEvents(deps([gammaEvent(), doubles, noMoneyline]));
+    const events = await discoverTennisTailEvents(deps([gammaEvent(), doubles, doublesWithoutSlash, doublesOutcomes, noMoneyline]));
     expect(events.map((event) => event.eventSlug)).toEqual(["atp-swiatek-gauff-2026-10-04"]);
   });
 });
