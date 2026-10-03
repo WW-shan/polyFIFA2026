@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { cliOptions, discoverTennisTailEvents } from "../../src/execution/tennis-tail-cli.js";
+import { cliOptions, discoverTennisTailEvents, tennisTailBalancePreflight } from "../../src/execution/tennis-tail-cli.js";
 import type { CatalogDependencies } from "../../src/collector/catalog.js";
 
 function gammaEvent(overrides: Record<string, unknown> = {}) {
@@ -80,6 +80,34 @@ describe("cliOptions", () => {
   test("rejects invalid ladders and order types", () => {
     expect(() => cliOptions(new Map([["ladder", "0.9,1.2"]]))).toThrow(/ladder/);
     expect(() => cliOptions(new Map([["order-type", "FAK"]]))).toThrow(/order-type/);
+  });
+});
+
+describe("tennisTailBalancePreflight", () => {
+  test("flags a deposit wallet that cannot afford the cheapest ladder level", async () => {
+    const options = cliOptions(new Map<string, string | true>());
+    const seen: string[] = [];
+    const preflight = await tennisTailBalancePreflight(
+      options,
+      { POLY_DEPOSIT_WALLET_ADDRESS: "0xdeposit" },
+      async (wallet) => { seen.push(wallet); return 3.5; }
+    );
+    expect(seen).toEqual(["0xdeposit"]);
+    expect(preflight).toEqual({ wallet: "0xdeposit", pUSD: 3.5, minimumLevelCost: 4, sufficient: false });
+  });
+
+  test("passes when the balance covers the cheapest level and falls back to the funder", async () => {
+    const options = cliOptions(new Map<string, string | true>([["ladder", "0.9,0.92"], ["shares-per-level", "5"]]));
+    const preflight = await tennisTailBalancePreflight(options, { POLY_FUNDER_ADDRESS: "0xfunder" }, async () => 4.5);
+    expect(preflight).toEqual({ wallet: "0xfunder", pUSD: 4.5, minimumLevelCost: 4.5, sufficient: true });
+  });
+
+  test("returns null when no wallet is configured", async () => {
+    const options = cliOptions(new Map<string, string | true>());
+    const preflight = await tennisTailBalancePreflight(options, {}, async () => {
+      throw new Error("must not read without a wallet");
+    });
+    expect(preflight).toBeNull();
   });
 });
 

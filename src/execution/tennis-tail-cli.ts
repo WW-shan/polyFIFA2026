@@ -19,6 +19,7 @@ import {
 import { runTennisTailWatch, type TennisTailArmRecord, type TennisTailEvent } from "./tennis-tail-live.js";
 import { LiveExecutor, getLiveOrder, liveConfigFromEnv, type LiveOrderType } from "./live-executor.js";
 import { PENDING_SUBMISSION_PREFIX } from "../persistence/ledger.js";
+import { readPusdBalance } from "./balance.js";
 import { createAutoSettlementMonitor } from "./auto-settlement.js";
 import { TERMINAL_ORDER_SNAPSHOT_STATUSES, orderSnapshotStatus, restingFillFromSnapshot } from "./resting-reconcile.js";
 
@@ -66,6 +67,30 @@ async function main(argv: string[]): Promise<void> {
     maxIterations: options.maxIterations ?? null,
     ledgerFile: options.ledgerFile
   }, null, 2));
+
+  if (!options.dryRun) {
+    try {
+      const preflight = await tennisTailBalancePreflight(options, process.env);
+      if (preflight) {
+        console.log(JSON.stringify({ at: new Date().toISOString(), kind: "balance_preflight", ...preflight }));
+        if (!preflight.sufficient) {
+          console.warn(JSON.stringify({
+            at: new Date().toISOString(),
+            level: "warn",
+            kind: "balance_preflight",
+            details: `pUSD ${preflight.pUSD} is below one ladder level (${preflight.minimumLevelCost}); the CLOB will reject orders until ${preflight.wallet} is funded`
+          }));
+        }
+      }
+    } catch (error) {
+      console.warn(JSON.stringify({
+        at: new Date().toISOString(),
+        level: "warn",
+        kind: "balance_preflight",
+        details: `balance preflight failed: ${describe(error)}`
+      }));
+    }
+  }
 
   const request = (url: string, requestOptions?: Parameters<typeof fetchJson>[1]): Promise<unknown> =>
     fetchJson(url, { ...requestOptions, ...(options.proxyUrl ? { proxyUrl: options.proxyUrl } : {}) });
@@ -116,6 +141,35 @@ async function main(argv: string[]): Promise<void> {
     settlement: settlement?.lastResult ?? null,
     settlementError: settlement?.lastError ? describe(settlement.lastError) : null
   }, null, 2));
+}
+
+export interface TennisTailBalancePreflight {
+  wallet: string;
+  pUSD: number;
+  minimumLevelCost: number;
+  sufficient: boolean;
+}
+
+/**
+ * Live-mode preflight: one read-only RPC call turns "every order is rejected"
+ * into an explicit warning before the watch loop starts. A read failure only
+ * warns (the caller catches it); it never blocks trading.
+ */
+export async function tennisTailBalancePreflight(
+  options: Pick<TennisTailCliOptions, "config">,
+  env: Record<string, string | undefined>,
+  readBalance: (wallet: string, rpcUrl?: string) => Promise<number> = readPusdBalance
+): Promise<TennisTailBalancePreflight | null> {
+  const wallet = env.POLY_DEPOSIT_WALLET_ADDRESS?.trim() || env.POLY_FUNDER_ADDRESS?.trim();
+  if (!wallet) return null;
+  const prices = (options.config.prices ?? DEFAULT_TENNIS_TAIL_LADDER.prices ?? [])
+    .filter((price) => Number.isFinite(price) && price > 0 && price < 1)
+    .sort((a, b) => a - b);
+  const cheapest = prices[0];
+  if (cheapest === undefined) return null;
+  const minimumLevelCost = Number((options.config.sharesPerLevel * cheapest).toFixed(6));
+  const balance = await readBalance(wallet, env.POLY_RPC_URL);
+  return { wallet, pUSD: balance, minimumLevelCost, sufficient: balance + 1e-9 >= minimumLevelCost };
 }
 
 /** Slugs are `<league>-<players>-<date>`; `itf` has no score feed in the archive. */

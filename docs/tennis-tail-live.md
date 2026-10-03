@@ -59,13 +59,17 @@ npm run tennis:tail -- --max-iterations 2 --interval-ms 0 \
 npm run tennis:tail -- --interval-ms 15000 --proxy http://127.0.0.1:10808
 ```
 
-真正下单需要显式 `--live true`（凭证沿用 `POLY_PRIVATE_KEY / POLY_API_KEY /
+真正下单用 live 脚本（它用 `node --env-file=.env.local` 自动加载凭证和代理，
+等价于显式 `--live true`；凭证沿用 `POLY_PRIVATE_KEY / POLY_API_KEY /
 POLY_API_SECRET / POLY_PASSPHRASE`，签名类型/funder 同现有 live 链路）：
 
 ```bash
-npm run tennis:tail -- --live true --interval-ms 15000 \
-  --proxy http://127.0.0.1:10808
+npm run tennis:tail:live -- --interval-ms 15000
 ```
+
+live 启动时会做一次只读的余额预检：从 deposit wallet 读 pUSD，若低于最便宜
+一档的占用（默认 5 股 × 0.80 = $4）会打印 `balance_preflight` 警告——此时
+CLOB 会拒单，先去入金再跑。预检失败只警告，不阻塞。
 
 ### 常用参数
 
