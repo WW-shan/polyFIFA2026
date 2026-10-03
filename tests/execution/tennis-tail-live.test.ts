@@ -3,10 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { OrderbookSnapshot, TradeResult } from "../../src/domain/types.js";
-import type { TennisEntrySignal, TennisPointFrame } from "../../src/collector/tennis-points.js";
 import { LiveLedger } from "../../src/persistence/ledger.js";
 import { DEFAULT_TENNIS_TAIL_LADDER, type TennisTailMarket } from "../../src/execution/tennis-tail-orchestrator.js";
-import { runTennisTailWatch, type TennisTailArmRecord, type TennisTailEvent } from "../../src/execution/tennis-tail-live.js";
+import {
+  runTennisTailWatch,
+  type TennisTailArmRecord,
+  type TennisTailEvent,
+  type TennisTailScoreObservation
+} from "../../src/execution/tennis-tail-live.js";
 import type { LiveRestingLevel } from "../../src/execution/live-executor.js";
 
 const market: TennisTailMarket = {
@@ -24,40 +28,18 @@ const market: TennisTailMarket = {
 const event: TennisTailEvent = {
   eventSlug: market.eventSlug,
   eventTitle: market.eventTitle,
+  gameId: "6374886",
   markets: [market]
 };
 
-const frame: TennisPointFrame = {
-  observedAtMs: Date.parse("2026-10-04T12:00:00Z"),
-  scores365GameId: 1,
-  startTime: null,
-  statusText: null,
-  statusGroup: null,
-  competition: null,
+const score: TennisTailScoreObservation = {
+  score: "6-3, 5-3",
   homeName: "Iga Swiatek",
   awayName: "Coco Gauff",
-  setsWon: { home: 1, away: 0 },
-  sets: [],
-  setsToWin: 2,
-  game: null
-};
-
-const gen1: TennisEntrySignal = {
-  favored: "home",
-  favoredSets: 1,
-  trailerSets: 0,
-  setsToWin: 2,
-  oneSetFromMatch: true,
-  setGames: { home: 5, away: 3 },
-  lateSet: true,
-  tiebreak: false,
-  regularGame: true,
-  favoriteLeadsSet: true,
-  favoriteServing: true,
-  serverLostPoints: 1,
-  recentPointLoss: true,
-  breakPointAgainstFavorite: false,
-  candidate: false
+  observedAtMs: Date.parse("2026-10-04T12:00:00Z"),
+  receivedAtMs: Date.parse("2026-10-04T12:00:00Z"),
+  live: true,
+  ended: false
 };
 
 const book: OrderbookSnapshot = {
@@ -109,7 +91,7 @@ describe("runTennisTailWatch", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: async () => book,
         onRecord: (record) => { records.push(record); }
       },
@@ -129,7 +111,7 @@ describe("runTennisTailWatch", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: async () => book,
         placeLadder,
         ledger
@@ -154,7 +136,7 @@ describe("runTennisTailWatch", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: async () => book,
         placeLadder
       },
@@ -170,11 +152,7 @@ describe("runTennisTailWatch", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{
-          eventSlug: event.eventSlug,
-          frame,
-          signal: { ...gen1, lateSet: false }
-        }],
+        latestScore: () => ({ ...score, score: "6-3, 4-3" }),
         fetchOrderbook: async () => book,
         placeLadder
       },
@@ -209,7 +187,7 @@ describe("runTennisTailWatch", () => {
     await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: async () => book,
         placeLadder,
         ledger
@@ -235,7 +213,7 @@ describe("runTennisTailWatch ladder parity", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher(books),
         placeLadder,
         ledger,
@@ -262,7 +240,7 @@ describe("runTennisTailWatch ladder parity", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher(books),
         placeLadder,
         ledger,
@@ -304,7 +282,7 @@ describe("runTennisTailWatch ladder parity", () => {
     await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
         placeLadder,
         ledger
@@ -326,7 +304,7 @@ describe("runTennisTailWatch ladder parity", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher(books),
         placeLadder,
         sleep: async () => { books["token-gauff"] = opponentBook(0.05); }
@@ -349,7 +327,7 @@ describe("runTennisTailWatch ladder parity", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher(books),
         placeLadder: vi.fn(),
         onRecord: (record) => { records.push(record); }
@@ -376,7 +354,7 @@ describe("runTennisTailWatch ladder parity", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
         placeLadder,
         ledger
@@ -396,7 +374,7 @@ describe("runTennisTailWatch timing", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
         placeLadder,
         // A venue read that never settles must not block the signal path.
@@ -411,11 +389,11 @@ describe("runTennisTailWatch timing", () => {
 
   test("records the signal age and book latency on every arm", async () => {
     const records: TennisTailArmRecord[] = [];
-    let tick = frame.observedAtMs;
+    let tick = score.observedAtMs;
     await runTennisTailWatch(
       {
         discover: async () => [event],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: gen1 }],
+        latestScore: () => score,
         fetchOrderbook: bookFetcher({ "token-swiatek": book, "token-gauff": opponentBook(0.05) }),
         now: () => { tick += 250; return tick; },
         onRecord: (record) => { records.push(record); }
@@ -425,10 +403,112 @@ describe("runTennisTailWatch timing", () => {
 
     const armed = records.find((record) => record.kind === "armed");
     expect(armed?.timing).toBeDefined();
-    expect(armed!.timing!.frameObservedAtMs).toBe(frame.observedAtMs);
+    expect(armed!.timing!.scoreObservedAtMs).toBe(score.observedAtMs);
     expect(armed!.timing!.signalAgeMs).toBeGreaterThanOrEqual(0);
     expect(armed!.timing!.orderbookMs).toBeGreaterThanOrEqual(0);
     expect(armed!.timing!.sweepMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("runTennisTailWatch shutdown", () => {
+  test("finishes the current sweep and stops when asked", async () => {
+    let stop = false;
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        latestScore: () => score,
+        fetchOrderbook: async () => book,
+        placeLadder: vi.fn(),
+        shouldStop: () => stop,
+        onRecord: (record) => { if (record.kind === "armed") stop = true; }
+      },
+      // No maxIterations: only shouldStop can end this run.
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: true, intervalMs: 0 }
+    );
+
+    expect(summary.iterations).toBe(1);
+    expect(summary.armed).toHaveLength(1);
+  });
+});
+
+describe("runTennisTailWatch score feed scheduling", () => {
+  test("does not touch the book while the score is not Gen1", async () => {
+    const fetched: string[] = [];
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        latestScore: () => ({ ...score, score: "6-3, 4-3" }),
+        fetchOrderbook: async (tokenId) => { fetched.push(tokenId); return book; },
+        placeLadder: vi.fn()
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: false, intervalMs: 0, maxIterations: 3 }
+    );
+
+    expect(summary.armed).toHaveLength(0);
+    expect(fetched).toEqual([]);
+  });
+
+  test("sweeps the book as soon as a monitored score becomes Gen1", async () => {
+    const fetched: string[] = [];
+    let current: TennisTailScoreObservation = { ...score, score: "6-3, 4-3" };
+    let version = 0;
+    let waits = 0;
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        latestScore: () => current,
+        scoreVersion: () => version,
+        waitForScore: async () => {
+          waits += 1;
+          // Simulate the sports feed pushing the Gen1 score while the loop
+          // waits on its 60s cadence.
+          if (waits === 1) {
+            current = { ...score, observedAtMs: score.observedAtMs + 5_000, receivedAtMs: score.observedAtMs + 5_000 };
+            version += 1;
+          }
+        },
+        fetchOrderbook: async (tokenId) => { fetched.push(tokenId); return book; },
+        now: () => score.observedAtMs + 6_000,
+        onRecord: () => undefined
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: true, intervalMs: 60_000, maxIterations: 3 }
+    );
+
+    expect(summary.armed).toHaveLength(1);
+    expect(summary.armed[0]!.levels.map((level) => level.price)).toEqual([0.80, 0.85, 0.88, 0.90, 0.92]);
+    expect(fetched).toContain("token-swiatek");
+  });
+
+  test("re-runs immediately when a score lands while the sweep is in flight", async () => {
+    let version = 0;
+    let current = score;
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    const summary = await runTennisTailWatch(
+      {
+        discover: async () => [event],
+        latestScore: () => current,
+        scoreVersion: () => version,
+        waitForScore: async () => undefined,
+        sleep,
+        fetchOrderbook: async () => {
+          // The feed advances mid-sweep; the next iteration must not wait out
+          // the 60s cadence.
+          if (version === 0) {
+            current = { ...score, score: "6-3, 5-4", observedAtMs: score.observedAtMs + 1_000,
+              receivedAtMs: score.observedAtMs + 1_000 };
+            version += 1;
+          }
+          return book;
+        },
+        placeLadder: vi.fn()
+      },
+      { config: DEFAULT_TENNIS_TAIL_LADDER, dryRun: true, intervalMs: 60_000, maxIterations: 2 }
+    );
+
+    expect(summary.armed).toHaveLength(1);
+    expect(summary.iterations).toBe(2);
+    // Iteration 1 saw the mid-sweep bump and looped again without sleeping.
+    expect(sleep).not.toHaveBeenCalled();
   });
 });
 
@@ -447,11 +527,11 @@ describe("runTennisTailWatch multi-event isolation", () => {
   const secondEvent: TennisTailEvent = {
     eventSlug: secondMarket.eventSlug,
     eventTitle: secondMarket.eventTitle,
+    gameId: "6374748",
     markets: [secondMarket]
   };
-  const secondFrame: TennisPointFrame = {
-    ...frame,
-    scores365GameId: 2,
+  const secondScore: TennisTailScoreObservation = {
+    ...score,
     homeName: "Mirra Andreeva",
     awayName: "Madison Keys"
   };
@@ -483,10 +563,7 @@ describe("runTennisTailWatch multi-event isolation", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event, secondEvent],
-        pollPoints: async () => [
-          { eventSlug: event.eventSlug, frame, signal: gen1 },
-          { eventSlug: secondEvent.eventSlug, frame: secondFrame, signal: { ...gen1, favored: "home" } }
-        ],
+        latestScore: (gameId) => (gameId === event.gameId ? score : secondScore),
         fetchOrderbook: bookFetcher(books),
         placeLadder,
         ledger
@@ -518,10 +595,7 @@ describe("runTennisTailWatch multi-event isolation", () => {
     const summary = await runTennisTailWatch(
       {
         discover: async () => [event, secondEvent],
-        pollPoints: async () => [
-          { eventSlug: event.eventSlug, frame, signal: { ...gen1, lateSet: false } },
-          { eventSlug: secondEvent.eventSlug, frame: secondFrame, signal: { ...gen1, favored: "home" } }
-        ],
+        latestScore: (gameId) => (gameId === event.gameId ? { ...score, score: "6-3, 4-3" } : secondScore),
         fetchOrderbook: async (tokenId) => { fetched.push(tokenId); return bookFetcher(books)(tokenId); },
         placeLadder
       },
@@ -534,15 +608,15 @@ describe("runTennisTailWatch multi-event isolation", () => {
     expect(fetched).not.toContain("token-swiatek");
   });
 
-  test("refuses to arm when a mislabeled frame names another event's players", async () => {
+  test("refuses to arm when a score names another event's players", async () => {
     const records: TennisTailArmRecord[] = [];
     const placeLadder = vi.fn(async (levels: readonly LiveRestingLevel[], _options?: unknown) => levels.map(posted));
 
     const summary = await runTennisTailWatch(
       {
         discover: async () => [secondEvent],
-        // eventSlug says Andreeva/Keys, but the frame is the Swiatek/Gauff match.
-        pollPoints: async () => [{ eventSlug: secondEvent.eventSlug, frame, signal: gen1 }],
+        // The event says Andreeva/Keys, but the score frame is the Swiatek/Gauff match.
+        latestScore: () => score,
         fetchOrderbook: bookFetcher({ "token-andreeva": secondBook, "token-keys": secondOpponentBook }),
         placeLadder,
         onRecord: (record) => { records.push(record); }
@@ -552,15 +626,15 @@ describe("runTennisTailWatch multi-event isolation", () => {
 
     expect(summary.armed).toHaveLength(0);
     expect(placeLadder).not.toHaveBeenCalled();
-    expect(records.some((record) => record.kind === "skipped" && record.details.includes("no outcome maps to the 365Scores favoured side"))).toBe(true);
+    expect(records.some((record) => record.kind === "skipped" && record.details.includes("no outcome maps to the sports-feed favoured side"))).toBe(true);
   });
 
-  test("heartbeat reports an event that never matched a 365Scores game", async () => {
+  test("heartbeat reports an event that never matched a sports game", async () => {
     const records: TennisTailArmRecord[] = [];
     await runTennisTailWatch(
       {
         discover: async () => [event, secondEvent],
-        pollPoints: async () => [{ eventSlug: event.eventSlug, frame, signal: { ...gen1, lateSet: false } }],
+        latestScore: (gameId) => (gameId === event.gameId ? score : undefined),
         fetchOrderbook: async () => book,
         onRecord: (record) => { records.push(record); }
       },

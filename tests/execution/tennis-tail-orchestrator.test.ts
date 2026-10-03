@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   TENNIS_TAIL_LADDER_PRICES,
   isTennisTailEntry,
+  planTennisTailFromScore,
   planTennisTailLadder,
   resolveTennisTailToken,
   type TennisTailLadderConfig,
@@ -200,5 +201,53 @@ describe("planTennisTailLadder", () => {
     expect(result.plan.levels).toHaveLength(5);
     expect(result.plan.levels[0]).toMatchObject({ price: 0.80, shares: 10, notional: 8 });
     expect(result.plan.reservedNotional).toBeCloseTo(43.5, 10);
+  });
+});
+
+describe("planTennisTailFromScore", () => {
+  const scoreInput = (score: string, overrides: Partial<Parameters<typeof planTennisTailFromScore>[0]> = {}) => ({
+    market,
+    score,
+    setsToWin: 2,
+    homeName: "Iga Swiatek",
+    awayName: "Coco Gauff",
+    orderbook: book(),
+    config: RESEARCH,
+    ...overrides
+  });
+
+  test("derives Gen1 from the sports score and arms the ladder", () => {
+    const result = planTennisTailFromScore(scoreInput("6-3, 5-3"));
+    expect(result.action).toBe("ARM");
+    if (result.action !== "ARM") return;
+    expect(result.plan.tokenId).toBe("token-swiatek");
+    expect(result.plan.levels.map((level) => level.price)).toEqual([...TENNIS_TAIL_LADDER_PRICES]);
+  });
+
+  test("names the away token when the feed's away side is the set leader", () => {
+    const result = planTennisTailFromScore(scoreInput("3-6, 3-5"));
+    expect(result.action).toBe("ARM");
+    if (result.action !== "ARM") return;
+    expect(result.plan.tokenId).toBe("token-gauff");
+    expect(result.plan.outcome).toBe("Coco Gauff");
+  });
+
+  test("skips the deciding-set tiebreak that the archived universe excludes", () => {
+    expect(planTennisTailFromScore(scoreInput("6-3, 3-6, 6-6")))
+      .toMatchObject({ action: "SKIP", reason: "NOT_GEN1" });
+  });
+
+  test("skips a score that is not one set from the match", () => {
+    expect(planTennisTailFromScore(scoreInput("6-3, 4-3")))
+      .toMatchObject({ action: "SKIP", reason: "NOT_GEN1" });
+    expect(planTennisTailFromScore(scoreInput("6-3, 6-3")))
+      .toMatchObject({ action: "SKIP", reason: "NOT_GEN1" });
+  });
+
+  test("keeps the budget and already-placed rules", () => {
+    const result = planTennisTailFromScore(scoreInput("6-3, 5-3", { alreadyPlacedPrices: [0.80, 0.85] }));
+    expect(result.action).toBe("ARM");
+    if (result.action !== "ARM") return;
+    expect(result.plan.levels.map((level) => level.price)).toEqual([0.88, 0.90, 0.92]);
   });
 });

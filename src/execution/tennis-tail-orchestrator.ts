@@ -17,6 +17,7 @@
  */
 import type { MarketTickSize, OrderbookSnapshot, PriceLevel } from "../domain/types.js";
 import type { TennisEntrySignal, TennisPointFrame } from "../collector/tennis-points.js";
+import { tennisGen1 } from "../domain/tennis-gen1.js";
 import { tennisFrameSideForTitleOutcome, tennisNamesMatch } from "../collector/tennis-points.js";
 import { priceConformsToTickSize } from "./live-executor.js";
 
@@ -26,7 +27,7 @@ export const TENNIS_TAIL_LADDER_PRICES: readonly number[] = [0.80, 0.85, 0.88, 0
 /** A moneyline market the orchestrator may arm a ladder on. */
 export interface TennisTailMarket {
   eventSlug: string;
-  /** Gamma event title, `Player A vs. Player B`; used to orient 365Scores home/away. */
+  /** Gamma event title, `Player A vs. Player B`; used to orient feed home/away. */
   eventTitle: string;
   marketSlug: string;
   conditionId: string;
@@ -131,11 +132,12 @@ export function isTennisTailEntry(
 }
 
 /**
- * Resolve the Polymarket outcome token for the 365Scores-favoured player.
+ * Resolve the Polymarket outcome token for the score-feed-favoured player.
  *
- * 365Scores and Polymarket do not guarantee the same home/away order, so the
- * title orientation is the authority. The outcome name is re-checked against
- * the title side to avoid arming the wrong player on a malformed title.
+ * The score feed (sports WS / 365Scores) and Polymarket do not guarantee the
+ * same home/away order, so the title orientation is the authority. The outcome
+ * name is re-checked against the title side to avoid arming the wrong player on
+ * a malformed title.
  */
 export function resolveTennisTailToken(
   market: TennisTailMarket,
@@ -191,6 +193,56 @@ function bestLevel(levels: readonly PriceLevel[], direction: "min" | "max"): num
   );
 }
 
+
+/**
+ * The one entry point shared by the live watcher and the archived replay: a
+ * sports-feed score string is turned into the Gen1 decision (the same rule the
+ * backtest used) and then into a ladder plan.
+ *
+ * `scripts/research/tennis-gen1-backtest.ts` replays archived score/book
+ * sequences through this function, so a change to the entry rule cannot make
+ * the live and backtest paths disagree.
+ */
+export interface TennisTailScorePlanInput {
+  market: TennisTailMarket;
+  /** Sports-feed score string, e.g. `"6-2, 5-2"` or `"6-4, 6-6(5-2)"`. */
+  score: unknown;
+  /** Winner's set target: 2 for best-of-three, 3 for best-of-five. */
+  setsToWin: number;
+  /** Sports-feed home/away names for this score. */
+  homeName: string;
+  awayName: string;
+  orderbook: OrderbookSnapshot;
+  config: TennisTailLadderConfig;
+  committedEventNotional?: number;
+  committedDayNotional?: number;
+  alreadyPlacedPrices?: readonly number[];
+  otherBestBid?: number;
+}
+
+export function planTennisTailFromScore(input: TennisTailScorePlanInput): TennisTailPlanResult {
+  const decision = tennisGen1(input.score, input.setsToWin);
+  if (!decision) {
+    return {
+      action: "SKIP",
+      reason: "NOT_GEN1",
+      details: `sports score ${JSON.stringify(input.score)} is not a one-set-from-match state`
+    };
+  }
+  const planInput: TennisTailPlanInput = {
+    market: input.market,
+    frame: { homeName: input.homeName, awayName: input.awayName },
+    signal: { favored: decision.side, oneSetFromMatch: true, lateSet: true },
+    orderbook: input.orderbook,
+    config: input.config
+  };
+  if (input.committedEventNotional !== undefined) planInput.committedEventNotional = input.committedEventNotional;
+  if (input.committedDayNotional !== undefined) planInput.committedDayNotional = input.committedDayNotional;
+  if (input.alreadyPlacedPrices !== undefined) planInput.alreadyPlacedPrices = input.alreadyPlacedPrices;
+  if (input.otherBestBid !== undefined) planInput.otherBestBid = input.otherBestBid;
+  return planTennisTailLadder(planInput);
+}
+
 /**
  * Build the passive ladder for one Gen1 market snapshot.
  *
@@ -211,7 +263,7 @@ export function planTennisTailLadder(input: TennisTailPlanInput): TennisTailPlan
     return {
       action: "SKIP",
       reason: "NO_MATCHING_TOKEN",
-      details: `no ${market.eventSlug} outcome maps to 365Scores ${signal.favored} side`
+      details: `no ${market.eventSlug} outcome maps to the score feed's ${signal.favored} side`
     };
   }
 

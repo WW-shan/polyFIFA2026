@@ -7,6 +7,7 @@ function gammaEvent(overrides: Record<string, unknown> = {}) {
     id: "evt-1",
     slug: "atp-swiatek-gauff-2026-10-04",
     title: "Iga Swiatek vs. Coco Gauff",
+    gameId: "6374886",
     live: true,
     closed: false,
     sport: "tennis",
@@ -167,6 +168,49 @@ describe("discoverTennisTailEvents", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  test("drops events without a Polymarket sports game id", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const noGameId = gammaEvent({ id: "evt-nogi", slug: "atp-nogi-2026-10-04", gameId: null });
+      expect((await discoverTennisTailEvents(deps([noGameId]))).map((event) => event.eventSlug)).toEqual([]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("excludes men's best-of-five Grand Slams and keeps women's best-of-three", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const mensWimbledon = gammaEvent({
+        id: "evt-wim",
+        slug: "atp-djokovic-alcaraz-2026-07-12",
+        title: "Wimbledon: Novak Djokovic vs Carlos Alcaraz",
+        sport: "atp",
+        tags: [{ slug: "tennis" }, { slug: "wimbledon" }]
+      });
+      const womensUsOpen = gammaEvent({
+        id: "evt-uso",
+        slug: "wta-swiatek-gauff-2026-09-06",
+        title: "US Open: Iga Swiatek vs. Coco Gauff",
+        sport: "wta",
+        tags: [{ slug: "tennis" }, { slug: "us-open" }],
+        markets: [{ ...gammaEvent().markets[0], id: "mkt-uso", slug: "wta-swiatek-gauff-2026-09-06-moneyline", conditionId: "cond-uso" }]
+      });
+      const events = await discoverTennisTailEvents(deps([mensWimbledon, womensUsOpen]));
+      expect(events.map((event) => event.eventSlug)).toEqual(["wta-swiatek-gauff-2026-09-06"]);
+      expect(events[0]!.setsToWin).toBe(2);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("carries the sports game id into the watched event", async () => {
+    const events = await discoverTennisTailEvents(deps([gammaEvent()]));
+    expect(events[0]).toMatchObject({ gameId: "6374886", setsToWin: 2 });
   });
 
   test("drops doubles and events without a moneyline market", async () => {

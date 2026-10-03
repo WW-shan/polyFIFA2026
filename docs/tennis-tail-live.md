@@ -8,9 +8,14 @@
 - 只做 **网球 moneyline**。默认只做 **ATP/WTA**：回测样本里 ITF 的 573 场有盘口、
   但没有任何比分数据，等于 0 样本 0 证据（`--leagues all` 可以放开，但那是没验证过的）。
 - 信号 Gen1：有一方"再拿一局就赢下整场"——它已拿 `setsToWin - 1` 盘，并且是当前盘的领先方
-  （5-x(x≤4) 或 6-5）；6-6 时只有盘分领先方算（1-1 / 2-2 的平分决胜盘抢七暂不入场，
-  等抢七小分能分出领先方再定）。对应 `oneSetFromMatch && lateSet`。
+  （5-x(x≤4) 或 6-5）；6-6 时只有盘分领先方算（1-1 / 2-2 的平分决胜盘抢七不入场：
+  旧的 /tmp 研究脚本在这里取了 feed 的 home 侧，实盘按"没有唯一热门方"处理并跳过）。
+  判定只有一份实现：`src/domain/tennis-gen1.ts`，回测与实盘 import 同一函数。
   **Gen1 一出现就开始挂阶梯，不等点级丢分。**
+- 比分源 = Polymarket 自己的 sports feed（`wss://sports-api.polymarket.com/ws`，按
+  Gamma event 的 `gameId` 过滤，局级比分）；365Scores 不再参与挂单，只留在采集器里
+  记录点级数据（Gen2 研究）。
+- 男子大满贯（best-of-5）没有回测样本，发现阶段按赛事名排除；女子大满贯是 BO3，保留。
 - **分档补挂（与回测对齐）**：回测里每个价位是在它自己"第一次满足条件"的那一秒挂进去的
   （bid 涨上来高档位才够条件）。实盘同样每轮重扫：Gen1 期间缺的档位会在后续轮询里补挂，
   已挂上的档不会重复挂；某一轮没有新的档可挂时也不会停扫（书涨上来才能挂高档位，
@@ -53,10 +58,11 @@ npm run tennis:tail -- --max-iterations 2 --interval-ms 0 \
   --proxy http://127.0.0.1:10808
 ```
 
-常驻观察（每 15s 轮询一次 365Scores，每天自动用 `data/execution/tennis-tail-ledger.json` 记账）：
+常驻观察（每 10s 扫一次 CLOB book，比分推送到达时立刻再扫一次；每天自动用
+`data/execution/tennis-tail-ledger.json` 记账）：
 
 ```bash
-npm run tennis:tail -- --interval-ms 15000 --proxy http://127.0.0.1:10808
+npm run tennis:tail -- --proxy http://127.0.0.1:10808
 ```
 
 真正下单用 live 脚本（它用 `node --env-file=.env.local` 自动加载凭证和代理，
@@ -64,7 +70,7 @@ npm run tennis:tail -- --interval-ms 15000 --proxy http://127.0.0.1:10808
 POLY_API_SECRET / POLY_PASSPHRASE`，签名类型/funder 同现有 live 链路）：
 
 ```bash
-npm run tennis:tail:live -- --interval-ms 15000
+npm run tennis:tail:live
 ```
 
 live 启动时会做一次只读的余额预检：从 deposit wallet 读 pUSD，若低于最便宜
@@ -83,6 +89,8 @@ CLOB 会拒单，先去入金再跑。预检失败只警告，不阻塞。
 | `--order-type GTC\|GTD` | GTC | GTD 需配合 `--rest-seconds` |
 | `--max-iterations N` | 无限 | 跑 N 轮后退出，便于先验收 |
 | `--leagues atp,wta` | atp,wta | 赛事前缀；`all` = 不筛，包含 ITF（无回测证据） |
+| `--interval-ms N` | 10000 | 每场 Gen1 期间的 book 重扫间隔（比分推送仍会即时触发） |
+| `--sports-ws-url URL` | 官方 sports WS | 比分源覆盖，测试/换区用 |
 | `--proxy URL` | 环境变量 | 走本地代理 |
 
 ## 4. 结算与赎回
@@ -107,19 +115,22 @@ CLOB 会拒单，先去入金再跑。预检失败只警告，不阻塞。
 - **价位记忆**：已挂档位从 ledger 恢复，进程重启也不会重复挂同一档；
   venue 拒单（post-only 被拒等）不算已挂，下一轮会重试。
 - **多场隔离**：每笔挂单的 token 只取自该 event 自己的 moneyline market。
-  365Scores 帧要过两道球员名校验（映射赛程时、取到帧后各一次），名字对不上
-  的帧永远不会挂到该 event 上；两场同名/近名的比赛不会互相下单。
+  比分源按 Gamma event 的 `gameId` 过滤（一个 gameId 只对应一场比赛），取到比分后
+  再用球员名做 title/outcome 映射校验；名字对不上的比分永远不会挂到该 event 上，
+  两场同名/近名的比赛不会互相下单。
 - **重复上架去重**：Gamma 若把同一场比赛挂成两个 event（conditionId、token
   集合或球员组合相同），发现阶段只保留第一个，并写 `duplicate_event` 日志，
   避免同一比分源被挂两套梯子。
-- **转写容差**：球员名允许保守的拼写变体（如 365Scores `Abdullah Shelbayh`
+- **转写容差**：球员名允许保守的拼写变体（如 sports feed `Abdullah Shelbayh`
   vs Polymarket `Abedallah Shelbayh`），前提是双方共享一个 4 字符以上的
   family-name token 且只有一处 edit distance ≤ 2 的差异；共享姓氏的不同球员
   （Mirra vs Erika Andreeva）仍然拒绝配对。
-- **监控心跳**：默认每 20 轮（15s 间隔约 5 分钟）写一条 `heartbeat` 日志，
+- **监控心跳**：默认每 20 轮（10s 间隔约 3.5 分钟）写一条 `heartbeat` 日志，
   含 `discovered`（发现场次）、`monitored`（当前有帧）、`neverPolled`
-  （从未配上 365Scores 比分的场次）和 `stale`（超 180s 没帧）。`neverPolled`
+  （从未配上 sports feed 比分的场次）和 `stale`（超 180s 没帧）。`neverPolled`
   非空说明有比赛在监控但拿不到局分，需要本人查看日志而不是默默漏挂。
+- **无 365 回退**：sports feed 断线时实盘不会换用别的比分源（换来的是没对拍过的
+  信号）。feed 挂了就只监控不挂单，等重连；心跳和 `stale` 会把这种情况写进日志。
 
 ## 6. 撤单
 
@@ -144,51 +155,64 @@ venue 未确认撤单时不会释放预留（避免重复挂单）。
   Gen1 无法判定，也没有任何回测样本。
 - 比赛在挂单途中结束/退赛会留下未成交挂单，由对账在终态时释放。
 
-## 8. 与回测的时间对齐（2026-10-04 审计）
+## 8. 与回测的时间对齐（2026-10-04 审计 + 重构）
 
 回测口径（`quote-touch-assumed`，产出 188/0 的那套）：
 
 - **挂单时钟**：归档的 CLOB `book_snapshot`；采集器名义间隔 10s，但实测每个 token
-  的有效快照间隔 **p50 ≈ 20.1s、p90 ≈ 21.4s**（当前库里 104 个 token 序列、1,043 个间隔）。
+  的有效快照间隔 **p50 ≈ 20.1s、p90 ≈ 21.4s**（当时 104 个 token 序列、1,043 个间隔）。
 - **Gen1 来源**：Polymarket 自己的 sports feed（WS 推送，局级比分 `"6-2, 5-2"`）。
-- **挂单条件**：第一笔同时满足 Gen1 且 `bestBid ≥ P`、`bestAsk > P` 的快照。
+- **Gen1 判定**：已拿 `setsToWin-1` 盘 + 当前盘 5-x / 6-5 / 6-6（1-1、2-2 平分决胜盘
+  抢七没有唯一热门方，返回 null）。
+- **挂单条件**：第一笔同时满足 Gen1 且 `bestBid ≥ P`、`bestAsk > P` 的快照；
+  再加上领先方 token 的 bid 不低于另一个 outcome 的 bid（盘口反转保护，新归档上
+  0 次触发）。
 - **成交判定**：挂单之后任一快照出现 `bestAsk ≤ P`（只看价格触达，不建模排队与部分成交）。
 
-实盘链路与之逐项对照：
+实盘链路逐项对照（2026-10-04 重构后）：
 
 | 环节 | 回测 | 实盘 |
 |---|---|---|
-| Gen1 来源 | sports WS 推送 | 365Scores HTTP 轮询（默认 15s） |
-| Gen1 判定 | setsToWin-1 盘 + 5-x/6-5/6-6 | 相同（best-of-5 实盘按盘数自适应；回测只有 best-of-3 样本） |
-| 挂单条件 | bid ≥ P 且 ask > P | 相同 |
-| 重扫时钟 | 每张 book 快照（实测 ~20s） | 每轮 poll（15s）+ 每档独立补挂 |
+| Gen1 来源 | sports WS 推送 | **同一个 feed**（`wss://sports-api.polymarket.com/ws`，按 `gameId` 过滤） |
+| Gen1 判定 | `tennisGen1` | **同一个 `tennisGen1`** |
+| 挂单条件 | bid ≥ P 且 ask > P + 领先方 bid 保护 | 相同（`planTennisTailFromScore`） |
+| 重扫时钟 | 每张 book 快照（实测 ~20s） | 每 10s + 每次比分推送即时扫 |
 | 撤单 | 不撤，持有到结算 | 相同 |
 | 成交 | ask ≤ P 触达假设 | 真实撮合（队列、部分成交） |
+| best-of-5 | 无样本 | 男子大满贯按赛事名排除；女子大满贯 BO3 保留 |
+| 365Scores | 不用于挂单 | 不用于挂单（只在采集器做点级 Gen2 研究） |
 
-**已修的两个系统性偏差**（2026-10-04，提交 `9a0c2c8` 之后）：
+**对拍 harness（常驻测试）**：
 
-1. live 用的 poller 之前带采集器的 60s 心跳去重：分数不变时整轮不返回帧，
-   于是"后挂档位"最长要等 **60s** 才重扫一次 book。现在 live 用 `heartbeatMs: 0`，
-   每 15s 都重扫（比赛结束后帧不再返回，也不会拿旧帧乱挂）。
-2. 对账（venue 只读 GET）原来在 poll 之前 `await`，挂单多时会拖慢关键路径；
-   现在后台执行 + in-flight 去重，不阻塞 signal → book → order。
+- `scripts/research/tennis-gen1-backtest.ts`：归档回放。每个价位仍按"它自己第一个
+  合格快照"入场（旧口径），但入场判定 import 生产用的 `tennisGen1`。
+  `npm run research:tennis-gen1 -- --db data/collector/continuous/tail.sqlite --out /tmp/gen1.json`
+- `tests/research/tennis-gen1-parity.test.ts` + `tests/fixtures/tennis-gen1/*.json`：
+  把真实归档的（sports 比分帧 + CLOB book 快照）同时喂给 (a) 回放脚本和
+  (b) 生产的 `planTennisTailFromScore` 逐快照组合，断言每个价位的入场快照完全一致。
+  当前 fixture `game:6374478`（Curitiba 单打）5 个价位分三批入场
+  （0.80/0.85 → 0.88/0.90 → 0.92），两条路径逐笔一致、且和冻结的期望值一致。
+- 旧 20GB 归档已在 2026-10-04 删除（见 `data/research/old-tail-archive-20261004.md`），
+  文档里的 188/0 无法在本地重算；新库（5 场网球）用于对拍而不是重算旧结论。
+  新库当前回放：20 个默认阶梯入场、4 个触达、0 个领先方保护拦截、结算数据未归档。
 
-**每笔 arm 都写延迟字段**（`logs/tennis-tail.jsonl` 的 `timing`）：
+**每笔 arm 的延迟字段**（`logs/tennis-tail.jsonl` 的 `timing`）：
 
-- `signalAgeMs`：365Scores 帧抓完 → 开始扫 book 的间隔（含轮询队列）；
+- `score` / `gen1Kind`：这次 arm 依据的比分与 Gen1 类型（`game` / `tiebreak`）；
+- `signalAgeMs`：sports feed 首次可见该比分 → 开始扫 book 的间隔；
 - `orderbookMs`：扫 book 耗时（两本书并行）；
 - `sweepMs` / `submitMs`：到 arm / 到提交完成。
 
-实测网络延迟（2026-10-04 03:20，走本机代理，n=8）：365Scores 单场比分抓取
-p50 0.77s / p90 0.95s；CLOB 单本书 p50 0.91s / p90 1.12s。
+实测网络延迟（2026-10-04 03:20，走本机代理，n=8）：CLOB 单本书
+p50 0.91s / p90 1.12s；sports feed 是服务端主动推送，没有轮询间隔。
 
-**仍然存在的偏差**：
+**仍然存在的偏差（诚实清单）**：
 
-- **信号源不同**：回测用 sports feed，实盘用 365Scores。抽查 3 场、6 个相同比分状态，
-  365Scores 首次可见时间相对 sports feed 为 **−26.2s ~ +20.4s**（中位约 −19s，
-  即多数情况下 365 更早；但有一个状态晚 20.4s）。也就是说挂单时点相对回测会前后漂移
-  最多约 20s——与回测自身 ~20s 的 book 快照粒度同量级。
-- **采样粒度**：实盘 15s vs 回测 ~20s；实盘比赛多时 365 轮询会轮转，>24 场每小时段
-  可能隔 2 轮（约 30s）才 poll 到某一场。
-- **成交模型**：回测是价格触达假设，实盘有真实排队与部分成交；回测的 188 笔是
-  "至少这些价格被触达"，实盘吃到的单可能少于/多于该上界（队列靠后时可能触达却没成交）。
+- **采样粒度**：实盘每 10s 扫一次，比分变化即时扫 → 只可能比回测 ~20s 网格**更早**
+  入场。回测网格是采集限制而不是策略定义；每笔 arm 都带时间戳，可以逐笔核对。
+- **两个 feed 的时钟**：实盘用推送时刻的比分 + 当次 HTTP book；回测用归档快照时刻的
+  比分 + 该快照。两者都受各自延迟影响，book 抓取实测 p50 0.91s。
+- **成交模型**：回测是价格触达假设，实盘有真实排队与部分成交。回测的"触达"是上界，
+  实盘吃到的单可能更少（也可能因队列位置更靠前而更多）。
+- **旧归档已删**：188/0 是删除前记录的结论，本地无法重算；现在的证据是
+  冻结 fixture 上的回测/实盘逐笔对拍 + 采集器持续积累的新样本。

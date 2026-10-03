@@ -6,7 +6,8 @@
 import { appendFile } from "node:fs/promises";
 import { discoverSportsEvents, type CatalogDependencies } from "../collector/catalog.js";
 import type { CollectorEvent } from "../collector/types.js";
-import { TennisPointsPoller, SCORES365_BASE_URL, tennisNameKey } from "../collector/tennis-points.js";
+import { createPublicStreams, type PublicStreamsOptions } from "../collector/streams.js";
+import { tennisNameKey } from "../collector/tennis-points.js";
 import type { OrderbookSnapshot } from "../domain/types.js";
 import { fetchJson } from "../polymarket/http.js";
 import { normalizeOrderbook, type RawOrderbook } from "../polymarket/clob.js";
@@ -17,6 +18,7 @@ import {
   type TennisTailMarket
 } from "./tennis-tail-orchestrator.js";
 import { runTennisTailWatch, type TennisTailArmRecord, type TennisTailEvent } from "./tennis-tail-live.js";
+import { TennisSportsScoreBoard } from "./tennis-sports-score.js";
 import { LiveExecutor, getLiveOrder, liveConfigFromEnv, type LiveOrderType } from "./live-executor.js";
 import { PENDING_SUBMISSION_PREFIX } from "../persistence/ledger.js";
 import { readPusdBalance } from "./balance.js";
@@ -27,7 +29,9 @@ const TENNIS_TAG_ID = "864";
 const DEFAULT_LEAGUES = ["atp", "wta"];
 const DEFAULT_LEDGER_FILE = "data/execution/tennis-tail-ledger.json";
 const DEFAULT_LOG_FILE = "logs/tennis-tail.jsonl";
-const DEFAULT_POLL_INTERVAL_MS = 15_000;
+// The archived book snapshots arrived at p50 ~20s; the live sweep runs on a
+// 10s cadence and again immediately after every sports-feed score update.
+const DEFAULT_BOOK_SCAN_MS = 10_000;
 
 export interface TennisTailCliOptions {
   dryRun: boolean;
@@ -41,7 +45,8 @@ export interface TennisTailCliOptions {
   logFile: string;
   proxyUrl?: string;
   clobHost: string;
-  scores365BaseUrl: string;
+  /** Override for the Polymarket sports WebSocket (tests/regions). */
+  sportsWsUrl?: string;
   /** Tournament prefixes to trade; the backtest only has ATP/WTA evidence. */
   leagues: string[];
 }
@@ -95,17 +100,26 @@ async function main(argv: string[]): Promise<void> {
   const request = (url: string, requestOptions?: Parameters<typeof fetchJson>[1]): Promise<unknown> =>
     fetchJson(url, { ...requestOptions, ...(options.proxyUrl ? { proxyUrl: options.proxyUrl } : {}) });
   const deps: CatalogDependencies = { request };
-  const poller = new TennisPointsPoller({
-    request,
-    baseUrl: options.scores365BaseUrl,
-    // The collector deduplicates unchanged frames (score-change / 60s heartbeat)
-    // because it journals them. The live watch needs the *book* re-evaluated on
-    // every poll: a level that only becomes restable later must be armed at the
-    // next sweep, not up to 60s later. heartbeatMs = 0 disables that dedupe;
-    // non-live frames are still dropped, so a finished match stops sweeping.
-    heartbeatMs: 0,
-    onError: (error, detail) => { void logRecord(options, { kind: "error", eventSlug: `scores365:${detail}`, details: describe(error) }); }
-  });
+  // The backtest consumed Polymarket's own sports feed; live trades off the
+  // same `gameId`-keyed WS frames. Nothing is derived from 365Scores here: that
+  // source stays in the collector for the point-level (Gen2) research path.
+  const scoreBoard = new TennisSportsScoreBoard();
+  scoreBoard.selectMonitoredGameIds([]);
+  const streamOptions: PublicStreamsOptions = {
+    journal: { record: () => undefined },
+    connectSports: true,
+    onFrame: (frame) => {
+      if (frame.source !== "sports") return;
+      scoreBoard.ingest(frame.frame);
+    },
+    onError: (error) => {
+      void logRecord(options, { kind: "error", eventSlug: "sports-stream", details: describe(error) });
+    }
+  };
+  if (options.sportsWsUrl) streamOptions.sportsUrl = options.sportsWsUrl;
+  if (options.proxyUrl) streamOptions.proxyUrl = options.proxyUrl;
+  const streams = createPublicStreams(streamOptions);
+  await streams.start([]);
   const ledger = new LiveLedger(options.ledgerFile);
   const executor = new LiveExecutor(liveConfigFromEnv(process.env));
   const settlement = createAutoSettlementMonitor({ env: process.env, ledger });
@@ -113,14 +127,33 @@ async function main(argv: string[]): Promise<void> {
   let stopping = false;
   process.on("SIGINT", () => {
     stopping = true;
-    console.log("\nSIGINT received; stopping after the current poll. Resting orders remain on the book; use --cancel-order flow to pull them.");
+    // Waking the score wait lets the watch loop observe `shouldStop` at once;
+    // an in-flight sweep still finishes before the loop returns.
+    scoreBoard.dispose();
+    console.log("\nSIGINT received; stopping after the current sweep. Resting orders remain on the book; use --cancel-order flow to pull them.");
   });
 
   if (settlement) console.log(JSON.stringify({ at: new Date().toISOString(), autoRedeem: "enabled" }));
   const summary = await runTennisTailWatch(
     {
-      discover: () => discoverTennisTailEvents(deps, options.leagues),
-      pollPoints: (targets) => stopping ? Promise.resolve([]) : poller.poll(targets),
+      discover: () => stopping ? Promise.resolve([]) : discoverTennisTailEvents(deps, options.leagues),
+      latestScore: (gameId) => {
+        const frame = scoreBoard.latestFor(gameId);
+        if (!frame) return undefined;
+        return {
+          score: frame.score,
+          homeName: frame.homeName,
+          awayName: frame.awayName,
+          observedAtMs: frame.observedAtMs,
+          receivedAtMs: frame.receivedAtMs,
+          live: frame.live,
+          ended: frame.ended
+        };
+      },
+      selectScoreGameIds: (gameIds) => scoreBoard.selectMonitoredGameIds(gameIds),
+      scoreVersion: () => scoreBoard.version,
+      waitForScore: (sinceVersion, timeoutMs) => scoreBoard.waitForVersionChange(sinceVersion, timeoutMs),
+      shouldStop: () => stopping,
       fetchOrderbook: (tokenId) => fetchTennisOrderbook(tokenId, options),
       placeLadder: (levels, executeOptions) => executor.placeRestingLadder(levels, executeOptions),
       ledger,
@@ -140,6 +173,8 @@ async function main(argv: string[]): Promise<void> {
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {})
     }
   );
+  await streams.stop().catch(() => undefined);
+  scoreBoard.dispose();
   await settlement?.waitForIdle();
   console.log(JSON.stringify({
     at: new Date().toISOString(),
@@ -212,6 +247,28 @@ export async function discoverTennisTailEvents(
     // ITF has book data but no score data in the archive (0 backtest samples),
     // so it is excluded unless the operator explicitly opts in.
     if (allowed.size > 0 && !allowed.has(tennisLeagueOf(event.eventSlug))) continue;
+    // Men's Grand Slams are best-of-five: zero archived samples and a different
+    // set clock than the best-of-three Gen1 rule. Women's Slams stay.
+    if (isBestOfFiveTennisEvent(event)) {
+      console.warn(JSON.stringify({
+        at: new Date().toISOString(),
+        kind: "best_of_five_event",
+        eventSlug: event.eventSlug,
+        details: "skipped a best-of-five tennis event (no archived samples)"
+      }));
+      continue;
+    }
+    // The live Gen1 trigger is the Polymarket sports feed keyed by gameId; an
+    // event without one can never be scored, so trading it would be blind.
+    if (event.gameId === null) {
+      console.warn(JSON.stringify({
+        at: new Date().toISOString(),
+        kind: "missing_sports_game_id",
+        eventSlug: event.eventSlug,
+        details: "skipped a tennis event without a Polymarket sports game id"
+      }));
+      continue;
+    }
     const tokenKey = [...market.tokenIds].sort().join(" ");
     const pairingKey = tennisPairingKey(event.title);
     const duplicate = seenConditionIds.has(market.conditionId)
@@ -229,9 +286,34 @@ export async function discoverTennisTailEvents(
     seenConditionIds.add(market.conditionId);
     seenTokenSets.add(tokenKey);
     if (pairingKey !== null) seenPairings.add(pairingKey);
-    discovered.push({ eventSlug: event.eventSlug, eventTitle: event.title, markets: [market] });
+    discovered.push({
+      eventSlug: event.eventSlug,
+      eventTitle: event.title,
+      gameId: event.gameId,
+      setsToWin: 2,
+      markets: [market]
+    });
   }
   return discovered;
+}
+
+const BEST_OF_FIVE_TOURNAMENT = /(australian open|roland garros|french open|wimbledon|us open)/i;
+
+/**
+ * True for a men's Grand Slam singles event. Gamma does not publish a best-of
+ * field, so the tournament name is the discriminator; anything that is not
+ * explicitly WTA is treated as best-of-five there and excluded. The whole
+ * archived backtest universe is best-of-three, so guessing would be worse.
+ */
+export function isBestOfFiveTennisEvent(event: CollectorEvent): boolean {
+  const sport = (event.sport ?? "").trim().toLowerCase();
+  if (sport === "wta") return false;
+  const metadata = event.raw.metadata;
+  const league = typeof metadata === "object" && metadata !== null && !Array.isArray(metadata)
+    ? String((metadata as Record<string, unknown>).league ?? "")
+    : "";
+  const label = [event.title, league, ...event.tags].join(" ");
+  return BEST_OF_FIVE_TOURNAMENT.test(label);
 }
 
 /** Player-pairing identity of a title, ignoring the tournament prefix. */
@@ -339,11 +421,10 @@ export function cliOptions(flags: ReadonlyMap<string, string | true>): TennisTai
     },
     orderType,
     postOnly: flagBoolean(flags, "post-only") ?? true,
-    intervalMs: numberFlag(flags, "interval-ms") ?? DEFAULT_POLL_INTERVAL_MS,
+    intervalMs: numberFlag(flags, "interval-ms") ?? DEFAULT_BOOK_SCAN_MS,
     ledgerFile: String(flags.get("ledger-file") ?? DEFAULT_LEDGER_FILE),
     logFile: String(flags.get("log-file") ?? DEFAULT_LOG_FILE),
     clobHost: String(flags.get("clob-host") ?? process.env.POLY_CLOB_HOST ?? "https://clob.polymarket.com"),
-    scores365BaseUrl: String(flags.get("scores365-base-url") ?? SCORES365_BASE_URL),
     leagues: [...DEFAULT_LEAGUES]
   };
   const restSeconds = numberFlag(flags, "rest-seconds");
@@ -355,6 +436,8 @@ export function cliOptions(flags: ReadonlyMap<string, string | true>): TennisTai
     const leagues = leaguesArg.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
     options.leagues = leagues.includes("all") ? [] : leagues;
   }
+  const sportsWsUrl = flags.get("sports-ws-url") ?? process.env.POLY_SPORTS_WS_URL;
+  if (typeof sportsWsUrl === "string" && sportsWsUrl.trim()) options.sportsWsUrl = sportsWsUrl.trim();
   const proxyUrl = flags.get("proxy") ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? process.env.https_proxy ?? process.env.http_proxy;
   if (typeof proxyUrl === "string" && proxyUrl.trim()) options.proxyUrl = proxyUrl.trim();
   return options;

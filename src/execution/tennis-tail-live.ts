@@ -3,10 +3,13 @@
  *
  * Responsibilities kept here (the I/O shell):
  *  - discover the live tennis moneyline markets;
- *  - poll 365Scores point frames for those events;
- *  - while Gen1 holds, sweep the ladder and submit missing levels as they
- *    become restable (the backtest arms each level at its own first qualifying
- *    second, so a single one-shot sweep would diverge);
+ *  - read the latest Polymarket sports-feed score for each event (the same
+ *    game-granularity feed the backtest replayed) and derive Gen1 with the
+ *    shared `src/domain/tennis-gen1.ts` rule;
+ *  - while Gen1 holds, sweep the ladder at a bounded cadence and immediately
+ *    after every score update, submitting missing levels as they become
+ *    restable (the backtest arms each level at its own first qualifying
+ *    snapshot, so a single one-shot sweep would diverge);
  *  - persist every level through the write-ahead ledger so a crash cannot
  *    silently re-arm the same event.
  *
@@ -15,13 +18,12 @@
  * fakes in tests.
  */
 import type { OrderbookSnapshot, BuyTradeDecision, TradeResult } from "../domain/types.js";
-import type { TennisPointPollResult, TennisPointsPollTarget } from "../collector/tennis-points.js";
 import { sportsTakerFeePerShare, netReturnRate } from "../domain/fees.js";
+import { tennisGen1, type TennisGen1Decision } from "../domain/tennis-gen1.js";
 import type { LiveLedger } from "../persistence/ledger.js";
 import {
-  isTennisTailEntry,
   orderbookBestBid,
-  planTennisTailLadder,
+  planTennisTailFromScore,
   resolveTennisTailToken,
   type TennisTailLadderConfig,
   type TennisTailLadderPlan,
@@ -35,40 +37,67 @@ import type { LiveExecuteOptions, LiveRestingLevel, LiveOrderType } from "./live
 export interface TennisTailEvent {
   eventSlug: string;
   eventTitle: string;
+  /** Polymarket sports-feed game id; the score board is keyed by it. */
+  gameId: string;
+  /**
+   * Winner's set target: 2 for best-of-three (every archived sample), 3 for
+   * best-of-five. Grand Slam men's events are excluded by discovery instead.
+   */
+  setsToWin?: number;
   markets: readonly TennisTailMarket[];
 }
 
 /**
- * Periodic liveness snapshot. A discovered event that never produces a frame
- * (365Scores name mismatch, feed outage) is otherwise invisible: nothing is
+ * One score observation from the sports feed, as the live loop sees it.
+ * `observedAtMs` is when this score first became visible (the moment the
+ * backtest would have used it); `receivedAtMs` is the last repeat of the same
+ * score, which keeps liveness detection honest across long games.
+ */
+export interface TennisTailScoreObservation {
+  score: string;
+  homeName: string;
+  awayName: string;
+  observedAtMs: number;
+  receivedAtMs: number;
+  live: boolean;
+  ended: boolean;
+}
+
+/**
+ * Periodic liveness snapshot. A discovered event that never produces a score
+ * frame (game-id mismatch, feed outage) is otherwise invisible: nothing is
  * armed and nothing is logged, so the operator cannot tell monitoring apart
  * from a silent miss.
  */
 export interface TennisTailHeartbeat {
   iterations: number;
   discovered: number;
-  /** Frames returned by the poller this iteration. */
+  /** Discovered events with a score observation this iteration. */
   polled: number;
-  /** Discovered events with a fresh 365Scores frame. */
+  /** Discovered events whose score frame arrived within the staleness window. */
   monitored: number;
   levelsPlaced: number;
-  /** Discovered events that have never produced a 365Scores frame. */
+  /** Discovered events that have never produced a score frame. */
   neverPolled: readonly string[];
-  /** Events whose last frame is older than the staleness window. */
+  /** Events whose last score frame is older than the staleness window. */
   stale: readonly string[];
 }
 
 /**
- * Latency of one arm, in the same clock as `frame.observedAtMs` (the moment the
- * 365Scores frame was parsed). The backtest arms on a 10s book-snapshot grid
- * with the score pushed by the sports feed; these fields measure how far the
- * live HTTP-poll path is from that grid on every real arm.
+ * Latency of one arm, in the same clock as `observation.observedAtMs` (the
+ * moment the sports feed first published that score). The backtest arms on the
+ * archived book-snapshot grid with the same score; these fields measure how far
+ * the live path is from that grid on every real arm.
  */
 export interface TennisTailArmTiming {
-  frameObservedAtMs: number;
+  scoreObservedAtMs: number;
   sweepStartedAtMs: number;
-  /** How old the 365Scores frame was when its sweep started. */
+  /** How old the score observation was when its sweep started. */
   signalAgeMs: number;
+  /** The sports-feed score the arm was decided on. */
+  score: string;
+  /** `game` for 5-x / 6-5, `tiebreak` for a 6-6 set. */
+  gen1Kind: "game" | "tiebreak";
   /** Sweep start -> order book snapshot(s) available. */
   orderbookMs: number;
   /** Sweep start -> arm emitted. */
@@ -89,7 +118,20 @@ export interface TennisTailArmRecord {
 
 export interface TennisTailLiveDeps {
   discover: () => Promise<readonly TennisTailEvent[]>;
-  pollPoints: (targets: readonly TennisPointsPollTarget[]) => Promise<readonly TennisPointPollResult[]>;
+  /** Latest sports-feed score for one game id, when the feed has delivered it. */
+  latestScore: (gameId: string) => TennisTailScoreObservation | undefined;
+  /** Restricts feed wake-ups to the discovered events. */
+  selectScoreGameIds?: (gameIds: readonly string[]) => void;
+  /**
+   * Monotonic score-feed revision. Together with `waitForScore` this lets the
+   * loop sweep immediately when a monitored score changes and re-run without
+   * sleeping when an update lands mid-sweep.
+   */
+  scoreVersion?: () => number;
+  /** Resolves on the next monitored score change, or after `timeoutMs`. */
+  waitForScore?: (sinceVersion: number, timeoutMs: number) => Promise<void>;
+  /** When it flips true the loop finishes the current sweep and returns. */
+  shouldStop?: () => boolean;
   fetchOrderbook: (tokenId: string) => Promise<OrderbookSnapshot>;
   /** Required unless `dryRun` is set. */
   placeLadder?: (levels: readonly LiveRestingLevel[], options: LiveExecuteOptions) => Promise<TradeResult[]>;
@@ -107,11 +149,17 @@ export interface TennisTailLiveOptions {
   restSeconds?: number;
   postOnly?: boolean;
   dryRun: boolean;
+  /**
+   * Book sweep cadence while Gen1 holds. The archived book snapshots arrived
+   * at p50 ~20s; sweeping faster can only arm earlier, never later.
+   */
   intervalMs: number;
+  /** How often discovery re-reads Gamma (default 30s). */
+  discoveryIntervalMs?: number;
   maxIterations?: number;
   /**
    * Safety cap on how many times one event may be re-swept while Gen1 holds.
-   * The default covers a full hour at the 15s poll cadence; the sweep normally
+   * The default covers a full hour at the 10s scan cadence; the sweep normally
    * stops early once every qualifying level is resting or the cap is reached.
    */
   maxSweepsPerEvent?: number;
@@ -119,7 +167,7 @@ export interface TennisTailLiveOptions {
   reconcileEveryIterations?: number;
   /** Iterations between liveness heartbeats; 0 disables them (default 20). */
   heartbeatEveryIterations?: number;
-  /** How long an event may go without a frame before it is reported stale. */
+  /** How long an event may go without a score frame before it is reported stale. */
   heartbeatStaleMs?: number;
 }
 
@@ -139,14 +187,22 @@ interface EventArmState {
   placedPrices: Set<number>;
   sweeps: number;
   done: boolean;
-  /** Last skip reason, so a 15s poll does not repeat the same log line. */
+  /** Last skip reason, so a 10s sweep does not repeat the same log line. */
   lastSkip?: string;
+  /** `observedAtMs` of the score the last sweep was decided on. */
+  lastScoreAtMs: number;
+  /** Wall-clock deadline of the next cadence sweep while Gen1 holds. */
+  nextScanAtMs: number;
 }
 
-const DEFAULT_INTERVAL_MS = 15_000;
+const DEFAULT_INTERVAL_MS = 10_000;
+const DEFAULT_DISCOVERY_INTERVAL_MS = 30_000;
 const DEFAULT_MAX_SWEEPS = 240;
 const DEFAULT_HEARTBEAT_ITERATIONS = 20;
 const DEFAULT_HEARTBEAT_STALE_MS = 180_000;
+// A timer that fires a few milliseconds early must not push the next sweep a
+// whole cadence into the future.
+const SCAN_TIMER_GRACE_MS = 100;
 
 export async function runTennisTailWatch(
   deps: TennisTailLiveDeps,
@@ -157,14 +213,18 @@ export async function runTennisTailWatch(
   }
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const scanIntervalMs = options.intervalMs >= 0 ? options.intervalMs : DEFAULT_INTERVAL_MS;
+  const discoveryIntervalMs = options.discoveryIntervalMs ?? DEFAULT_DISCOVERY_INTERVAL_MS;
   const maxIterations = options.maxIterations ?? Number.POSITIVE_INFINITY;
   const maxSweepsPerEvent = options.maxSweepsPerEvent ?? DEFAULT_MAX_SWEEPS;
   const reconcileEveryIterations = options.reconcileEveryIterations ?? 8;
   const heartbeatEveryIterations = options.heartbeatEveryIterations ?? DEFAULT_HEARTBEAT_ITERATIONS;
   const heartbeatStaleMs = options.heartbeatStaleMs ?? DEFAULT_HEARTBEAT_STALE_MS;
   const states = new Map<string, EventArmState>();
-  /** eventSlug -> timestamp of its last frame; 0 means never matched. */
+  /** eventSlug -> timestamp of its last score frame; 0 means never matched. */
   const monitoring = new Map<string, number>();
+  let events: readonly TennisTailEvent[] = [];
+  let nextDiscoveryAtMs = Number.NEGATIVE_INFINITY;
   // Reconciliation is read-only venue I/O whose results only matter to the next
   // sweep. Run it in the background so a slow venue read cannot delay the
   // signal -> book -> order critical path (the backtest has no such step).
@@ -192,53 +252,51 @@ export async function runTennisTailWatch(
   while (summary.iterations < maxIterations) {
     summary.iterations += 1;
     if (deps.reconcile && (summary.iterations - 1) % reconcileEveryIterations === 0) kickReconcile();
-    let events: readonly TennisTailEvent[];
-    try {
-      events = await deps.discover();
-    } catch (error) {
-      summary.errors += 1;
-      await emit(deps, { kind: "error", eventSlug: "-", details: `discovery failed: ${describe(error)}` });
-      if (summary.iterations >= maxIterations) break;
-      await sleep(options.intervalMs >= 0 ? options.intervalMs : DEFAULT_INTERVAL_MS);
-      continue;
-    }
-    summary.discoveredEvents = events.length;
-    const bySlug = new Map(events.map((event) => [event.eventSlug, event]));
-    const targets: TennisPointsPollTarget[] = events.map((event) => ({
-      eventSlug: event.eventSlug,
-      title: event.eventTitle
-    }));
-
-    for (const event of events) {
-      if (!monitoring.has(event.eventSlug)) monitoring.set(event.eventSlug, 0);
-    }
-    let frames: readonly TennisPointPollResult[] = [];
-    if (targets.length > 0) {
+    const iterationStartedAtMs = now();
+    if (iterationStartedAtMs >= nextDiscoveryAtMs) {
       try {
-        frames = await deps.pollPoints(targets);
+        events = await deps.discover();
       } catch (error) {
         summary.errors += 1;
-        await emit(deps, { kind: "error", eventSlug: "-", details: `poll failed: ${describe(error)}` });
-        frames = [];
+        await emit(deps, { kind: "error", eventSlug: "-", details: `discovery failed: ${describe(error)}` });
+        if (summary.iterations >= maxIterations) break;
+        await sleep(scanIntervalMs);
+        continue;
       }
-      const observedAt = now();
-      for (const frame of frames) {
-        if (monitoring.has(frame.eventSlug)) monitoring.set(frame.eventSlug, observedAt);
-        const state = states.get(frame.eventSlug) ?? { placedPrices: new Set<number>(), sweeps: 0, done: false };
-        states.set(frame.eventSlug, state);
-        if (state.done) continue;
-        const event = bySlug.get(frame.eventSlug);
-        if (!event) continue;
-        await sweepEvent(deps, options, event, frame, state, summary, now, maxSweepsPerEvent);
+      summary.discoveredEvents = events.length;
+      nextDiscoveryAtMs = iterationStartedAtMs + discoveryIntervalMs;
+      deps.selectScoreGameIds?.(events.map((event) => event.gameId));
+      for (const event of events) {
+        if (!monitoring.has(event.eventSlug)) monitoring.set(event.eventSlug, 0);
       }
+    }
+
+    const versionBeforeSweeps = deps.scoreVersion?.() ?? 0;
+    const sweepStartedAtMs = now();
+    for (const event of events) {
+      const state = states.get(event.eventSlug)
+        ?? { placedPrices: new Set<number>(), sweeps: 0, done: false, lastScoreAtMs: 0, nextScanAtMs: 0 };
+      states.set(event.eventSlug, state);
+      const observation = deps.latestScore(event.gameId);
+      if (!observation) continue;
+      monitoring.set(event.eventSlug, observation.receivedAtMs);
+      if (state.done || observation.ended) continue;
+      const scoreChanged = observation.observedAtMs > state.lastScoreAtMs;
+      const cadenceDue = sweepStartedAtMs + SCAN_TIMER_GRACE_MS >= state.nextScanAtMs;
+      if (!scoreChanged && !cadenceDue) continue;
+      state.lastScoreAtMs = Math.max(state.lastScoreAtMs, observation.observedAtMs);
+      state.nextScanAtMs = sweepStartedAtMs + scanIntervalMs;
+      await sweepEvent(deps, options, event, observation, state, summary, now, maxSweepsPerEvent);
     }
 
     if (heartbeatEveryIterations > 0 && summary.iterations % heartbeatEveryIterations === 0) {
       const observedAt = now();
       const neverPolled: string[] = [];
       const stale: string[] = [];
+      let polled = 0;
       for (const event of events) {
         const lastFrameAt = monitoring.get(event.eventSlug) ?? 0;
+        if (lastFrameAt > 0) polled += 1;
         if (lastFrameAt === 0) neverPolled.push(event.eventSlug);
         else if (observedAt - lastFrameAt > heartbeatStaleMs) stale.push(event.eventSlug);
       }
@@ -246,11 +304,11 @@ export async function runTennisTailWatch(
       await emit(deps, {
         kind: "heartbeat",
         eventSlug: "-",
-        details: `monitoring ${monitored}/${events.length} events; ${frames.length} frames this sweep; ${neverPolled.length} never matched a 365Scores game; ${stale.length} stale`,
+        details: `monitoring ${monitored}/${events.length} events; ${polled} with a score frame; ${neverPolled.length} never matched a sports game; ${stale.length} stale`,
         heartbeat: {
           iterations: summary.iterations,
           discovered: events.length,
-          polled: frames.length,
+          polled,
           monitored,
           levelsPlaced: summary.levelsPlaced,
           neverPolled,
@@ -259,8 +317,22 @@ export async function runTennisTailWatch(
       });
     }
 
+    // A signal handler can end the watch after the in-flight sweep settles;
+    // resting orders are intentionally left on the book.
+    if (deps.shouldStop?.()) break;
     if (summary.iterations >= maxIterations) break;
-    await sleep(options.intervalMs >= 0 ? options.intervalMs : DEFAULT_INTERVAL_MS);
+    const discoveryDueInMs = Math.max(0, nextDiscoveryAtMs - now());
+    const sleepMs = Math.max(0, Math.min(scanIntervalMs, discoveryDueInMs));
+    const versionAfterSweeps = deps.scoreVersion?.() ?? 0;
+    if (versionAfterSweeps !== versionBeforeSweeps) continue; // score landed mid-sweep
+    if (deps.waitForScore) {
+      await Promise.race([
+        sleep(sleepMs),
+        deps.waitForScore(versionAfterSweeps, sleepMs)
+      ]);
+    } else {
+      await sleep(sleepMs);
+    }
   }
 
   return summary;
@@ -270,15 +342,18 @@ async function sweepEvent(
   deps: TennisTailLiveDeps,
   options: TennisTailLiveOptions,
   event: TennisTailEvent,
-  frame: TennisPointPollResult,
+  observation: TennisTailScoreObservation,
   state: EventArmState,
   summary: TennisTailLiveSummary,
   now: () => number,
   maxSweeps: number
 ): Promise<void> {
-  const signal = frame.signal;
-  if (!signal || !isTennisTailEntry(signal)) return; // nothing to arm; resting levels stay put
+  const setsToWin = event.setsToWin ?? 2;
   const sweepStartedAtMs = now();
+  // The shared Gen1 rule decides whether there is anything to arm at all; a
+  // non-Gen1 score stays silent and resting levels stay put.
+  const decision = tennisGen1(observation.score, setsToWin);
+  if (!decision) return;
   const market = event.markets.find((candidate) => candidate.marketType === "moneyline");
   if (!market) {
     state.done = true;
@@ -292,10 +367,13 @@ async function sweepEvent(
   }
   state.sweeps += 1;
 
-  const resolved = resolveTennisTailToken(market, frame.frame, signal.favored);
+  const header = { homeName: observation.homeName, awayName: observation.awayName };
+  // Resolve the favoured token before fetching books: the backtest's Gen1 rule
+  // names the side, the title/outcome mapping names the token.
+  const resolved = resolveDecisionToken(market, header, decision);
   if (!resolved) {
     state.done = true;
-    await recordSkip(deps, summary, event.eventSlug, "no outcome maps to the 365Scores favoured side");
+    await recordSkip(deps, summary, event.eventSlug, "no outcome maps to the sports-feed favoured side");
     return;
   }
 
@@ -328,10 +406,12 @@ async function sweepEvent(
   }
 
   const committed = await committedNotional(deps.ledger, event.eventSlug, now());
-  const planned: TennisTailPlanResult = planTennisTailLadder({
+  const planned: TennisTailPlanResult = planTennisTailFromScore({
     market,
-    frame: frame.frame,
-    signal,
+    score: observation.score,
+    setsToWin,
+    homeName: observation.homeName,
+    awayName: observation.awayName,
     orderbook,
     config: options.config,
     committedEventNotional: committed.event,
@@ -344,7 +424,7 @@ async function sweepEvent(
     if (planned.reason === "NOT_GEN1") return; // not an entry state; nothing to report
     if (planned.reason === "NO_NEW_LEVELS") {
       // Every level restable *right now* is already resting, but the backtest
-      // arms each level at its own first qualifying second: a quiet poll must
+      // arms each level at its own first qualifying snapshot: a quiet sweep must
       // not stop a higher level that can still become restable before the set
       // ends. The per-event sweep cap bounds the retries.
       return;
@@ -355,7 +435,7 @@ async function sweepEvent(
       return;
     }
     // ORDERBOOK_UNRESTABLE / NOT_MARKET_LEADER: the backtest arms each level at
-    // its own first qualifying second, so keep sweeping on later polls.
+    // its own first qualifying snapshot, so keep sweeping on later polls.
     await recordSkip(deps, summary, event.eventSlug, `${planned.reason}: ${planned.details}`, state);
     return;
   }
@@ -365,9 +445,11 @@ async function sweepEvent(
   delete state.lastSkip;
 
   const timing: TennisTailArmTiming = {
-    frameObservedAtMs: frame.frame.observedAtMs,
+    scoreObservedAtMs: observation.observedAtMs,
     sweepStartedAtMs,
-    signalAgeMs: Math.max(0, sweepStartedAtMs - frame.frame.observedAtMs),
+    signalAgeMs: Math.max(0, sweepStartedAtMs - observation.observedAtMs),
+    score: observation.score,
+    gen1Kind: decision.kind,
     orderbookMs: Math.max(0, orderbookReadyAtMs - sweepStartedAtMs),
     sweepMs: Math.max(0, now() - sweepStartedAtMs)
   };
@@ -393,6 +475,16 @@ async function sweepEvent(
     });
   }
 }
+
+/** Token for a Gen1 decision's favoured side, when the title maps exactly one. */
+function resolveDecisionToken(
+  market: TennisTailMarket,
+  header: { homeName: string; awayName: string },
+  decision: TennisGen1Decision
+): { tokenId: string; outcome: string; outcomeIndex: number } | null {
+  return resolveTennisTailToken(market, header, decision.side);
+}
+
 
 /**
  * Ladder prices already resting (or filled) for this event/token. Rejected
@@ -524,7 +616,7 @@ async function recordSkip(
 ): Promise<void> {
   summary.skipped += 1;
   // Waiting for a level to become restable is the normal case; only report the
-  // transition so a long Gen1 does not write the same line every poll.
+  // transition so a long Gen1 does not write the same line every sweep.
   if (state && state.lastSkip === details) return;
   if (state) state.lastSkip = details;
   await emit(deps, { kind: "skipped", eventSlug, details });
